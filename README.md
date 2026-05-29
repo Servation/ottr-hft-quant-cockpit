@@ -159,3 +159,9 @@ The OTTR AI agents are **LLM-provider-agnostic** and do not use default hardcode
 ### 4. Desktop Batch Launcher
 - A launcher batch script `run_crypto_bot.bat` is generated on the Desktop to launch the Java engine, FastAPI gateway, and Vite React SPA dev server in separate, logs-enabled command prompt windows, then auto-opens browser dashboard.
 
+### 5. Enhanced Live Equity Charting
+- **Interactive Timeframes**: Added selector buttons to switch the equity chart between `SEC` (seconds), `MIN` (minutes), `HOUR` (hours), `DAY` (days), and `WEEK` (weeks).
+- **Time-based X-Axis**: Displays real-time, user-friendly localized timestamp labels on the X-axis instead of arbitrary index values.
+- **Smart Aggregation**: Employs client-side downsampling to aggregate the master tick list (supporting up to 2,000 points) into the chosen intervals, providing a clear visualization of equity performance over time.
+- **Larger Layout**: The main chart widget height has been increased to `350px` to offer a premium, highly readable terminal interface.
+
