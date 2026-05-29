@@ -30,14 +30,58 @@ class TraderAgent:
         except Exception:
             return 100000.0  # Default fallback portfolio value
 
-    def select_execution_path(self, confidence: float, order_value_usd: float) -> str:
+    async def estimate_execution_slippage(self, symbol: str, side: str, quantity: float, mid_price: float) -> float:
         """
-        Selects execution path: DIRECT for high confidence/smaller sizes,
-        VWAP/TWAP for larger sizes or medium confidence.
+        Simulates filling a market order of the specified side and quantity against
+        the Java matching engine's order book depth to estimate slippage percentage.
+        Returns slippage as a decimal (e.g. 0.0005 for 0.05% slippage).
         """
-        if confidence >= 0.8 and order_value_usd < 2500:
+        try:
+            url = f"{settings.java_engine_url}/api/v1/orderbook/{symbol}"
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    data = res.json()
+                    levels = data.get("asks" if side == "BUY" else "bids", [])
+                    if not levels:
+                        return 0.0005 # Default baseline 0.05%
+                    
+                    remaining = quantity
+                    filled_val = 0.0
+                    for level in levels:
+                        l_price = float(level.get("price", 0))
+                        l_qty = float(level.get("quantity", 0))
+                        
+                        take = min(remaining, l_qty)
+                        filled_val += take * l_price
+                        remaining -= take
+                        if remaining <= 1e-6:
+                            break
+                            
+                    if remaining > 0.0:
+                        # Reached end of book, add simulated slippage for unfilled part
+                        filled_val += remaining * (mid_price * (1.05 if side == "BUY" else 0.95))
+                    
+                    avg_price = filled_val / quantity
+                    slippage = abs(avg_price - mid_price) / mid_price
+                    return slippage
+        except Exception as e:
+            logger.warning(f"Failed to estimate execution slippage from matching engine order book: {e}")
+        
+        # Fallback simulated slippage based on size
+        est_base = 0.0005
+        if quantity * mid_price > 5000:
+            est_base += 0.0010
+        return est_base
+
+    def select_execution_path(self, confidence: float, order_value_usd: float, estimated_slippage: float) -> str:
+        """
+        Selects execution path: DIRECT for high confidence and low slippage,
+        VWAP for medium confidence or medium slippage, and TWAP for high slippage.
+        """
+        if estimated_slippage < 0.0005 and confidence >= 0.8 and order_value_usd < 3000:
             return "DIRECT"
-        elif order_value_usd >= 2500 and confidence >= 0.7:
+        elif estimated_slippage < 0.0015 and confidence >= 0.7:
             return "VWAP"
         else:
             return "TWAP"
@@ -65,8 +109,11 @@ class TraderAgent:
         else:
             order_value_usd = quantity * current_price
 
+        # Estimate execution slippage before routing
+        est_slippage = await self.estimate_execution_slippage(symbol, action, quantity, current_price)
+
         # Select execution path
-        path = self.select_execution_path(confidence, order_value_usd)
+        path = self.select_execution_path(confidence, order_value_usd, est_slippage)
 
         # Call Java engine /api/v1/execute
         url = f"{settings.java_engine_url}/api/v1/execute"

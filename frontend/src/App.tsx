@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { translations } from './translations';
-import { ChartDataPoint, ExecutionLogEntry, MarketAsset, TradingAgentState, LocalLlmConfig, BackendAgentState, PortfolioSnapshot } from './types';
+import { ChartDataPoint, ExecutionLogEntry, MarketAsset, TradingAgentState, LocalLlmConfig, BackendAgentState, PortfolioSnapshot, OptimizationLogEntry } from './types';
 import { 
   generateHistoricalPoints, 
   generateInitialLogs, 
@@ -21,7 +21,8 @@ import {
   postTradingStart,
   postTradingStop,
   subscribeToAgentEvents,
-  postLLMConfigure
+  postLLMConfigure,
+  getOptimizerHistory
 } from './services/apiClient';
 
 // Import subcomponents
@@ -31,6 +32,7 @@ import AgentRoomConsole from './components/AgentRoomConsole';
 import ExecutionLogsTable from './components/ExecutionLogsTable';
 import ControlSidebar from './components/ControlSidebar';
 import MarketNewsFeed from './components/MarketNewsFeed';
+import { OptimizerAuditTable } from './components/OptimizerAuditTable';
 
 import { 
   TrendingUp, 
@@ -272,6 +274,9 @@ export default function App() {
     localStorage.setItem('ottr_execution_logs', JSON.stringify(logs));
   }, [logs]);
 
+  // Keep track of parameter tuning history logs from the Optimizer
+  const [optimizationHistory, setOptimizationHistory] = useState<OptimizationLogEntry[]>([]);
+
   // Track the multi-agent execution status phase (0 to 4)
   const [consensusPhase, setConsensusPhase] = useState<number>(0);
 
@@ -362,6 +367,21 @@ export default function App() {
           message: { en: 'Waiting to screen next cycle...', ru: 'Ожидание анализа следующего цикла...' }
         }]
       },
+      {
+        id: 'agentOptimizer',
+        nameKey: 'agentOptimizer' as any,
+        status: 'IDLE',
+        message: { 
+          en: 'IDLE: Awaiting next performance evaluation window...', 
+          ru: 'ОЖИДАНИЕ: Ожидание следующего окна оценки эффективности...' 
+        },
+        lastUpdated: getFormattedTime(),
+        history: [{ 
+          timestamp: getFormattedTime(), 
+          status: 'IDLE',
+          message: { en: 'Awaiting next performance evaluation window...', ru: 'Ожидание следующего окна оценки эффективности...' }
+        }]
+      },
     ];
   });
 
@@ -395,6 +415,12 @@ export default function App() {
             setIsEngineRunning(portfolio.tradingActive);
           }
           setPortfolioSnapshot(portfolio);
+          try {
+            const optHistory = await getOptimizerHistory();
+            setOptimizationHistory(optHistory);
+          } catch (e) {
+            console.error('Failed to fetch initial optimizer history:', e);
+          }
           let targetEquity = portfolio.equity;
           let targetCash = portfolio.cash;
 
@@ -511,7 +537,8 @@ export default function App() {
       'sentiment_analyst': 'agentSentiment',
       'trader': 'agentTrader',
       'risk_auditor': 'agentRisk',
-      'altcoin_screener': 'agentScreener'
+      'altcoin_screener': 'agentScreener',
+      'performance_optimizer': 'agentOptimizer'
     };
 
     function connectSSE() {
@@ -568,6 +595,9 @@ export default function App() {
             eventSource.close();
           }
           setTimeout(connectSSE, 5000);
+        },
+        (history) => {
+          setOptimizationHistory(history);
         }
       );
     }
@@ -1107,6 +1137,20 @@ export default function App() {
               setInputValue={setChatInput}
             />
           </div>
+
+          {/* Parameter optimization self-tuning log table */}
+          <OptimizerAuditTable
+            logs={optimizationHistory}
+            locale={lang}
+            onRefresh={async () => {
+              try {
+                const optHistory = await getOptimizerHistory();
+                setOptimizationHistory(optHistory);
+              } catch (e) {
+                console.error('Failed to manually refresh optimizer history:', e);
+              }
+            }}
+          />
 
           {/* Transaction logs table */}
           <ExecutionLogsTable 

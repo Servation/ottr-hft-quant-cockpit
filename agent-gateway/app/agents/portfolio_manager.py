@@ -11,6 +11,7 @@ from app.agents.technical_analyst import technical_analyst
 from app.agents.sentiment_analyst import sentiment_analyst
 from app.agents.risk_auditor import risk_auditor
 from app.agents.trader import trader
+from app.agents.performance_optimizer import performance_optimizer
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +63,13 @@ class PortfolioManagerAgent:
                 "message_en": "IDLE: Compliance monitors at zero utilization...",
                 "message_ru": "ОЖИДАНИЕ: Мониторы комплаенса не загружены...",
                 "last_updated": ""
+            },
+            "performance_optimizer": {
+                "role": "performance_optimizer",
+                "status": "IDLE",
+                "message_en": "IDLE: Awaiting next performance evaluation window...",
+                "message_ru": "ОЖИДАНИЕ: Ожидание следующего окна оценки эффективности...",
+                "last_updated": ""
             }
         }
 
@@ -76,6 +84,8 @@ class PortfolioManagerAgent:
             return "IDLE: Position sizing pipeline in standby..."
         elif role == "risk_auditor":
             return "IDLE: Compliance monitors at zero utilization..."
+        elif role == "performance_optimizer":
+            return "IDLE: Awaiting next performance evaluation window..."
         return "IDLE"
 
     def get_initial_message_ru(self, role: str) -> str:
@@ -89,6 +99,8 @@ class PortfolioManagerAgent:
             return "ОЖИДАНИЕ: Конвейер сайзинга позиций в режиме ожидания..."
         elif role == "risk_auditor":
             return "ОЖИДАНИЕ: Мониторы комплаенса не загружены..."
+        elif role == "performance_optimizer":
+            return "ОЖИДАНИЕ: Ожидание следующего окна оценки эффективности..."
         return "ОЖИДАНИЕ"
 
 
@@ -248,6 +260,51 @@ class PortfolioManagerAgent:
                             f"IDLE: Screener failed: {str(e)}",
                             f"ОЖИДАНИЕ: Ошибка скринера: {str(e)}"
                         )
+
+                # 1.1 Run Performance Optimizer every 30 cycles (including first cycle, after screener)
+                if self.screener_cycle_counter % 30 == 0:
+                    await self.update_agent(
+                        "performance_optimizer",
+                        "EXECUTING",
+                        "EXECUTING: Retrospective performance logging & parameter optimization...",
+                        "ВЫПОЛНЕНИЕ: Ретроспективный анализ логов и оптимизация параметров..."
+                    )
+                    try:
+                        await self.get_current_portfolio_value()
+                        opt_res = await performance_optimizer.optimize(self.mock_portfolio_value, self.mock_drawdown)
+                        
+                        # Broadcast optimization history logs
+                        await sse_manager.broadcast("optimization_history", performance_optimizer.optimization_history)
+                        
+                        prop_param = opt_res.get("proposed_param", "None")
+                        prop_val = opt_res.get("proposed_value", 0.0)
+                        
+                        if prop_param != "None":
+                            msg_en = f"COMPLETED: Self-tuned parameter '{prop_param}' to {prop_val:.4f}."
+                            msg_ru = f"УСПЕШНО: Настроен параметр '{prop_param}' до {prop_val:.4f}."
+                        else:
+                            actions = opt_res.get("attribution_actions", [])
+                            if actions:
+                                msg_en = f"COMPLETED: Performance checks completed. Actions: {', '.join(actions)}"
+                                msg_ru = f"УСПЕШНО: Проверка эффективности завершена. Действия: {', '.join(actions)}"
+                            else:
+                                msg_en = "COMPLETED: No parameter tuning needed at this time."
+                                msg_ru = "УСПЕШНО: Настройка параметров на данный момент не требуется."
+                        
+                        await self.update_agent(
+                            "performance_optimizer",
+                            "COMPLETED",
+                            msg_en,
+                            msg_ru
+                        )
+                    except Exception as e:
+                        logger.error(f"Error in Performance Optimizer: {e}")
+                        await self.update_agent(
+                            "performance_optimizer",
+                            "IDLE",
+                            f"IDLE: Optimizer failed: {str(e)}",
+                            f"ОЖИДАНИЕ: Ошибка оптимизатора: {str(e)}"
+                        )
                 
                 self.screener_cycle_counter += 1
 
@@ -406,6 +463,19 @@ class PortfolioManagerAgent:
                             import random
                             estimated_slippage = 0.0004 + (random.random() * 0.0002)
 
+                            # Calculate volatility for dynamic risk assessment
+                            try:
+                                vol_prices = await technical_analyst.fetch_historical_prices(symbol, interval="15m", limit=96)
+                                if len(vol_prices) >= 2:
+                                    returns = [(vol_prices[i] - vol_prices[i-1]) / vol_prices[i-1] for i in range(1, len(vol_prices))]
+                                    mean_ret = sum(returns) / len(returns)
+                                    volatility = (sum((r - mean_ret) ** 2 for r in returns) / len(returns)) ** 0.5
+                                else:
+                                    volatility = None
+                            except Exception as e:
+                                logger.warning(f"Failed to calculate volatility: {e}")
+                                volatility = None
+
                             # Sizing
                             if is_stop_loss:
                                 proposed_qty = current_holding
@@ -445,7 +515,7 @@ class PortfolioManagerAgent:
                                     "risk_auditor",
                                     "EXECUTING",
                                     f"EXECUTING: Auditing proposed {consensus_action} trade for {symbol}...",
-                                    f"ВЫПОЛНЕНИЕ: Экспертиза лимитов и рисков сделки {consensus_action} для {symbol}..."
+                                    f"ВЫПОЛнЕНИЕ: Экспертиза лимитов и рисков сделки {consensus_action} для {symbol}..."
                                 )
 
                             await self.update_agent(
@@ -470,7 +540,9 @@ class PortfolioManagerAgent:
                                     current_drawdown=self.mock_drawdown,
                                     estimated_slippage=estimated_slippage,
                                     current_holding=self.holdings.get(symbol, 0.0),
-                                    strategy=trading_config.strategy, usd_cash=self.usd_cash
+                                    strategy=trading_config.strategy,
+                                    usd_cash=self.usd_cash,
+                                    volatility=volatility
                                 )
 
                             await sse_manager.broadcast("risk_audit", {

@@ -11,6 +11,7 @@ from app.services.market_proxy import market_proxy
 from app.services.sse_manager import sse_manager
 from app.agents.trader import execution_logs
 from app.agents.portfolio_manager import portfolio_manager
+from app.agents.performance_optimizer import performance_optimizer
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -245,6 +246,28 @@ async def reset_balance(req: ResetBalanceRequest):
         "status": "SUCCESS",
         "message": f"Portfolio balance reset to ${req.balance:,.2f}"
     }
+
+@router.get("/optimizer/history")
+async def get_optimizer_history():
+    return performance_optimizer.optimization_history
+
+@router.post("/optimizer/run")
+async def run_optimizer():
+    try:
+        await portfolio_manager.get_current_portfolio_value()
+        opt_res = await performance_optimizer.optimize(
+            portfolio_manager.mock_portfolio_value,
+            portfolio_manager.mock_drawdown
+        )
+        # Broadcast updated history over SSE
+        await sse_manager.broadcast("optimization_history", performance_optimizer.optimization_history)
+        return {
+            "status": "SUCCESS",
+            "result": opt_res
+        }
+    except Exception as e:
+        logger.error(f"Manual optimization run failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @router.post("/agent/chat")
 async def agent_chat(req: AgentChatRequest):

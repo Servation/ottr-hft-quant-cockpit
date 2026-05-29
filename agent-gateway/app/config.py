@@ -123,3 +123,14 @@ def translate(key: str, **kwargs: Any) -> str:
         return fmt.format(**kwargs)
     except Exception:
         return fmt
+
+def clamp_config_parameters():
+    """
+    Enforces hard safety boundaries on dynamic configuration settings
+    to prevent AI agents from applying unsafe trading limits.
+    """
+    trading_config.portfolio_cap = max(0.01, min(0.15, trading_config.portfolio_cap))
+    trading_config.stop_loss_limit = max(0.02, min(0.20, trading_config.stop_loss_limit))
+    trading_config.slippage_limit = max(0.0002, min(0.005, trading_config.slippage_limit))
+    trading_config.drawdown_limit = max(0.01, min(0.10, trading_config.drawdown_limit))
+

@@ -28,7 +28,7 @@ export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
   const isPositive = totalChange >= 0;
 
   // Dynamic grouping and downsampling based on selected timeframe
-  const getAggregatedData = (): (ChartDataPoint & { displayTime: string })[] => {
+  const getAggregatedData = (): (ChartDataPoint & { displayTime: string; ts: number })[] => {
     // Spacing fallback if ticks don't have timestamp
     const ticksWithTs = data.map((pt, idx) => ({
       ...pt,

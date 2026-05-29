@@ -16,7 +16,8 @@ class RiskAuditorAgent:
         estimated_slippage: float,
         current_holding: float = 0.0,
         strategy: str = "DD90/10",
-        usd_cash: Optional[float] = None
+        usd_cash: Optional[float] = None,
+        volatility: Optional[float] = None
     ) -> Tuple[bool, str]:
         """
         Vets a proposed trade against risk metrics:
@@ -99,6 +100,14 @@ class RiskAuditorAgent:
         # 3. Check Portfolio Cap
         order_value = quantity * price
         cap_fraction = trading_config.portfolio_cap
+        
+        # Volatility-based portfolio cap scaling
+        if volatility is not None and volatility > 0.015:
+            scale_factor = 0.015 / volatility
+            scale_factor = max(0.2, min(1.0, scale_factor))
+            cap_fraction *= scale_factor
+            logger.info(f"High volatility detected ({volatility * 100:.2f}%). Scaling maximum trade portfolio cap fraction to {cap_fraction * 100:.2f}% (Scale factor: {scale_factor:.2f})")
+
         max_order_value = portfolio_value * cap_fraction
         
         # Add a tiny float buffer

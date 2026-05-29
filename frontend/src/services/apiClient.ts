@@ -8,7 +8,8 @@ import {
   LLMConfig,
   LLMTestResult,
   TradingConfig,
-  ChatMessage
+  ChatMessage,
+  OptimizationLogEntry
 } from '../types';
 
 const API_BASE = '/api/v1';
@@ -234,7 +235,8 @@ export function subscribeToAgentEvents(
   onAgentState: (state: BackendAgentState[]) => void,
   onExecution: (log: ExecutionLogEntry) => void,
   onPortfolio: (portfolio: PortfolioSnapshot) => void,
-  onError: () => void
+  onError: () => void,
+  onOptimizationHistory?: (history: OptimizationLogEntry[]) => void
 ): EventSource {
   const eventSource = new EventSource(`${API_BASE}/events/stream`);
 
@@ -277,6 +279,17 @@ export function subscribeToAgentEvents(
     }
   });
 
+  eventSource.addEventListener('optimization_history', (event: any) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (Array.isArray(data) && onOptimizationHistory) {
+        onOptimizationHistory(data);
+      }
+    } catch (err) {
+      console.error('Error parsing optimization_history SSE event:', err);
+    }
+  });
+
   eventSource.onerror = () => {
     onError();
   };
@@ -295,6 +308,24 @@ export async function postAgentChat(message: string, history: ChatMessage[]): Pr
   });
   if (!response.ok) {
     throw new Error(`Failed to send chat message: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function getOptimizerHistory(): Promise<OptimizationLogEntry[]> {
+  const response = await fetch(`${API_BASE}/optimizer/history`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch optimizer history: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+export async function runOptimizer(): Promise<{ status: string; result: any }> {
+  const response = await fetch(`${API_BASE}/optimizer/run`, {
+    method: 'POST'
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to trigger optimizer run: ${response.statusText}`);
   }
   return response.json();
 }

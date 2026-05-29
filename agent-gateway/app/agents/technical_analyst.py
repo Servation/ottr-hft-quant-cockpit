@@ -76,13 +76,13 @@ def compute_macd(prices: List[float]) -> Tuple[float, float, float]:
     return macd_line, signal_line, macd_histogram
 
 class TechnicalAnalystAgent:
-    async def fetch_historical_prices(self, symbol: str) -> List[float]:
+    async def fetch_historical_prices(self, symbol: str, interval: str = "1m", limit: int = 50) -> List[float]:
         """
-        Fetches the last 50 close prices from Binance or Yahoo Finance as a fallback.
+        Fetches close prices from Binance or Yahoo Finance as a fallback for the specified timeframe and limit.
         """
         # Primary: Binance Klines
         try:
-            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1m&limit=50"
+            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
             async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(url)
                 if res.status_code == 200:
@@ -90,12 +90,25 @@ class TechnicalAnalystAgent:
                     # index 4 is the close price
                     return [float(candle[4]) for candle in data]
         except Exception as e:
-            logger.warning(f"Failed to fetch historical klines from Binance: {e}")
+            logger.warning(f"Failed to fetch historical klines from Binance ({interval}): {e}")
 
         # Fallback: Yahoo Finance
         try:
             yahoo_symbol = symbol.replace("USDT", "-USD") if symbol.endswith("USDT") else symbol
-            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval=1m&range=1d"
+            y_interval = interval
+            # Map Binance interval to Yahoo interval
+            if interval == "1m":
+                y_interval = "1m"
+            elif interval == "5m":
+                y_interval = "5m"
+            elif interval == "1h":
+                y_interval = "1h"
+            elif interval == "1d":
+                y_interval = "1d"
+            elif interval == "1w":
+                y_interval = "1wk"
+            
+            url = f"https://query1.finance.yahoo.com/v8/finance/chart/{yahoo_symbol}?interval={y_interval}&range=5d"
             headers = {"User-Agent": "Mozilla/5.0"}
             async with httpx.AsyncClient(timeout=5.0) as client:
                 res = await client.get(url, headers=headers)
@@ -105,29 +118,91 @@ class TechnicalAnalystAgent:
                     # Filter out None values
                     valid_closes = [float(c) for c in closes if c is not None]
                     if valid_closes:
-                        return valid_closes[-50:]
+                        return valid_closes[-limit:]
         except Exception as e:
-            logger.warning(f"Failed to fetch historical klines from Yahoo: {e}")
+            logger.warning(f"Failed to fetch historical klines from Yahoo ({interval}): {e}")
 
         # Final fallback: Mock prices
-        logger.error(f"Using mock historical prices for {symbol}")
+        logger.error(f"Using mock historical prices for {symbol} ({interval})")
         base_price = 65000.0 if "BTC" in symbol else 3500.0
         import random
         prices = [base_price]
-        for _ in range(49):
+        for _ in range(limit - 1):
             prices.append(prices[-1] * (1 + random.uniform(-0.002, 0.002)))
         return prices
+
+    async def fetch_order_book_imbalance(self, symbol: str) -> float:
+        """
+        Calculates the volume imbalance in the order book:
+        (bid_volume - ask_volume) / (bid_volume + ask_volume) within a 1% price threshold.
+        Positive indicates buy pressure; negative indicates sell pressure.
+        """
+        try:
+            url = f"{settings.java_engine_url}/api/v1/orderbook/{symbol}"
+            async with httpx.AsyncClient(timeout=2.0) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    data = res.json()
+                    bids = data.get("bids", [])
+                    asks = data.get("asks", [])
+                    
+                    if bids and asks:
+                        top_bid = float(bids[0].get("price", 0))
+                        top_ask = float(asks[0].get("price", 0))
+                        mid_price = (top_bid + top_ask) / 2.0
+                        
+                        bid_vol = sum(float(b.get("quantity", 0)) for b in bids if abs(float(b.get("price", 0)) - mid_price) / mid_price <= 0.01)
+                        ask_vol = sum(float(a.get("quantity", 0)) for a in asks if abs(float(a.get("price", 0)) - mid_price) / mid_price <= 0.01)
+                        
+                        total_vol = bid_vol + ask_vol
+                        if total_vol > 0:
+                            return (bid_vol - ask_vol) / total_vol
+        except Exception as e:
+            logger.warning(f"Failed to fetch order book from Java matching engine: {e}. Trying public Binance fallback.")
+
+        # Public Binance API fallback
+        try:
+            url = f"https://api.binance.com/api/v3/depth?symbol={symbol}&limit=100"
+            async with httpx.AsyncClient(timeout=3.0) as client:
+                res = await client.get(url)
+                if res.status_code == 200:
+                    data = res.json()
+                    bids = data.get("bids", [])
+                    asks = data.get("asks", [])
+                    if bids and asks:
+                        top_bid = float(bids[0][0])
+                        top_ask = float(asks[0][0])
+                        mid_price = (top_bid + top_ask) / 2.0
+                        
+                        bid_vol = sum(float(b[1]) for b in bids if abs(float(b[0]) - mid_price) / mid_price <= 0.01)
+                        ask_vol = sum(float(a[1]) for a in asks if abs(float(a[0]) - mid_price) / mid_price <= 0.01)
+                        
+                        total_vol = bid_vol + ask_vol
+                        if total_vol > 0:
+                            return (bid_vol - ask_vol) / total_vol
+        except Exception as e:
+            logger.warning(f"Failed to fetch public Binance order book depth: {e}")
+
+        return 0.0
 
     async def analyze(self, symbol: str, current_price: float, performance_history: str = "") -> Dict[str, Any]:
         """
         Performs technical analysis. Computes indicators, queries LLM, and parses signal.
         """
-        prices = await self.fetch_historical_prices(symbol)
+        # Fetch 1m prices for indicators (EMA20, RSI, MACD)
+        prices_1m = await self.fetch_historical_prices(symbol, interval="1m", limit=50)
         
+        # Fetch 1h prices for Macro EMA20
+        prices_1h = await self.fetch_historical_prices(symbol, interval="1h", limit=50)
+        
+        # Fetch book imbalance
+        book_imbalance = await self.fetch_order_book_imbalance(symbol)
+
         # Calculate technical indicators
-        ema20 = compute_ema(prices, 20)
-        rsi = compute_rsi(prices, 14)
-        macd_line, macd_signal, macd_hist = compute_macd(prices)
+        ema20 = compute_ema(prices_1m, 20)
+        rsi = compute_rsi(prices_1m, 14)
+        macd_line, macd_signal, macd_hist = compute_macd(prices_1m)
+        macro_ema20 = compute_ema(prices_1h, 20)
         
         # Rule-based fallback signal
         fallback_signal = "HOLD"
@@ -141,7 +216,9 @@ class TechnicalAnalystAgent:
             "rsi": rsi,
             "macd_line": macd_line,
             "macd_signal": macd_signal,
-            "macd_hist": macd_hist
+            "macd_hist": macd_hist,
+            "macro_ema20": macro_ema20,
+            "book_imbalance": book_imbalance
         }
 
         # Query LLM
@@ -149,20 +226,22 @@ class TechnicalAnalystAgent:
 You are the Technical Analyst Agent in a multi-agent crypto trading system.
 Analyze the following parameters for {symbol}:
 - Current Price: {current_price}
-- 20-period EMA: {ema20:.4f}
-- 14-period RSI: {rsi:.2f}
-- MACD Line: {macd_line:.4f}
-- MACD Signal Line: {macd_signal:.4f}
-- MACD Histogram: {macd_hist:.4f}
+- Micro Trend (1m interval, 20-period EMA): {ema20:.4f}
+- Micro RSI (1m interval, 14-period): {rsi:.2f}
+- Micro MACD Line: {macd_line:.4f}
+- Micro MACD Signal Line: {macd_signal:.4f}
+- Micro MACD Histogram: {macd_hist:.4f}
+- Macro Trend (1h interval, 20-period EMA): {macro_ema20:.4f} (Used to verify overall market direction)
+- Order Book Imbalance: {book_imbalance:+.2%} (Positive indicates bids/buy pressure, negative indicates asks/sell pressure within a 1% price window)
 
 Recent Journal History for {symbol}:
-{performance_history}
+{{performance_history}}
 
-First, think step-by-step about this data (trend direction, momentum strength, indicator alignment, and performance of past trade decisions to avoid repeating errors). Provide your detailed quantitative reasoning and chain of thought.
+First, think step-by-step about this data (trend direction, momentum strength, indicator alignment, order book bid/ask pressure, and performance of past trade decisions to avoid repeating errors). Provide your detailed quantitative reasoning and chain of thought.
 Then, conclude your analysis. You must end your response with exactly:
 SIGNAL: [BUY/SELL/HOLD]
 CONFIDENCE: [value between 0.0 and 1.0]
-"""
+""".format(performance_history=performance_history)
 
         messages = [
             {"role": "system", "content": "You are a quantitative trading assistant. Follow formatting rules precisely and think step-by-step before concluding."},
@@ -200,3 +279,4 @@ CONFIDENCE: [value between 0.0 and 1.0]
         return result
 
 technical_analyst = TechnicalAnalystAgent()
+

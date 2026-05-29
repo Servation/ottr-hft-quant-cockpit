@@ -15,11 +15,25 @@ export interface TradingAgentState {
 }
 
 export interface BackendAgentState {
-  role: 'technical_analyst' | 'sentiment_analyst' | 'trader' | 'risk_auditor' | 'altcoin_screener';
+  role: 'technical_analyst' | 'sentiment_analyst' | 'trader' | 'risk_auditor' | 'altcoin_screener' | 'performance_optimizer';
   status: AgentStatusType;
   message_en: string;
   message_ru: string;
   last_updated: string;
+}
+
+export interface OptimizationLogEntry {
+  id: string;
+  timestamp: number;
+  param_name: string;
+  old_value: number;
+  new_value: number;
+  reasoning: string;
+  baseline_portfolio_value: number;
+  baseline_win_rate: number;
+  attribution_checked: boolean;
+  attribution_score: number;
+  status: 'ACTIVE' | 'REVERTED' | 'COMPLETED';
 }
 
 export interface ExecutionLogEntry {
