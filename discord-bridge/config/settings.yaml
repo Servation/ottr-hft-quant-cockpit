@@ -1,0 +1,43 @@
+schedule:
+  interval_hours: 4
+  timezone: US/Pacific
+  meeting_times: [0, 4, 8, 12, 16, 20]
+
+meeting_rotation:
+  - morning_briefing
+  - strategy_session
+  - risk_review
+  - trade_execution
+  - performance_retrospective
+  - altcoin_scouting
+
+thresholds:
+  emergency_price_drop_pct: 5.0
+  emergency_price_spike_pct: 8.0
+  stop_loss_pct: 10.0
+
+portfolio:
+  starting_balance: 10000
+  slippage_pct: 0.1
+  min_trade_usd: 100.0
+  assets:
+    - BTC
+    - ETH
+
+token_budgets:
+  system_prompt: 400
+  meeting_history: 500
+  market_data: 300
+  conversation: 800
+  max_response: 600
+
+price_feed:
+  cache_ttl_seconds: 60
+
+discord:
+  webhook_delay_seconds: 2
+  max_messages_per_minute: 30
+
+alerts:
+  check_interval_seconds: 60
+  price_history_window_minutes: 60

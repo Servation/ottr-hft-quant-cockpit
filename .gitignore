@@ -32,3 +32,12 @@ build/
 Thumbs.db
 *.log
 .env
+
+# Discord Bridge
+discord-bridge/.env
+discord-bridge/__pycache__/
+discord-bridge/bot/__pycache__/
+discord-bridge/*.pyc
+discord-bridge/.venv/
+discord-bridge/data/*
+!discord-bridge/data/.gitkeep
