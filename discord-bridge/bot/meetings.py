@@ -46,7 +46,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="morning_briefing",
         name="Morning Briefing",
         emoji="🌅",
-        facilitator_id="portfolio_manager",
+        facilitator_id="meeting_chair",
         participant_ids=ALL_AGENT_IDS,
         opening_prompt=(
             "Good morning team. Let's review overnight price action, "
@@ -58,7 +58,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="strategy_session",
         name="Strategy Session",
         emoji="♟️",
-        facilitator_id="portfolio_manager",
+        facilitator_id="meeting_chair",
         participant_ids=ALL_AGENT_IDS,
         opening_prompt=(
             "Strategy session open. We need to debate current allocation "
@@ -71,7 +71,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="risk_review",
         name="Risk Review",
         emoji="⚠️",
-        facilitator_id="risk_auditor",
+        facilitator_id="meeting_chair",
         participant_ids=[
             "risk_auditor",
             "portfolio_manager",
@@ -88,7 +88,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="trade_execution",
         name="Trade Execution",
         emoji="⚡",
-        facilitator_id="trader",
+        facilitator_id="meeting_chair",
         participant_ids=[
             "trader",
             "technical_analyst",
@@ -106,7 +106,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="performance_retrospective",
         name="Performance Retrospective",
         emoji="📈",
-        facilitator_id="performance_optimizer",
+        facilitator_id="meeting_chair",
         participant_ids=ALL_AGENT_IDS,
         opening_prompt=(
             "Performance retro is open. Let's review recent trade outcomes, "
@@ -118,7 +118,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="altcoin_scouting",
         name="Altcoin Scouting",
         emoji="🔭",
-        facilitator_id="altcoin_screener",
+        facilitator_id="meeting_chair",
         participant_ids=[
             "altcoin_screener",
             "technical_analyst",
@@ -135,7 +135,7 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         id="emergency_alert",
         name="Emergency Alert",
         emoji="🚨",
-        facilitator_id="risk_auditor",
+        facilitator_id="meeting_chair",
         participant_ids=[
             "risk_auditor",
             "trader",
@@ -197,6 +197,39 @@ class MeetingEngine:
 
         logger.info("Starting meeting: %s (%s)", mt.name, mt.id)
 
+        if not memory_context:
+            query_text = price_data or "general market state"
+            try:
+                from bot import settings
+                budget = settings.get("token_budgets", {}).get("meeting_history", 500)
+                similar = meeting_memory.query_similar_meetings(query_text, n=3)
+                if similar:
+                    lines = []
+                    current_words = 0
+                    for m in similar:
+                        ts = m.get("timestamp", "?")
+                        mtype = m.get("type", "?")
+                        summary = m.get("summary", "—")
+                        formatted = f"• [{ts}] {mtype} — {summary}"
+                        
+                        # Approximate token counts via word count
+                        words = formatted.split()
+                        if current_words + len(words) > budget:
+                            if not lines:
+                                # Truncate the first meeting to fit the budget
+                                allowed_words = max(1, budget - current_words)
+                                truncated_formatted = " ".join(words[:allowed_words])
+                                lines.append(truncated_formatted)
+                            break
+                        lines.append(formatted)
+                        current_words += len(words)
+                    memory_context = "\n".join(lines) or "No prior meetings on record."
+                else:
+                    memory_context = "No prior meetings on record."
+            except Exception:
+                logger.exception("Failed to query similar meetings")
+                memory_context = "No prior meetings on record."
+
         # ---- 1. Facilitator opening message --------------------------------
         opening_msg = self._build_opening(mt, price_data, portfolio_summary, ceo_directives)
         await post_message_fn(mt.facilitator_id, opening_msg)
@@ -228,6 +261,8 @@ class MeetingEngine:
         # ---- 3. Debate round: pushback & challenges ------------------------
         debate_agents = self._pick_debate_agents(non_facilitator_ids, agent_contributions)
         if debate_agents:
+            import random
+            random.shuffle(debate_agents)
             # Post a separator to signal the debate
             await post_message_fn(
                 mt.facilitator_id,
@@ -274,7 +309,7 @@ class MeetingEngine:
             decisions=self._extract_decisions(closing_msg),
             actions=self._extract_actions(closing_msg),
         )
-        meeting_memory.save_meeting(meeting_record)
+        await meeting_memory.save_meeting(meeting_record)
 
         logger.info("Meeting %s completed (%s).", mt.name, meeting_record["id"])
         return meeting_record
@@ -349,6 +384,49 @@ class MeetingEngine:
                     f"❌ **Trade Execution Failed:** {str(e)}"
                 )
 
+        # 3. Parse orders: [ORDER: LIMIT BUY BTC 500 @ 60000]
+        order_matches = re.findall(
+            r"\[ORDER:\s*(LIMIT|STOP|TAKE_PROFIT)\s+(BUY|SELL)\s+([a-zA-Z0-9]+)\s+([0-9.]+)\s*@\s*([0-9.]+)\]",
+            closing_msg,
+            re.IGNORECASE
+        )
+        for order_type, action, asset, amount_str, price_str in order_matches:
+            try:
+                amount = float(amount_str)
+                price = float(price_str)
+                order_id = portfolio.place_order(order_type, action, asset, amount, price)
+                await post_message_fn(
+                    "portfolio_manager",
+                    f"📝 **Order Placed:** **{order_type.upper()} {action.upper()}** {amount} {asset.upper()} @ **${price:,.2f}** (ID: {order_id})"
+                )
+            except Exception as e:
+                logger.exception("Order placement failed")
+                await post_message_fn("portfolio_manager", f"❌ **Order Placement Failed:** {str(e)}")
+
+        # 4. Parse [CANCEL: ALL <ASSET>]
+        cancel_matches = re.findall(r"\[CANCEL:\s*ALL\s+([a-zA-Z0-9]+)\]", closing_msg, re.IGNORECASE)
+        for asset in cancel_matches:
+            count = portfolio.cancel_all_orders(asset)
+            if count > 0:
+                await post_message_fn(
+                    "portfolio_manager",
+                    f"🗑️ **Orders Canceled:** Canceled {count} pending orders for **{asset.upper()}**."
+                )
+
+        # 5. Parse [SCHEDULE_MEETING: <MINUTES>]
+        schedule_matches = re.findall(r"\[SCHEDULE_MEETING:\s*([0-9]+)\]", closing_msg, re.IGNORECASE)
+        for mins_str in schedule_matches:
+            try:
+                mins = int(mins_str)
+                from bot.scheduler import meeting_scheduler
+                meeting_scheduler.schedule_dynamic_meeting(mins)
+                await post_message_fn(
+                    "meeting_chair",
+                    f"⏱️ **Dynamic Meeting Scheduled:** We will reconvene in **{mins}** minutes."
+                )
+            except Exception as e:
+                logger.exception("Failed to schedule dynamic meeting")
+
         # 3. Always print updated running totals
         try:
             prices = await price_feed.get_prices()
@@ -400,7 +478,7 @@ class MeetingEngine:
             f"**Focus:** {mt.focus}",
         ]
         if price_data:
-            parts += ["", f"**Current Prices:**\n{price_data}"]
+            parts += ["", f"**Market State:**\n{price_data}"]
         if portfolio_summary:
             parts += ["", f"**Portfolio Snapshot:**\n{portfolio_summary}"]
         if ceo_directives:
@@ -433,7 +511,14 @@ class MeetingEngine:
             f"## {meeting_type.name} — {meeting_type.focus}",
         ]
         if price_data:
-            user_content_parts.append(f"### Prices\n{price_data}")
+            user_content_parts.append(
+                "### Market Data Definitions\n"
+                "- **Vol (Volatility):** 14-day annualized historical volatility. High volatility means wide price swings.\n"
+                "- **Fund (Funding Rate):** Perpetual futures funding rate. Positive means longs pay shorts (bullish sentiment, potential long squeeze). Negative means shorts pay longs (bearish sentiment, short squeeze).\n"
+                "- **Correlation:** Pearson correlation (-1.0 to 1.0) between BTC and ETH. 1.0 means they move perfectly together.\n"
+                "- **Yield:** Average APY of top stablecoin DeFi pools (risk-free baseline rate)."
+            )
+            user_content_parts.append(f"### Market State\n{price_data}")
         if portfolio_summary:
             user_content_parts.append(f"### Portfolio\n{portfolio_summary}")
         if ceo_directives:
@@ -441,32 +526,35 @@ class MeetingEngine:
         if memory_context:
             user_content_parts.append(f"### Recent Meeting History\n{memory_context}")
 
+        user_content_parts.append(
+            "### Available Tools\n"
+            "You can recommend the following actions to the Meeting Chair:\n"
+            "- **Market Orders**: Buy or sell at the current price.\n"
+            "- **Limit/Stop/Take-Profit Orders**: Set defensive bounds or target prices.\n"
+            "- **Cancel Orders**: Clear stale pending orders.\n"
+            "- **Schedule Follow-up Meeting**: If you anticipate short-term volatility, you can request an out-of-band meeting (e.g., 'Let's reconvene in 60 minutes')."
+        )
+
         user_content_parts.append(f"### Conversation So Far\n{convo_text}")
 
         if is_debate_round:
             user_content_parts.append(
                 "### YOUR TASK — DEBATE ROUND\n"
-                "This is the pushback round. You MUST:\n"
-                "1. Name a specific colleague by their role and quote or reference what they said\n"
-                "2. Explain WHY you disagree with their point — cite data, risk, or logic\n"
-                "3. Propose your counter-position or alternative\n\n"
-                "Do NOT agree with everyone. Do NOT be diplomatic. Be direct and specific.\n"
-                "If the Trader proposed a trade, challenge the sizing or timing.\n"
-                "If the Technical Analyst gave a signal, question the indicator choice.\n"
-                "If Risk Auditor approved something, ask what they're missing.\n\n"
-                "Start your response with '**Pushing back on [Name]:**' \n"
+                "Now that all initial reports are on the table, this is the full assessment round.\n"
+                "You must critically evaluate the proposals. You MUST:\n"
+                "1. If you disagree with a colleague, push back directly. Name them and explain why.\n"
+                "2. If you agree with a trade, use your turn to refine the sizing or timing.\n"
+                "3. Do NOT simply repeat or pile onto someone else's critique. Bring a unique perspective based on your specific role.\n\n"
+                "Do NOT just summarize your own point again. Engage with what others have said.\n"
                 "Keep it under 150 words."
             )
         else:
             user_content_parts.append(
-                "### YOUR TASK\n"
-                "Give your analysis for this meeting. You MUST:\n"
-                "1. State your own position clearly (not just data — what do YOU think we should do?)\n"
-                "2. If you disagree with anything a previous speaker said, say so directly: "
-                "'I disagree with [Name] because...'\n"
-                "3. If you see a risk others are ignoring, flag it\n\n"
-                "Do NOT just summarize data. Take a stance. Be willing to be wrong.\n"
-                "Keep it under 200 words."
+                "### YOUR TASK — INDEPENDENT REPORT\n"
+                "Give your independent report based on the Market Data. You MUST:\n"
+                "1. State your own position clearly based on the data.\n"
+                "2. Do NOT critique or react to your colleagues yet. Just put your foundational analysis on the table.\n\n"
+                "Keep it concise (under 150 words). Bullet points preferred."
             )
 
         return [
@@ -494,9 +582,14 @@ class MeetingEngine:
             f"2. Decision(s)\n"
             f"3. Action items\n"
             f"4. Next review checkpoint\n\n"
-            f"CRITICAL: If a trade or parameter change is approved by the majority, you MUST append the exact execution tag at the very end of your response:\n"
+            f"CRITICAL: If a trade, order, or parameter change is approved by the majority, you MUST append the exact execution tag at the very end of your response:\n"
             f"- `[TRADE: BUY <ASSET> <USD_AMOUNT>]` (e.g. `[TRADE: BUY BTC 500]`)\n"
             f"- `[TRADE: SELL <ASSET> <QUANTITY>]` (e.g. `[TRADE: SELL BTC 0.15]`)\n"
+            f"- `[ORDER: LIMIT BUY <ASSET> <USD_AMOUNT> @ <PRICE>]` (e.g. `[ORDER: LIMIT BUY BTC 500 @ 62000]`)\n"
+            f"- `[ORDER: STOP SELL <ASSET> <QUANTITY> @ <PRICE>]` (e.g. `[ORDER: STOP SELL ETH 0.5 @ 3000]`)\n"
+            f"- `[ORDER: TAKE_PROFIT SELL <ASSET> <QUANTITY> @ <PRICE>]` (e.g. `[ORDER: TAKE_PROFIT SELL BTC 0.25 @ 75000]`)\n"
+            f"- `[CANCEL: ALL <ASSET>]` (e.g. `[CANCEL: ALL BTC]`)\n"
+            f"- `[SCHEDULE_MEETING: <MINUTES>]` (e.g. `[SCHEDULE_MEETING: 60]`)\n"
             f"- `[PARAM: min_trade_usd=<VALUE>]` (e.g. `[PARAM: min_trade_usd=150]`)\n\n"
             f"Be concise — under 250 words."
         )

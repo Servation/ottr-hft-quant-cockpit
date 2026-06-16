@@ -11,6 +11,7 @@ graph TD
     UI[React / Vite SPA • Port 3000] <-->|REST Polling & SSE Stream| PY[FastAPI Agent Gateway • Port 8000]
     PY <-->|REST Execution Orders| JV[Spring Boot Market Engine • Port 8080]
     JV <-->|API Calls / Depth Snaps| BN[Binance API / Public Feed]
+    DB[Discord Bridge] <-->|Live Context & Routing| PY
     
     PROM[Prometheus • Port 9090] -->|Scrapes Metrics| PY
     PROM -->|Scrapes Actuator| JV
@@ -28,7 +29,10 @@ graph TD
 3. **Market Engine (`/market-engine`)**
    - **Stack**: Java 21, Spring Boot 3.3.6, Gradle, Spring Actuator, Micrometer.
    - **Role**: Handles limit order book (LOB) construction, execution math (dynamic size-based slippage, Average True Range, H6 momentum scores), and dual-mode Binance API rate limiting.
-4. **Observability Stack (`/monitoring`)**
+4. **Discord Bridge (`/discord-bridge`)**
+   - **Stack**: Python 3.12, Discord.py, SQLite, ChromaDB-style Vector Search.
+   - **Role**: Connects the OTTR agents to a Discord channel (`#trading-floor`). Features a Live LLM Intent Router, short-term and long-term semantic memory, and a fully functional order book simulator.
+5. **Observability Stack (`/monitoring`)**
    - **Stack**: Prometheus, Grafana.
    - **Role**: Scrapes API performance, order execution matching latencies, and sliding-window rate-limiter weight consumption.
 
@@ -39,20 +43,10 @@ graph TD
 ```
 d:\crypto-trading-bot/
 ├── frontend/                 # React SPA (Vite + Tailwind v4)
-│   ├── src/                  # Components, API clients, TypeScript definitions
-│   ├── Dockerfile
-│   └── nginx.conf
 ├── agent-gateway/            # Python FastAPI Agent service
-│   ├── app/                  # FastAPI routers, services, agents
-│   ├── Dockerfile
-│   └── pyproject.toml
 ├── market-engine/            # Java Spring Boot Matching Engine
-│   ├── src/                  # LimitOrderBook, rate limiter, controller classes
-│   ├── Dockerfile
-│   └── build.gradle.kts
+├── discord-bridge/           # Discord AI Agent Hub (Memory, Router, Chat)
 ├── monitoring/               # Observability configurations
-│   ├── prometheus.yml        # Scrape interval and target metrics config
-│   └── grafana/              # Provisioned datasources & JSON dashboard templates
 ├── docker-compose.yml        # Orchestration configurations
 ├── .env.example              # Environment variables template
 └── README.md                 # System documentation
@@ -126,6 +120,16 @@ npm run dev
 ```
 *Runs on port `3000` (Vite dev server proxied to the gateway).*
 
+### 4. Discord Bridge
+Ensure you have **Python 3.12+** installed and your `DISCORD_TOKEN` set in `.env`:
+```bash
+cd discord-bridge
+python -m venv .venv
+source .venv/bin/activate # On Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+python -m bot.main
+```
+
 ---
 
 ## LLM Gateway Handshake Configuration
@@ -143,25 +147,35 @@ The OTTR AI agents are **LLM-provider-agnostic** and do not use default hardcode
 ## Core Extensions & Features
 
 ### 1. Target Allocation Profile & Risk Vetoes
-- The UI setting previously called "Mathematical Base Model" is renamed to **Target Allocation Profile** (Russian: *Целевой Профиль Аллокации*).
-- The **Risk Auditor Agent** checks all consensus `BUY` orders against active strategy allocation weights with a **+5% soft buffer**:
-  - **DD90/10**: BTC target = 81.8%, ETH target = 6.4%, Altcoins target = 2.7% per symbol.
-  - **AdaptiveTrend**: BTC target = 54.5%, ETH target = 22.7%, Altcoins target = 13.6% per symbol.
-  - Any buy order pushing holdings beyond `target_pct + 0.05` is vetoed with a descriptive telemetry notification.
+- The UI setting previously called "Mathematical Base Model" is renamed to **Target Allocation Profile**.
+- The **Risk Auditor Agent** checks all consensus `BUY` orders against active strategy allocation weights with a **+5% soft buffer**.
 
 ### 2. Buying Power & Cash Balance Protection
 - The Risk Auditor intercepts `BUY` actions to verify that the total transaction cost (in USD) does not exceed the currently available cash balance, preventing simulated cash from going negative.
 
 ### 3. Persistent Portfolio State & Startup Liquidation
-- Saves all current portfolio state coordinates (cash, holdings, average cost, drawdown, and portfolio value) to `portfolio_state.json` inside the `agent-gateway/` folder.
-- On backend boot/restart, the gateway automatically loads the saved state and performs a **Startup Liquidation** step (pretending all assets are sold for cash at the latest market prices) to carry forward your total net equity balance to the fresh session as unleveraged cash.
+- Saves all current portfolio state coordinates to `portfolio_state.json`.
+- On backend boot/restart, the gateway automatically loads the saved state and performs a **Startup Liquidation** step.
 
-### 4. Desktop Batch Launcher
-- A launcher batch script `run_crypto_bot.bat` is generated on the Desktop to launch the Java engine, FastAPI gateway, and Vite React SPA dev server in separate, logs-enabled command prompt windows, then auto-opens browser dashboard.
+### 4. Enhanced Live Equity Charting
+- **Interactive Timeframes**: Added selector buttons to switch the equity chart between `SEC`, `MIN`, `HOUR`, `DAY`, and `WEEK`.
+- **Time-based X-Axis**: Displays real-time, user-friendly localized timestamp labels.
 
-### 5. Enhanced Live Equity Charting
-- **Interactive Timeframes**: Added selector buttons to switch the equity chart between `SEC` (seconds), `MIN` (minutes), `HOUR` (hours), `DAY` (days), and `WEEK` (weeks).
-- **Time-based X-Axis**: Displays real-time, user-friendly localized timestamp labels on the X-axis instead of arbitrary index values.
-- **Smart Aggregation**: Employs client-side downsampling to aggregate the master tick list (supporting up to 2,000 points) into the chosen intervals, providing a clear visualization of equity performance over time.
-- **Larger Layout**: The main chart widget height has been increased to `350px` to offer a premium, highly readable terminal interface.
+---
 
+## Discord Bridge Capabilities (New)
+
+The Discord Bridge allows the CEO (human user) to interact live with the trading agents in a Discord channel (`#trading-floor`). 
+
+### Live LLM Intent Router
+Every message you type is parsed by an LLM intent router which categorizes your message:
+1. **`[QUEUE]`**: General strategy notes are saved and injected into the next scheduled consensus meeting.
+2. **`[EMERGENCY]`**: Words like "Emergency" wake up the entire team instantly for a live roundtable discussion.
+3. **`[DIRECT:agent]`**: If you ping an agent by name (e.g. *Athena, Luna, Atlas, Midas, Rogue, Nova, Zephyr, Mercury*), the router will fetch their specific Live Context, process your request, and have them reply directly in chat.
+
+### Short-Term & Semantic Long-Term Memory
+- **Short-Term Context**: Agents automatically fetch the last 5 messages in the Discord channel, enabling fluid back-and-forth follow-up conversations.
+- **Long-Term Context**: A local SQLite vector database automatically saves transcripts of every trading meeting and decision. During live responses or new meetings, the bot uses **Semantic Search** to pull historical meetings that match the current market conditions.
+
+### Agent Order Book & Autonomy
+Agents have the capability to trade not just via market orders, but using an internal **Limit Order Book** simulated in the Discord bot. They can place Take Profits and Stop Losses, and a 60-second background ticker loops through active limits against CoinGecko prices. If a stop-loss is triggered, the bot automatically schedules an emergency meeting.

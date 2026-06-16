@@ -122,6 +122,19 @@ class TradingFloorBot(discord.Client):
     async def _startup_meeting(self) -> None:
         """Run an initial Morning Briefing shortly after boot."""
         await asyncio.sleep(10)  # let everything settle
+        
+        import os, time
+        last_meeting_file = "data/last_startup_meeting.txt"
+        try:
+            if os.path.exists(last_meeting_file):
+                with open(last_meeting_file, "r") as f:
+                    last_time = float(f.read().strip())
+                if time.time() - last_time < 3600:
+                    logger.info("Skipping startup meeting (last startup was < 60 mins ago).")
+                    return
+        except Exception:
+            pass
+
         logger.info("Triggering startup meeting...")
         try:
             await self._trading_floor_channel.send(
@@ -129,6 +142,13 @@ class TradingFloorBot(discord.Client):
                 "Let's get a read on the market."
             )
             await meeting_scheduler._execute_meeting(emergency_data=None)
+            
+            try:
+                os.makedirs("data", exist_ok=True)
+                with open(last_meeting_file, "w") as f:
+                    f.write(str(time.time()))
+            except Exception:
+                pass
         except Exception:
             logger.exception("Startup meeting failed")
 
@@ -223,7 +243,7 @@ class TradingFloorBot(discord.Client):
             self._trading_floor_channel
             and message.channel.id == self._trading_floor_channel.id
         ):
-            await ceo_handler.on_message(message, reply_fn=message.channel.send)
+            await ceo_handler.on_message(message, bot=self)
 
     async def on_error(self, event: str, *args, **kwargs) -> None:
         logger.exception(f"Unhandled error in event '{event}'")

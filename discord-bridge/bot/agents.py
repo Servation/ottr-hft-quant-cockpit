@@ -5,6 +5,7 @@ Mirrors the AsyncOpenAI + asyncio.Lock serialization pattern from
 agent-gateway/app/llm_connector.py, adapted for the Discord meeting context.
 """
 
+from __future__ import annotations
 import asyncio
 import logging
 import time
@@ -45,7 +46,7 @@ class AgentPersona:
 AGENTS: Dict[str, AgentPersona] = {
     "technical_analyst": AgentPersona(
         id="technical_analyst",
-        name="Technical Analyst",
+        name="Atlas (Technical Analyst)",
         emoji="🔬",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=technical_analyst",
         persona_file="technical_analyst.txt",
@@ -53,7 +54,7 @@ AGENTS: Dict[str, AgentPersona] = {
     ),
     "sentiment_analyst": AgentPersona(
         id="sentiment_analyst",
-        name="Sentiment Analyst",
+        name="Luna (Sentiment Analyst)",
         emoji="🧠",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=sentiment_analyst",
         persona_file="sentiment_analyst.txt",
@@ -61,7 +62,7 @@ AGENTS: Dict[str, AgentPersona] = {
     ),
     "trader": AgentPersona(
         id="trader",
-        name="Trader",
+        name="Mercury (Trader)",
         emoji="💰",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=trader",
         persona_file="trader.txt",
@@ -69,7 +70,7 @@ AGENTS: Dict[str, AgentPersona] = {
     ),
     "risk_auditor": AgentPersona(
         id="risk_auditor",
-        name="Risk Auditor",
+        name="Rogue (Risk Auditor)",
         emoji="🛡️",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=risk_auditor",
         persona_file="risk_auditor.txt",
@@ -77,7 +78,7 @@ AGENTS: Dict[str, AgentPersona] = {
     ),
     "altcoin_screener": AgentPersona(
         id="altcoin_screener",
-        name="Altcoin Screener",
+        name="Nova (Altcoin Screener)",
         emoji="🔍",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=altcoin_screener",
         persona_file="altcoin_screener.txt",
@@ -85,7 +86,7 @@ AGENTS: Dict[str, AgentPersona] = {
     ),
     "performance_optimizer": AgentPersona(
         id="performance_optimizer",
-        name="Performance Optimizer",
+        name="Zephyr (Performance Optimizer)",
         emoji="⚡",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=performance_optimizer",
         persona_file="performance_optimizer.txt",
@@ -93,11 +94,19 @@ AGENTS: Dict[str, AgentPersona] = {
     ),
     "portfolio_manager": AgentPersona(
         id="portfolio_manager",
-        name="Portfolio Manager",
+        name="Midas (Portfolio Manager)",
         emoji="📊",
         avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=portfolio_manager",
         persona_file="portfolio_manager.txt",
         temperature=0.5,
+    ),
+    "meeting_chair": AgentPersona(
+        id="meeting_chair",
+        name="Athena (Meeting Chair)",
+        emoji="⚖️",
+        avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=meeting_chair",
+        persona_file="meeting_chair.txt",
+        temperature=0.2,
     ),
 }
 
@@ -118,8 +127,14 @@ class AgentLLM:
             base_url=settings["llm_base_url"],
             api_key="lm-studio",
         )
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None
         self._persona_cache: Dict[str, str] = {}
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     # -- persona loading ----------------------------------------------------
 
@@ -186,7 +201,7 @@ class AgentLLM:
         token_limit = max_tokens or settings.get("token_budgets", {}).get("max_response", 300)
 
         try:
-            async with self._lock:
+            async with self.lock:
                 start = time.perf_counter()
                 response = await self._client.chat.completions.create(
                     model=settings["llm_model_id"],
@@ -209,6 +224,33 @@ class AgentLLM:
         except Exception as exc:
             logger.error("LLM call failed for %s: %s", agent_id, exc)
             return f"[error] LLM call failed: {exc}", 0.0
+
+    async def generate_embedding(
+        self,
+        text: str | list[str],
+        model: Optional[str] = None,
+    ) -> list[float] | list[list[float]]:
+        """
+        Generate a vector embedding for the given text.
+        This method does not acquire self._lock.
+        """
+        model_id = model or settings.get("embedding_model_id", "text-embedding-ada-002")
+        try:
+            response = await self._client.embeddings.create(
+                input=text,
+                model=model_id,
+            )
+            if isinstance(text, str):
+                return response.data[0].embedding
+            else:
+                return [item.embedding for item in response.data]
+        except Exception as exc:
+            logger.error("Failed to generate embedding: %s", exc)
+            if isinstance(text, str):
+                return []
+            else:
+                return [[] for _ in text]
+
 
 
 # ---------------------------------------------------------------------------

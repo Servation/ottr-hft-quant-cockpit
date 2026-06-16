@@ -1,5 +1,7 @@
 import logging
 import time
+import math
+import asyncio
 from typing import Dict, Any, List, Optional
 from collections import deque
 
@@ -15,6 +17,8 @@ COINGECKO_URL = (
     "?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true"
 )
 COINCAP_URL = "https://api.coincap.io/v2/assets?ids=bitcoin,ethereum"
+DEFILLAMA_YIELDS_URL = "https://yields.llama.fi/pools"
+COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
 
 # Map CoinGecko ids to our ticker symbols
 _GECKO_ID_MAP = {"bitcoin": "BTC", "ethereum": "ETH"}
@@ -23,16 +27,32 @@ _GECKO_ID_MAP = {"bitcoin": "BTC", "ethereum": "ETH"}
 class PriceFeed:
     """
     Fetches BTC and ETH prices from CoinGecko with CoinCap fallback.
-    Caches results for a configurable TTL and maintains a rolling
-    price history for emergency alert calculations.
+    Also fetches Volatility (14d historical), Stablecoin Yields, 
+    Funding Rates, and calculates BTC/ETH Correlation.
     """
 
     def __init__(self) -> None:
         price_feed_cfg = settings.get("price_feed", {})
         self._cache_ttl: float = float(price_feed_cfg.get("cache_ttl_seconds", 60))
+        
+        # New caches for rate-limited endpoints
+        self._volatility_cache_ttl: float = 4 * 3600  # 4 hours
+        self._yield_cache_ttl: float = 4 * 3600       # 4 hours
+        self._funding_cache_ttl: float = 2 * 3600     # 2 hours
 
         self._cached_prices: Optional[Dict[str, Dict[str, float]]] = None
         self._cache_timestamp: float = 0.0
+
+        self._cached_volatility: Optional[Dict[str, float]] = None
+        self._volatility_timestamp: float = 0.0
+
+        self._cached_historical_prices: Dict[str, List[float]] = {}
+
+        self._cached_yield: Optional[float] = None
+        self._yield_timestamp: float = 0.0
+
+        self._cached_funding_rates: Dict[str, float] = {}
+        self._funding_timestamp: float = 0.0
 
         # Rolling history: deque of (timestamp, prices_dict) tuples
         self._history: deque = deque(maxlen=60)
@@ -115,20 +135,174 @@ class PriceFeed:
             for ts, px in self._history
         ]
 
-    async def get_formatted_summary(self) -> str:
+    async def _fetch_historical_data(self, client: httpx.AsyncClient) -> Dict[str, float]:
+        """Fetch 14-day historical data to calculate annualized volatility and store prices for correlation."""
+        volatility_dict = {}
+        for gecko_id, symbol in _GECKO_ID_MAP.items():
+            url = f"https://api.coingecko.com/api/v3/coins/{gecko_id}/market_chart?vs_currency=usd&days=14"
+            try:
+                response = await client.get(url, timeout=10.0)
+                response.raise_for_status()
+                data = response.json()
+                prices = data.get("prices", [])
+                
+                if len(prices) > 1:
+                    raw_prices = [p[1] for p in prices]
+                    self._cached_historical_prices[symbol] = raw_prices
+                    
+                    returns = []
+                    for i in range(1, len(prices)):
+                        prev_price = prices[i-1][1]
+                        curr_price = prices[i][1]
+                        if prev_price > 0:
+                            returns.append((curr_price - prev_price) / prev_price)
+                    
+                    if returns:
+                        mean_return = sum(returns) / len(returns)
+                        variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
+                        std_dev = math.sqrt(variance)
+                        # Annualize
+                        annualized_volatility = std_dev * math.sqrt(365 * 24)
+                        volatility_dict[symbol] = annualized_volatility
+            except Exception as e:
+                logger.error("Failed to fetch historical data for %s: %s", symbol, e)
+                volatility_dict[symbol] = 0.0
+                
+            # Sleep slightly between requests to respect free tier rate limits
+            await asyncio.sleep(1.5)
+            
+        return volatility_dict
+
+    def get_correlation(self) -> float:
+        """Calculates Pearson correlation between BTC and ETH using cached 14-day prices."""
+        btc_prices = self._cached_historical_prices.get("BTC", [])
+        eth_prices = self._cached_historical_prices.get("ETH", [])
+        if not btc_prices or not eth_prices:
+            return 0.0
+        
+        # Align lengths
+        min_len = min(len(btc_prices), len(eth_prices))
+        x = btc_prices[-min_len:]
+        y = eth_prices[-min_len:]
+        
+        if min_len < 2: return 0.0
+        
+        mean_x = sum(x) / min_len
+        mean_y = sum(y) / min_len
+        
+        cov = sum((x[i] - mean_x) * (y[i] - mean_y) for i in range(min_len))
+        var_x = sum((x[i] - mean_x) ** 2 for i in range(min_len))
+        var_y = sum((y[i] - mean_y) ** 2 for i in range(min_len))
+        
+        if var_x == 0 or var_y == 0: return 0.0
+        return cov / math.sqrt(var_x * var_y)
+
+    async def _fetch_defi_yields(self, client: httpx.AsyncClient) -> float:
+        """Fetch stablecoin yields from DefiLlama and calculate an average APY."""
+        try:
+            response = await client.get(DEFILLAMA_YIELDS_URL, timeout=10.0)
+            response.raise_for_status()
+            data = response.json().get("data", [])
+            
+            stablecoins = {"USDC", "USDT", "DAI"}
+            valid_yields = []
+            for pool in data:
+                if pool.get("symbol") in stablecoins and pool.get("tvlUsd", 0) > 10_000_000:
+                    apy = pool.get("apy", 0)
+                    if apy > 0:
+                        valid_yields.append(apy)
+            
+            if valid_yields:
+                valid_yields.sort(reverse=True)
+                top_yields = valid_yields[:10]
+                return sum(top_yields) / len(top_yields)
+        except Exception as e:
+            logger.error("Failed to fetch Defi yields: %s", e)
+        return 0.0
+
+    async def _fetch_derivatives(self, client: httpx.AsyncClient) -> Dict[str, float]:
+        """Fetch funding rates from CoinGecko Derivatives API."""
+        funding_rates = {"BTC": 0.0, "ETH": 0.0}
+        try:
+            response = await client.get(COINGECKO_DERIVATIVES_URL, timeout=10.0)
+            response.raise_for_status()
+            data = response.json()
+            
+            for item in data:
+                sym = item.get("symbol", "").upper()
+                market = item.get("market", "").lower()
+                if "binance" in market:
+                    if sym == "BTCUSDT":
+                        funding_rates["BTC"] = float(item.get("funding_rate", 0.0))
+                    elif sym == "ETHUSDT":
+                        funding_rates["ETH"] = float(item.get("funding_rate", 0.0))
+        except Exception as e:
+            logger.error("Failed to fetch derivatives: %s", e)
+        return funding_rates
+
+    async def get_volatility(self) -> Dict[str, float]:
+        """Returns annualized volatility, utilizing a long-TTL cache."""
+        now = time.time()
+        if self._cached_volatility and (now - self._volatility_timestamp) < self._volatility_cache_ttl:
+            return self._cached_volatility
+            
+        async with httpx.AsyncClient() as client:
+            vol = await self._fetch_historical_data(client)
+            self._cached_volatility = vol
+            self._volatility_timestamp = now
+            return vol
+
+    async def get_yield(self) -> float:
+        """Returns average stablecoin yield, utilizing a long-TTL cache."""
+        now = time.time()
+        if self._cached_yield is not None and (now - self._yield_timestamp) < self._yield_cache_ttl:
+            return self._cached_yield
+            
+        async with httpx.AsyncClient() as client:
+            avg_yield = await self._fetch_defi_yields(client)
+            self._cached_yield = avg_yield
+            self._yield_timestamp = now
+            return avg_yield
+
+    async def get_funding_rates(self) -> Dict[str, float]:
+        """Returns perpetual funding rates, utilizing a long-TTL cache."""
+        now = time.time()
+        if self._cached_funding_rates and (now - self._funding_timestamp) < self._funding_cache_ttl:
+            return self._cached_funding_rates
+            
+        async with httpx.AsyncClient() as client:
+            rates = await self._fetch_derivatives(client)
+            self._cached_funding_rates = rates
+            self._funding_timestamp = now
+            return rates
+
+    async def get_market_state_summary(self) -> str:
         """
-        Returns a human-readable price summary string for use in
-        Discord messages or LLM context injection.
+        Returns an enriched Market State Summary string including Spot, Volatility, Yield, and Derivatives.
+        Used for LLM context injection.
         """
         prices = await self.get_prices()
+        volatility = await self.get_volatility()
+        avg_yield = await self.get_yield()
+        funding_rates = await self.get_funding_rates()
+        correlation = self.get_correlation()
+        
         lines: List[str] = []
         for symbol in ("BTC", "ETH"):
             entry = prices.get(symbol, {})
             price = entry.get("price", 0.0)
             change = entry.get("change_24h", 0.0)
+            vol = volatility.get(symbol, 0.0)
+            fund = funding_rates.get(symbol, 0.0)
+            
             direction = "▲" if change >= 0 else "▼"
-            lines.append(f"{symbol}: ${price:,.2f} ({direction} {abs(change):.2f}%)")
-        return " | ".join(lines)
+            vol_str = f"Vol: {vol*100:.1f}%" if vol > 0 else "Vol: N/A"
+            fund_str = f"Fund: {fund*100:+.3f}%"
+            lines.append(f"{symbol}: ${price:,.2f} ({direction} {abs(change):.2f}%, {vol_str}, {fund_str})")
+            
+        yield_str = f"Stablecoin Yield: {avg_yield:.1f}% APY"
+        corr_str = f"BTC/ETH Correlation: {correlation:.2f}"
+        return " | ".join(lines) + f" | {corr_str} | {yield_str}"
 
 
 price_feed = PriceFeed()

@@ -33,6 +33,7 @@ def _default_state() -> Dict[str, Any]:
         "holdings": holdings,
         "total_pnl": 0.0,
         "trade_history": [],
+        "orders": [],
         "min_trade_usd": _DEFAULT_MIN_TRADE_USD,
     }
 
@@ -68,6 +69,8 @@ class Portfolio:
                 # Healing/upgrade check
                 if "min_trade_usd" not in self._state:
                     self._state["min_trade_usd"] = _DEFAULT_MIN_TRADE_USD
+                if "orders" not in self._state:
+                    self._state["orders"] = []
                     self.save()
                 logger.info("Loaded portfolio from %s", _PORTFOLIO_FILE)
             except (json.JSONDecodeError, OSError) as e:
@@ -208,6 +211,86 @@ class Portfolio:
         )
         return trade
 
+    # ── Orders ───────────────────────────────────────────────────
+
+    def place_order(self, order_type: str, action: str, asset: str, amount: float, target_price: float) -> str:
+        """Place a pending order."""
+        import uuid
+        order_id = str(uuid.uuid4())[:8]
+        order = {
+            "id": order_id,
+            "type": order_type.upper(),
+            "action": action.upper(),
+            "asset": asset.upper(),
+            "amount": float(amount),
+            "target_price": float(target_price),
+            "timestamp": time.time(),
+        }
+        self._state.setdefault("orders", []).append(order)
+        self.save()
+        logger.info("Placed %s %s order %s for %s %s @ $%.2f", order_type, action, order_id, amount, asset, target_price)
+        return order_id
+
+    def cancel_all_orders(self, asset: str) -> int:
+        """Cancel all pending orders for an asset."""
+        orders = self._state.setdefault("orders", [])
+        initial_count = len(orders)
+        self._state["orders"] = [o for o in orders if o["asset"] != asset.upper()]
+        canceled_count = initial_count - len(self._state["orders"])
+        if canceled_count > 0:
+            self.save()
+            logger.info("Canceled %d orders for %s", canceled_count, asset)
+        return canceled_count
+
+    def check_orders(self, current_prices: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Check if any pending orders should be triggered based on current prices."""
+        orders = self._state.setdefault("orders", [])
+        executed = []
+        remaining_orders = []
+
+        for order in orders:
+            asset = order["asset"]
+            current_price = current_prices.get(asset, {}).get("price", 0.0)
+            if current_price <= 0:
+                remaining_orders.append(order)
+                continue
+
+            triggered = False
+            target_price = order["target_price"]
+
+            if order["type"] == "LIMIT" and order["action"] == "BUY":
+                if current_price <= target_price:
+                    triggered = True
+            elif order["type"] == "LIMIT" and order["action"] == "SELL":
+                if current_price >= target_price:
+                    triggered = True
+            elif order["type"] == "STOP" and order["action"] == "SELL":
+                if current_price <= target_price:
+                    triggered = True
+            elif order["type"] == "TAKE_PROFIT" and order["action"] == "SELL":
+                if current_price >= target_price:
+                    triggered = True
+
+            if triggered:
+                try:
+                    if order["action"] == "BUY":
+                        trade = self.buy(asset, order["amount"], current_price)
+                    else:
+                        trade = self.sell(asset, order["amount"], current_price)
+                    trade["triggered_order_type"] = order["type"]
+                    executed.append(trade)
+                    logger.info("Order %s triggered and executed.", order["id"])
+                except Exception as e:
+                    logger.error("Failed to execute triggered order %s: %s", order["id"], e)
+            else:
+                remaining_orders.append(order)
+
+        if len(remaining_orders) != len(orders):
+            self._state["orders"] = remaining_orders
+            self.save()
+
+        return executed
+
     # ── Queries ───────────────────────────────────────────────────
 
     def get_total_value(self, prices_dict: Dict[str, Dict[str, Any]]) -> float:
@@ -232,6 +315,7 @@ class Portfolio:
                 }
                 for asset, h in self._state["holdings"].items()
             },
+            "pending_orders": self._state.setdefault("orders", []),
             "total_pnl": self._state["total_pnl"],
             "min_trade_usd": self.min_trade_usd,
             "recent_trades": self._state["trade_history"][-5:],

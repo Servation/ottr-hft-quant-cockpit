@@ -91,6 +91,25 @@ class MeetingScheduler:
         async with self._meeting_lock:
             await self._execute_meeting(emergency_data=alert_data)
 
+    def schedule_dynamic_meeting(self, minutes: int) -> None:
+        """Schedule a one-off meeting in the future."""
+        if not self._scheduler or not self._scheduler.running:
+            return
+            
+        from datetime import datetime, timedelta
+        import pytz
+        tz = pytz.timezone(_TIMEZONE)
+        run_time = datetime.now(tz) + timedelta(minutes=minutes)
+        
+        self._scheduler.add_job(
+            self._run_scheduled_meeting,
+            trigger="date",
+            run_date=run_time,
+            id=f"dynamic_meeting_{int(run_time.timestamp())}",
+            name=f"Dynamic meeting in {minutes}m",
+        )
+        logger.info("Scheduled dynamic meeting for %s", run_time)
+
     # ------------------------------------------------------------------
     # Meeting orchestration (shared by scheduled and emergency paths)
     # ------------------------------------------------------------------
@@ -133,31 +152,41 @@ class MeetingScheduler:
             # Consume the directives so they don't repeat
             ceo_handler.get_pending_directives()
 
+            # Format price data for context
+            price_str = ""
+            try:
+                price_str = await price_feed.get_market_state_summary()
+            except Exception:
+                logger.exception("Failed to format market state summary")
+
             memory_context = ""
             try:
-                memory_context = meeting_memory.get_recent_context()
+                query_text = f"Meeting Type: {meeting_type}. Market State: {price_str}. Directives: {ceo_directives}"
+                memory_context = await meeting_memory.get_semantic_context(query_text, limit=3)
             except Exception:
-                logger.exception("Failed to load memory context")
+                logger.exception("Failed to load semantic memory context")
+                try:
+                    memory_context = meeting_memory.get_recent_context()
+                except Exception:
+                    pass
 
-            # Convert portfolio summary dict to string for context
+            # Format portfolio summary for context
             portfolio_str = ""
             if portfolio_summary:
                 try:
-                    import json
-                    portfolio_str = json.dumps(portfolio_summary, indent=2)
+                    lines = [f"**Cash:** ${portfolio_summary.get('cash', 0):,.2f}"]
+                    lines.append("**Holdings:**")
+                    holdings = portfolio_summary.get('holdings', {})
+                    if not holdings:
+                        lines.append("  - None")
+                    for sym, data in holdings.items():
+                        lines.append(f"  - **{sym}:** {data.get('quantity', 0):.6f} (Avg Cost: ${data.get('avg_cost', 0):,.2f})")
+                    lines.append(f"**Total P&L:** ${portfolio_summary.get('total_pnl', 0):,.2f}")
+                    lines.append(f"**Min Trade Size:** ${portfolio_summary.get('min_trade_usd', 0):,.2f}")
+                    portfolio_str = "\n".join(lines)
                 except Exception:
+                    logger.exception("Failed to format portfolio summary")
                     portfolio_str = str(portfolio_summary)
-
-            # Format price data for context
-            price_str = ""
-            if prices:
-                lines = []
-                for sym, data in prices.items():
-                    p = data.get("price", 0)
-                    c = data.get("change_24h", 0)
-                    d = "▲" if c >= 0 else "▼"
-                    lines.append(f"{sym}: ${p:,.2f} ({d} {abs(c):.2f}%)")
-                price_str = " | ".join(lines)
 
             # Run the meeting ------------------------------------------------
             await meeting_engine.run_meeting(

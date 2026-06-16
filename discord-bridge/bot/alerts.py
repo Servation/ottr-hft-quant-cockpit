@@ -73,9 +73,23 @@ class AlertMonitor:
         check_interval = alerts_cfg.get(
             "check_interval_seconds", DEFAULT_CHECK_INTERVAL_SECONDS
         )
+        from bot.portfolio import portfolio
 
         while self._running:
             try:
+                # 1. Check portfolio orders
+                current_prices = {}
+                try:
+                    current_prices = await price_feed.get_prices()
+                except Exception:
+                    logger.exception("Failed to get prices for order check")
+                
+                if current_prices:
+                    executed_orders = portfolio.check_orders(current_prices)
+                    if executed_orders:
+                        await self._notify_executed_orders(executed_orders, self._bot)
+                
+                # 2. Check thresholds
                 alerts = await self.check_thresholds()
 
                 if alerts and self._cooldown_elapsed():
@@ -204,6 +218,41 @@ class AlertMonitor:
             await meeting_scheduler.schedule_emergency(alerts)
         except Exception:
             logger.exception("Failed to schedule emergency meeting")
+
+    async def _notify_executed_orders(self, executed_orders: list[dict], bot) -> None:
+        """Post a notification for filled orders, and trigger emergency if STOP LOSS hit."""
+        stop_loss_hit = False
+        lines = ["🔔 **Orders Executed!**"]
+        for t in executed_orders:
+            order_type = t.get("triggered_order_type", "LIMIT")
+            if order_type == "STOP":
+                stop_loss_hit = True
+            
+            emoji = "🛑" if order_type == "STOP" else ("🎯" if order_type == "TAKE_PROFIT" else "📝")
+            lines.append(
+                f"{emoji} **{order_type} {t['action']}** {t['quantity']:.8f} {t['asset']} "
+                f"@ **${t['fill_price']:,.2f}** (Value: ${t['usd_amount']:,.2f})"
+            )
+        
+        if stop_loss_hit:
+            lines.append("")
+            lines.append("🚨 **STOP LOSS TRIGGERED** — Emergency meeting being convened now…")
+
+        message = "\n".join(lines)
+        
+        if bot and bot._trading_floor_channel:
+            try:
+                await bot._trading_floor_channel.send(message)
+            except Exception:
+                logger.exception("Failed to post order execution to trading floor")
+                
+        if stop_loss_hit:
+            try:
+                from bot.scheduler import meeting_scheduler
+                alerts = [{"asset": "PORTFOLIO", "direction": "STOP_LOSS", "pct_change": 0.0}]
+                await meeting_scheduler.schedule_emergency(alerts)
+            except Exception:
+                logger.exception("Failed to schedule emergency meeting for stop loss")
 
     # ------------------------------------------------------------------
     # Helpers
