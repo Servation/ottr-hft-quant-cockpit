@@ -222,3 +222,35 @@ export async function postAgentChat(message: string, history: ChatMessage[]): Pr
   return response.json();
 }
 
+// Fetch optimization history
+export async function getOptimizerHistory(): Promise<OptimizationLogEntry[]> {
+  const response = await fetch(`${API_BASE}/optimizer/history`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch optimizer history: ${response.statusText}`);
+  }
+  return response.json();
+}
+
+// Configure LLM parameters
+export async function postLLMConfigure(config: LLMConfig): Promise<void> {
+  const response = await fetch(`${API_BASE}/llm/configure`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to configure LLM: ${response.statusText}`);
+  }
+}
+
+// Update trading config
+export async function postTradingConfig(config: TradingConfig): Promise<void> {
+  const response = await fetch(`${API_BASE}/trading/config`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(config),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to update trading config: ${response.statusText}`);
+  }
+}
