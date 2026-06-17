@@ -74,7 +74,7 @@ export const translations = {
     indexAllocation: "Major Cryptocurrency (BTC)",
     cryptoAllocation: "Ethereum & Altcoins (ETH/Alts)",
     allocationStrategyDesc: {
-      "DD90/10": "Mandated 90% Major Cryptocurrency (BTC) and 10% alternative high-alpha digital assets.",
+      "DD90/10": "",
       "AdaptiveTrend": "Dynamic volatility-adjusted weights and momentum scaling across all selected crypto assets."
     },
     vetoedReason: "VETOED by Risk Auditor: Slippage margin or deviation check failed.",
@@ -152,7 +152,7 @@ export const translations = {
     indexAllocation: "Главная Валюта (BTC Core)",
     cryptoAllocation: "Альтернативные Активы (ETH/Alts)",
     allocationStrategyDesc: {
-      "DD90/10": "Регламент — 90% Главная валюта (BTC) и 10% альткоинов высокой беты.",
+      "DD90/10": "",
       "AdaptiveTrend": "Динамические веса с поправкой на волатильность у всех криптоактивов."
     },
     vetoedReason: "ВЕТО от Риск-Аудитора: Превышен лимит проскальзывания или порог волатильности.",

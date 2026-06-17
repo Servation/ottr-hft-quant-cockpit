@@ -107,7 +107,7 @@ export default function AssetAllocation({ strategy, marketPrices, paperEquity, p
           </div>
           <span className="text-[10px] font-mono font-medium px-2 py-0.5 rounded bg-black/40 border border-neutral-800 text-neutral-450 uppercase tracking-widest flex items-center gap-1">
             <span className="w-1.5 h-1.5 bg-emerald-450 rounded-full animate-pulse" />
-            {strategy}
+            {strategy === 'DD90/10' ? 'CORE PORTFOLIO' : strategy}
           </span>
         </div>
 

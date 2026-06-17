@@ -188,7 +188,7 @@ export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
       <div className="absolute inset-0 bg-radial-at-t from-emerald-500/5 via-transparent to-transparent pointer-events-none" />
 
       {/* Grid Headers and Stats Blocks */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6 relative z-10">
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 relative z-10">
         
         {/* Total Paper Equity Container */}
         <div id="metric-equity" className="bg-black/40 p-5 rounded border border-neutral-800 hover:border-emerald-500/40 transition-all duration-300 group">
@@ -236,23 +236,6 @@ export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
           </div>
         </div>
 
-        {/* Quant Statistics Container */}
-        <div id="metric-stats" className="bg-black/40 p-5 rounded border border-neutral-800 hover:border-violet-500/40 transition-all duration-300">
-          <div className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold mb-3 flex items-center gap-1.5">
-            <TrendingUp className="w-3.5 h-3.5 text-violet-500" />
-            {t.statisticsText}
-          </div>
-          <div className="grid grid-cols-2 gap-4">
-            <div>
-              <div className="text-[10px] font-mono text-neutral-500">{t.statsSharpe}</div>
-              <div className="text-base font-light text-neutral-200">3.42<span className="text-xs text-violet-400 font-normal"> / DAY</span></div>
-            </div>
-            <div>
-              <div className="text-[10px] font-mono text-neutral-500">{t.statsWinRate}</div>
-              <div className="text-base font-light text-neutral-200">68.7%</div>
-            </div>
-          </div>
-        </div>
       </div>
 
       {/* SVG Multi-Layer Chart Block */}

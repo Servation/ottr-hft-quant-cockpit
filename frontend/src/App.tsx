@@ -493,7 +493,12 @@ export default function App() {
           setChartData((prev) => {
             const now = new Date();
             const timeLabel = now.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
-            const updated = [...prev, { timeLabel, equity: portfolio.equity, cash: portfolio.cash, timestamp: Date.now() }];
+            const pt = { timeLabel, equity: portfolio.equity, cash: portfolio.cash, timestamp: Date.now() };
+            // Initialize chart properly with real data rather than massive jump from mock 250k
+            if (prev.length === 1 && prev[0].equity === 250000) {
+              return [pt];
+            }
+            const updated = [...prev, pt];
             if (updated.length > 2000) updated.shift();
             return updated;
           });
