@@ -16,6 +16,7 @@ from typing import Callable, Awaitable, Dict, List, Optional
 from bot.agents import AGENTS, agent_llm
 from bot.memory import meeting_memory, MeetingMemory
 from bot.tools import READ_TOOLS, ACTION_TOOLS, handle_tool_call
+from bot.webhooks import sync_agent_state
 
 logger = logging.getLogger(__name__)
 
@@ -234,6 +235,7 @@ class MeetingEngine:
         ]
 
         for agent_id in non_facilitator_ids:
+            await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "THINKING", "current_task": "Formulating initial report"}])
             context = self._build_agent_context(
                 agent_id, mt, conversation_log,
                 price_data, portfolio_summary, ceo_directives, memory_context,
@@ -244,7 +246,9 @@ class MeetingEngine:
             )
             agent_contributions[agent_id] = response
 
+            await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "SPEAKING", "current_task": "Delivering report"}])
             await post_message_fn(agent_id, response)
+            await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "IDLE", "current_task": "Waiting"}])
             conversation_log.append(
                 f"[{AGENTS[agent_id].emoji} {AGENTS[agent_id].name}]: {response}"
             )
@@ -266,6 +270,7 @@ class MeetingEngine:
             )
 
             for agent_id in debate_agents:
+                await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "THINKING", "current_task": "Analyzing debate"}])
                 context = self._build_agent_context(
                     agent_id, mt, conversation_log,
                     price_data, portfolio_summary, ceo_directives, memory_context,
@@ -276,19 +281,24 @@ class MeetingEngine:
                 )
                 agent_contributions[agent_id] += f"\n\n[DEBATE]: {response}"
 
+                await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "SPEAKING", "current_task": "Debating"}])
                 await post_message_fn(agent_id, response)
+                await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "IDLE", "current_task": "Waiting"}])
                 conversation_log.append(
                     f"[{AGENTS[agent_id].emoji} {AGENTS[agent_id].name}]: {response}"
                 )
                 logger.debug("%s (debate) responded in %.2fs", agent_id, latency)
 
         # ---- 4. Facilitator closing summary & Execution -------------------
+        await sync_agent_state([{"id": mt.facilitator_id, "name": AGENTS[mt.facilitator_id].name, "status": "THINKING", "current_task": "Drafting summary & executing"}])
         closing_msg, _ = await self._build_closing(
             mt, conversation_log, price_data, portfolio_summary, bound_tool_handler
         )
         
         agent_contributions[mt.facilitator_id] = closing_msg
+        await sync_agent_state([{"id": mt.facilitator_id, "name": AGENTS[mt.facilitator_id].name, "status": "SPEAKING", "current_task": "Closing meeting"}])
         await post_message_fn(mt.facilitator_id, closing_msg)
+        await sync_agent_state([{"id": mt.facilitator_id, "name": AGENTS[mt.facilitator_id].name, "status": "IDLE", "current_task": "Waiting"}])
 
         # Print updated running totals after tools may have executed
         try:
@@ -403,7 +413,7 @@ class MeetingEngine:
             )
             user_content_parts.append(f"### Market State\n{price_data}")
         if portfolio_summary:
-            user_content_parts.append(f"### Portfolio\n{portfolio_summary}")
+            user_content_parts.append(f"### Portfolio\n{portfolio_summary}\n\n*(Instruction: Focus your primary analysis on managing the assets we currently hold in the portfolio. You may analyze outside assets, but prioritize our active positions first.)*")
         if ceo_directives:
             user_content_parts.append(f"### CEO Directives\n{ceo_directives}\n\n*(Note: Address these directives if relevant, but your PRIMARY duty is the Meeting Focus. Do not let these side-items derail the main agenda.)*")
         if memory_context:
@@ -415,6 +425,7 @@ class MeetingEngine:
             "- **Market Orders**: Buy or sell at the current price.\n"
             "- **Limit/Stop/Take-Profit Orders**: Set defensive bounds or target prices.\n"
             "- **Cancel Orders**: Clear stale pending orders.\n"
+            "- **Update Parameters**: Propose changes to system parameters (e.g. min_trade_usd).\n"
             "- **Schedule Follow-up Meeting**: If you anticipate short-term volatility, you can request an out-of-band meeting (e.g., 'Let's reconvene in 60 minutes')."
         )
 

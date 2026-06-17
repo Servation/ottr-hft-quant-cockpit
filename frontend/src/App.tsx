@@ -292,96 +292,14 @@ export default function App() {
       } catch (e) {}
     }
     return [
-      {
-        id: 'agentTechnical',
-        nameKey: 'agentTechnical',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Awaiting next price frame computation...', 
-          ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Awaiting next price frame computation...', ru: 'Ожидание вычисления следующего тика цен...' }
-        }]
-      },
-      {
-        id: 'agentSentiment',
-        nameKey: 'agentSentiment',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Polling social indexes and order books...', 
-          ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Polling social indexes and order books...', ru: 'Опрос социальных индексов и стаканов заявок...' }
-        }]
-      },
-      {
-        id: 'agentTrader',
-        nameKey: 'agentTrader',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Position sizing pipeline in standby...', 
-          ru: 'ОЖИДАНИЕ: Конвейер сайзинга позиций находится в режиме ожидания...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Position sizing pipeline in standby...', ru: 'Конвейер сайзинга позиций находится в режиме ожидания...' }
-        }]
-      },
-      {
-        id: 'agentRisk',
-        nameKey: 'agentRisk',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Compliance monitors at zero utilization...', 
-          ru: 'ОЖИДАНИЕ: Мониторы комплаенса не загружены...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Compliance monitors at zero utilization...', ru: 'Мониторы комплаенса не загружены...' }
-        }]
-      },
-      {
-        id: 'agentScreener',
-        nameKey: 'agentScreener',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Waiting to screen next cycle...', 
-          ru: 'ОЖИДАНИЕ: Ожидание анализа следующего цикла...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Waiting to screen next cycle...', ru: 'Ожидание анализа следующего цикла...' }
-        }]
-      },
-      {
-        id: 'agentOptimizer',
-        nameKey: 'agentOptimizer' as any,
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Awaiting next performance evaluation window...', 
-          ru: 'ОЖИДАНИЕ: Ожидание следующего окна оценки эффективности...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Awaiting next performance evaluation window...', ru: 'Ожидание следующего окна оценки эффективности...' }
-        }]
-      },
+      { id: 'technical_analyst', name: 'Atlas (Technical Analyst)', status: 'IDLE', message: { en: 'IDLE: Awaiting next price frame computation...', ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'sentiment_analyst', name: 'Luna (Sentiment Analyst)', status: 'IDLE', message: { en: 'IDLE: Polling social indexes and order books...', ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'trader', name: 'Mercury (Trader)', status: 'IDLE', message: { en: 'IDLE: Position sizing pipeline in standby...', ru: 'ОЖИДАНИЕ: Конвейер сайзинга позиций находится в режиме ожидания...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'risk_auditor', name: 'Rogue (Risk Auditor)', status: 'IDLE', message: { en: 'IDLE: Compliance monitors at zero utilization...', ru: 'ОЖИДАНИЕ: Мониторы комплаенса не загружены...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'altcoin_screener', name: 'Nova (Altcoin Screener)', status: 'IDLE', message: { en: 'IDLE: Waiting to screen next cycle...', ru: 'ОЖИДАНИЕ: Ожидание анализа следующего цикла...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'performance_optimizer', name: 'Zephyr (Performance Optimizer)', status: 'IDLE', message: { en: 'IDLE: Optimizing hyper-parameters...', ru: 'ОЖИДАНИЕ: Оптимизация параметров...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'portfolio_manager', name: 'Midas (Portfolio Manager)', status: 'IDLE', message: { en: 'IDLE: Rebalancing constraints in standby...', ru: 'ОЖИДАНИЕ: Ребалансировка...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'meeting_chair', name: 'Athena (Meeting Chair)', status: 'IDLE', message: { en: 'IDLE: No consensus meetings scheduled...', ru: 'ОЖИДАНИЕ: Собрания не запланированы...' }, lastUpdated: getFormattedTime(), history: [] },
     ];
   });
 
@@ -532,24 +450,15 @@ export default function App() {
     if (dataSource !== 'live') return;
 
     let eventSource: EventSource | null = null;
-    const roleMap: Record<string, string> = {
-      'technical_analyst': 'agentTechnical',
-      'sentiment_analyst': 'agentSentiment',
-      'trader': 'agentTrader',
-      'risk_auditor': 'agentRisk',
-      'altcoin_screener': 'agentScreener',
-      'performance_optimizer': 'agentOptimizer'
-    };
-
     function connectSSE() {
       eventSource = subscribeToAgentEvents(
         (backendStates: BackendAgentState[]) => {
           setAgents((prevAgents) => {
             return prevAgents.map((agent) => {
-              const bState = backendStates.find((b) => roleMap[b.role] === agent.id);
+              const bState = backendStates.find((b) => b.id === agent.id);
               if (bState) {
-                const timeStr = new Date(bState.last_updated).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
-                const newMsg = { en: bState.message_en, ru: bState.message_ru };
+                const timeStr = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+                const newMsg = { en: bState.current_task || bState.status, ru: bState.current_task || bState.status };
                 
                 const history = agent.history || [];
                 const lastEntry = history[history.length - 1];
@@ -921,81 +830,14 @@ export default function App() {
     
     // Reset agents and their histories to default IDLE
     setAgents([
-      {
-        id: 'agentTechnical',
-        nameKey: 'agentTechnical',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Awaiting next price frame computation...', 
-          ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Awaiting next price frame computation...', ru: 'Ожидание вычисления следующего тика цен...' }
-        }]
-      },
-      {
-        id: 'agentSentiment',
-        nameKey: 'agentSentiment',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Polling social indexes and order books...', 
-          ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Polling social indexes and order books...', ru: 'Опрос социальных индексов и стаканов заявок...' }
-        }]
-      },
-      {
-        id: 'agentTrader',
-        nameKey: 'agentTrader',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Position sizing pipeline in standby...', 
-          ru: 'ОЖИДАНИЕ: Конвейер сайзинга позиций находится в режиме ожидания...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Position sizing pipeline in standby...', ru: 'Конвейер сайзинга позиций находится в режиме ожидания...' }
-        }]
-      },
-      {
-        id: 'agentRisk',
-        nameKey: 'agentRisk',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Compliance monitors at zero utilization...', 
-          ru: 'ОЖИДАНИЕ: Мониторы комплаенса не загружены...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Compliance monitors at zero utilization...', ru: 'Мониторы комплаенса не загружены...' }
-        }]
-      },
-      {
-        id: 'agentScreener',
-        nameKey: 'agentScreener',
-        status: 'IDLE',
-        message: { 
-          en: 'IDLE: Waiting to screen next cycle...', 
-          ru: 'ОЖИДАНИЕ: Ожидание анализа следующего цикла...' 
-        },
-        lastUpdated: getFormattedTime(),
-        history: [{ 
-          timestamp: getFormattedTime(), 
-          status: 'IDLE',
-          message: { en: 'Waiting to screen next cycle...', ru: 'Ожидание анализа следующего цикла...' }
-        }]
-      },
+      { id: 'technical_analyst', name: 'Atlas (Technical Analyst)', status: 'IDLE', message: { en: 'IDLE: Awaiting next price frame computation...', ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'sentiment_analyst', name: 'Luna (Sentiment Analyst)', status: 'IDLE', message: { en: 'IDLE: Polling social indexes and order books...', ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'trader', name: 'Mercury (Trader)', status: 'IDLE', message: { en: 'IDLE: Position sizing pipeline in standby...', ru: 'ОЖИДАНИЕ: Конвейер сайзинга позиций находится в режиме ожидания...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'risk_auditor', name: 'Rogue (Risk Auditor)', status: 'IDLE', message: { en: 'IDLE: Compliance monitors at zero utilization...', ru: 'ОЖИДАНИЕ: Мониторы комплаенса не загружены...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'altcoin_screener', name: 'Nova (Altcoin Screener)', status: 'IDLE', message: { en: 'IDLE: Waiting to screen next cycle...', ru: 'ОЖИДАНИЕ: Ожидание анализа следующего цикла...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'performance_optimizer', name: 'Zephyr (Performance Optimizer)', status: 'IDLE', message: { en: 'IDLE: Optimizing hyper-parameters...', ru: 'ОЖИДАНИЕ: Оптимизация параметров...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'portfolio_manager', name: 'Midas (Portfolio Manager)', status: 'IDLE', message: { en: 'IDLE: Rebalancing constraints in standby...', ru: 'ОЖИДАНИЕ: Ребалансировка...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'meeting_chair', name: 'Athena (Meeting Chair)', status: 'IDLE', message: { en: 'IDLE: No consensus meetings scheduled...', ru: 'ОЖИДАНИЕ: Собрания не запланированы...' }, lastUpdated: getFormattedTime(), history: [] },
     ]);
   };
 
@@ -1104,20 +946,18 @@ export default function App() {
       </header>
 
       {/* Main Dashboard Panel layout container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-12 gap-6">
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
         
-        {/* Left column: 8cols wide on desktop for visual data nodes */}
-        <section className="lg:col-span-8 space-y-6">
-          
-          {/* Overview equity curve and key metrics cards */}
-          <OverviewPanel 
-            data={chartData} 
-            lang={lang} 
-            t={activeTranslations} 
-          />
+        {/* Overview equity curve and key metrics cards */}
+        <OverviewPanel 
+          data={chartData} 
+          lang={lang} 
+          t={activeTranslations} 
+        />
 
-          {/* Allocation radial breakdown & consensus room rows */}
-          <div className="grid grid-cols-1 gap-6">
+        {/* Allocation & Discord Agents Board */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-4">
             <AssetAllocation 
               strategy={strategy} 
               marketPrices={marketPrices} 
@@ -1126,7 +966,9 @@ export default function App() {
               lang={lang} 
               t={activeTranslations} 
             />
-            
+          </div>
+          
+          <div className="lg:col-span-8">
             <AgentRoomConsole 
               agents={agents} 
               lang={lang} 
@@ -1137,57 +979,15 @@ export default function App() {
               setInputValue={setChatInput}
             />
           </div>
+        </div>
 
-          {/* Parameter optimization self-tuning log table */}
-          <OptimizerAuditTable
-            logs={optimizationHistory}
-            locale={lang}
-            onRefresh={async () => {
-              try {
-                const optHistory = await getOptimizerHistory();
-                setOptimizationHistory(optHistory);
-              } catch (e) {
-                console.error('Failed to manually refresh optimizer history:', e);
-              }
-            }}
-          />
-
-          {/* Transaction logs table */}
-          <ExecutionLogsTable 
-            logs={logs} 
-            lang={lang} 
-            t={activeTranslations} 
-            onSelectTransaction={handleSelectTransaction}
-          />
-
-        </section>
-
-        {/* Right column: 4cols wide on desktop for parameters control */}
-        <aside className="lg:col-span-4 h-fit lg:sticky lg:top-24 space-y-6">
-          <ControlSidebar
-            lang={lang}
-            setLang={setLang}
-            strategy={strategy}
-            setStrategy={setStrategy}
-            llmConfig={llmConfig}
-            setLlmConfig={setLlmConfig}
-            isEngineRunning={isEngineRunning}
-            setIsEngineRunning={setIsEngineRunning}
-            ticksPerMinute={ticksPerMinute}
-            setTicksPerMinute={setTicksPerMinute}
-            stopLossLimit={stopLossLimit}
-            setStopLossLimit={setStopLossLimit}
-            t={activeTranslations}
-            dataSource={dataSource}
-            resetSimulationBalance={resetSimulationBalance}
-            startingBalance={startingBalance}
-          />
-
-          <MarketNewsFeed
-            lang={lang}
-            t={activeTranslations}
-          />
-        </aside>
+        {/* Transaction logs table */}
+        <ExecutionLogsTable 
+          logs={logs} 
+          lang={lang} 
+          t={activeTranslations} 
+          onSelectTransaction={handleSelectTransaction}
+        />
 
       </main>
 

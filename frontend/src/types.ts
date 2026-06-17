@@ -3,11 +3,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export type AgentStatusType = 'IDLE' | 'EXECUTING' | 'COMPLETED' | 'VETOED';
+export type AgentStatusType = 'IDLE' | 'EXECUTING' | 'COMPLETED' | 'VETOED' | 'THINKING' | 'SPEAKING';
 
 export interface TradingAgentState {
   id: string;
-  nameKey: 'agentTechnical' | 'agentSentiment' | 'agentTrader' | 'agentRisk' | 'agentScreener';
+  name: string;
   status: AgentStatusType;
   message: { en: string; ru: string };
   lastUpdated: string;
@@ -15,11 +15,10 @@ export interface TradingAgentState {
 }
 
 export interface BackendAgentState {
-  role: 'technical_analyst' | 'sentiment_analyst' | 'trader' | 'risk_auditor' | 'altcoin_screener' | 'performance_optimizer';
+  id: string;
+  name: string;
   status: AgentStatusType;
-  message_en: string;
-  message_ru: string;
-  last_updated: string;
+  current_task: string;
 }
 
 export interface OptimizationLogEntry {

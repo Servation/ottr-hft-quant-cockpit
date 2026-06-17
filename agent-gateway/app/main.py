@@ -5,6 +5,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.routers.api import router as api_router
+from app.routers.discord_webhooks import router as discord_webhooks_router
 from app.config import settings
 
 # Setup standard logging
@@ -35,6 +36,7 @@ app.add_middleware(
 
 # Include versioned API router
 app.include_router(api_router, prefix="/api/v1")
+app.include_router(discord_webhooks_router, prefix="/api/internal")
 
 # Instrument Prometheus metrics
 Instrumentator().instrument(app).expose(app, endpoint="/metrics")

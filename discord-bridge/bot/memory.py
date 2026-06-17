@@ -279,14 +279,15 @@ class SemanticMeetingMemory(MeetingMemory):
         expanded_query = query_text
         try:
             prompt = (
-                f"You are a query expansion tool for a crypto TF-IDF engine. "
                 f"Given the query: '{query_text}', expand it with a few key synonyms "
                 f"(e.g., SOL -> Solana, ETH -> Ethereum, position -> allocation) to improve exact keyword matching. "
-                f"Respond ONLY with the expanded query string, no other text."
             )
             expanded_query, _ = await agent_llm.generate_response(
                 agent_id="meeting_chair",  # Reuse meeting_chair's persona lightly
-                context_messages=[{"role": "user", "content": prompt}],
+                context_messages=[
+                    {"role": "system", "content": "You are a query expansion tool for a crypto TF-IDF engine. Respond ONLY with the expanded query string, no other text."},
+                    {"role": "user", "content": prompt}
+                ],
                 max_tokens=50
             )
             # if it errored out, it will start with [error], so we fallback

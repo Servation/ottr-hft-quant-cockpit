@@ -23,6 +23,7 @@ from bot.agents import AGENTS
 from bot.scheduler import meeting_scheduler
 from bot.ceo_handler import ceo_handler
 from bot.alerts import alert_monitor
+from bot.api_server import start_api_server
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -120,6 +121,7 @@ class TradingFloorBot(discord.Client):
         # Start background services
         await meeting_scheduler.start(self)
         self.loop.create_task(alert_monitor.start(self))
+        self.api_runner = await start_api_server(self, port=8001)
 
         # Fire a startup meeting after a short delay (lets webhooks settle)
         self.loop.create_task(self._startup_meeting())
@@ -319,6 +321,11 @@ async def _shutdown(bot: TradingFloorBot) -> None:
         await meeting_scheduler.stop()
     except Exception:
         logger.exception("Error stopping scheduler")
+    try:
+        if hasattr(bot, "api_runner") and bot.api_runner:
+            await bot.api_runner.cleanup()
+    except Exception:
+        logger.exception("Error stopping API server")
     try:
         await bot.close()
     except Exception:

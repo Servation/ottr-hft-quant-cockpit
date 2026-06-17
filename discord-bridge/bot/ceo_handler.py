@@ -18,7 +18,7 @@ from bot.price_feed import price_feed
 from bot.portfolio import portfolio
 from bot.memory import meeting_memory
 from bot.scheduler import meeting_scheduler
-from bot.tools import READ_TOOLS, handle_tool_call
+from bot.tools import READ_TOOLS, ACTION_TOOLS, handle_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +88,10 @@ Tag:"""
                 # Using system role to ensure strict parsing.
                 tag_response, _ = await agent_llm.generate_response(
                     "meeting_chair", 
-                    [{"role": "user", "content": router_prompt}],
+                    [
+                        {"role": "system", "content": "You are a CEO directive routing tool. Respond ONLY with the requested tag, no conversational text."},
+                        {"role": "user", "content": router_prompt}
+                    ],
                     max_tokens=20
                 )
             tag = tag_response.strip().upper()
@@ -224,7 +227,10 @@ Tag:"""
 ### Long-Term Semantic Memory
 {memory_str}
 
-Respond directly to the CEO. Keep it concise, helpful, and in character. Reference the short-term chat history if they are asking a follow-up question. Do not use [TRADE] or [ORDER] tags here, just converse.
+### Available Tools
+You have access to tools to execute actions like updating parameters (e.g. min_trade_usd), scheduling meetings, and executing trades. If the CEO explicitly commands you to do one of these things, USE THE TOOL directly to carry out their directive.
+
+Respond directly to the CEO. Keep it concise, helpful, and in character. Reference the short-term chat history if they are asking a follow-up question. Do not use text-based [TRADE] or [ORDER] tags, use the tool function calls instead.
 """
             async with message.channel.typing():
                 # Bind tool handler for reading tools only
@@ -236,7 +242,7 @@ Respond directly to the CEO. Keep it concise, helpful, and in character. Referen
                 response, _ = await agent_llm.generate_response(
                     agent_id, 
                     [{"role": "user", "content": prompt}],
-                    tools=READ_TOOLS,
+                    tools=READ_TOOLS + ACTION_TOOLS,
                     tool_handler=bound_tool_handler
                 )
             

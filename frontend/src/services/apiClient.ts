@@ -39,14 +39,7 @@ export async function fetchMarketData(symbols: string[]): Promise<Record<string,
   return response.json();
 }
 
-// Fetch news RSS feed proxy
-export async function fetchMarketNews(): Promise<NewsItem[]> {
-  const response = await fetch(`${API_BASE}/market-news`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch news feed: ${response.statusText}`);
-  }
-  return response.json();
-}
+
 
 // Helper to map a backend log item to the frontend's ExecutionLogEntry interface
 function mapLogEntry(item: any, idx: number): ExecutionLogEntry {
@@ -117,90 +110,7 @@ export async function fetchExecutionLogs(limit: number = 50): Promise<ExecutionL
   return [];
 }
 
-// Push system configuration to the gateway
-export async function postTradingConfig(config: TradingConfig): Promise<void> {
-  const response = await fetch(`${API_BASE}/trading/config`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      strategy: config.strategy,
-      symbols: config.activeCryptos.map(s => `${s}USDT`),
-      interval_seconds: Math.max(5, Math.round(60 / config.ticksPerMinute)),
-      stop_loss_limit: config.stopLossLimit !== undefined ? config.stopLossLimit / 100 : 0.07
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to save configuration: ${response.statusText}`);
-  }
-}
 
-// Test connectivity to the user-supplied LLM endpoint
-export async function postLLMTestConnection(config: LLMConfig): Promise<LLMTestResult> {
-  const response = await fetch(`${API_BASE}/llm/test-connection`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      llm_base_url: config.base_url,
-      llm_api_key: config.api_key,
-      llm_model_id: config.model_id
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to test connection: ${response.statusText}`);
-  }
-  const data = await response.json();
-  return {
-    status: data.status === 'SUCCESS' ? 'CONNECTED' : 'ERROR',
-    ping_ms: data.latency_seconds ? Math.round(data.latency_seconds * 1000) : 50,
-    error_message: data.message
-  };
-}
-
-// Test connectivity to the user-supplied Fallback LLM endpoint
-export async function postLLMFallbackTestConnection(config: LLMConfig): Promise<LLMTestResult> {
-  const response = await fetch(`${API_BASE}/llm/test-fallback-connection`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      llm_base_url: config.base_url,
-      llm_api_key: config.api_key,
-      llm_model_id: config.model_id,
-      llm_fallback_base_url: config.fallback_base_url,
-      llm_fallback_api_key: config.fallback_api_key,
-      llm_fallback_model_id: config.fallback_model_id,
-      llm_fallback_active: config.fallback_active
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to test fallback connection: ${response.statusText}`);
-  }
-  const data = await response.json();
-  return {
-    status: data.status === 'SUCCESS' ? 'CONNECTED' : 'ERROR',
-    ping_ms: data.latency_seconds ? Math.round(data.latency_seconds * 1000) : 50,
-    error_message: data.message
-  };
-}
-
-// Configure LLM parameters in Python gateway
-export async function postLLMConfigure(config: LLMConfig): Promise<void> {
-  const response = await fetch(`${API_BASE}/llm/configure`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      llm_base_url: config.base_url,
-      llm_api_key: config.api_key,
-      llm_model_id: config.model_id,
-      llm_fallback_base_url: config.fallback_base_url,
-      llm_fallback_api_key: config.fallback_api_key,
-      llm_fallback_model_id: config.fallback_model_id,
-      llm_fallback_active: config.fallback_active
-    }),
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to configure LLM: ${response.statusText}`);
-  }
-}
 
 // Start trading loops on gateway
 export async function postTradingStart(): Promise<void> {
@@ -312,20 +222,3 @@ export async function postAgentChat(message: string, history: ChatMessage[]): Pr
   return response.json();
 }
 
-export async function getOptimizerHistory(): Promise<OptimizationLogEntry[]> {
-  const response = await fetch(`${API_BASE}/optimizer/history`);
-  if (!response.ok) {
-    throw new Error(`Failed to fetch optimizer history: ${response.statusText}`);
-  }
-  return response.json();
-}
-
-export async function runOptimizer(): Promise<{ status: string; result: any }> {
-  const response = await fetch(`${API_BASE}/optimizer/run`, {
-    method: 'POST'
-  });
-  if (!response.ok) {
-    throw new Error(`Failed to trigger optimizer run: ${response.statusText}`);
-  }
-  return response.json();
-}
