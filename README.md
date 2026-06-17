@@ -1,6 +1,6 @@
-# OTTR HFT Cockpit: Polyglot Microservice System
+# OTTR HFT Cockpit: AI Agent Trading System
 
-OTTR is a quantitative dashboard for cryptocurrency markets, utilizing a polyglot microservice architecture designed to handle real-time market data analytics and automated multi-agent consensus trade logic.
+OTTR is a quantitative dashboard for cryptocurrency markets, utilizing a modular microservice architecture designed to handle real-time market data analytics and automated multi-agent consensus trade logic.
 
 ---
 
@@ -14,7 +14,7 @@ graph TD
     DB <-->|Live Context & Routing| DIS[Discord #trading-floor]
 ```
 
-### Polyglot Microservices
+### Microservices
 
 1. **Frontend (`/frontend`)**
    - **Stack**: React 19, Vite 6, Tailwind CSS v4, Lucide Icons.
@@ -25,9 +25,6 @@ graph TD
 3. **Discord Bridge (`/discord-bridge`)**
    - **Stack**: Python 3.12, Discord.py, SQLite, ChromaDB-style Vector Search.
    - **Role**: **The single source of truth for the system.** Connects the 8 OTTR agents to a Discord channel (`#trading-floor`). Features a Live LLM Intent Router, semantic memory, portfolio state management, and a fully functional order book simulator.
-4. **Market Engine (`/market-engine`)** *(Legacy/Standby)*
-   - **Stack**: Java 21, Spring Boot 3.3.6.
-   - **Role**: Legacy execution engine for limit order book construction and Binance API dual-mode rate limiting. (Execution is currently managed by the Discord Bridge).
 
 ---
 
@@ -38,7 +35,7 @@ d:\crypto-trading-bot/
 ├── frontend/                 # React SPA (Vite + Tailwind v4)
 ├── agent-gateway/            # Python FastAPI Agent service
 ├── discord-bridge/           # Discord AI Agent Hub (Memory, Router, Chat)
-├── market-engine/            # Java Spring Boot Matching Engine (Standby)
+
 ├── docker-compose.yml        # Orchestration configurations
 ├── .env.example              # Environment variables template
 └── README.md                 # System documentation

@@ -2,7 +2,6 @@ import logging
 import sys
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from prometheus_fastapi_instrumentator import Instrumentator
 
 from app.routers.api import router as api_router
 from app.routers.discord_webhooks import router as discord_webhooks_router
@@ -21,7 +20,7 @@ logger = logging.getLogger("app.main")
 # Instantiate FastAPI application
 app = FastAPI(
     title="Python Agent Gateway",
-    description="Microservice managing trading analysts and gateway execution in the Polyglot Trading Bot",
+    description="FastAPI proxy for the OTTR Discord Bridge",
     version="1.0.0"
 )
 
@@ -38,8 +37,6 @@ app.add_middleware(
 app.include_router(api_router, prefix="/api/v1")
 app.include_router(discord_webhooks_router, prefix="/api/internal")
 
-# Instrument Prometheus metrics
-Instrumentator().instrument(app).expose(app, endpoint="/metrics")
 
 @app.on_event("startup")
 async def startup_event():

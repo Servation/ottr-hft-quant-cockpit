@@ -47,7 +47,7 @@ A meta-learning agent that regularly reviews trade execution history and journal
 
 Exposed actions that agents can run to obtain data or modify parameters:
 - **Multi-Timeframe Candle Tool (`fetch_candles`)**: Allows agents to retrieve historical OHLCV data from Binance/Yahoo Finance across different intervals (e.g., 1m, 1h, 1d) for multi-scale technical indicators.
-- **Order Book Imbalance Tool (`fetch_order_book_imbalance`)**: Queries the Java matching engine to retrieve bid-ask volume imbalance ratios near the mid price.
+- **Order Book Imbalance Tool (`fetch_order_book_imbalance`)**: Queries the Discord Bridge's internal limit order book to retrieve bid-ask volume imbalance ratios near the mid price.
 - **On-chain Indicators**: Querying network transaction profitability (e.g., SOPR).
 - **Meme & Narrative Harvester Tool (`harvest_market_narratives`)**: A tool that fetches top aggregated market headlines, allowing the agent to dynamically extract current market narratives, catalysts, and FUD memes using semantic classification.
 - **Fear & Greed Index Tool (`fetch_fear_and_greed_index`)**: Queries public sentiment APIs to retrieve the overall daily market sentiment index.
