@@ -113,7 +113,7 @@ Every message typed into the React CEO Terminal is proxied to the Discord bot an
 
 ### Short-Term & Semantic Long-Term Memory
 - **Short-Term Context**: Agents automatically fetch the recent messages in the Discord channel for fluid follow-up conversations.
-- **Long-Term Context**: A local SQLite vector database automatically saves transcripts of every trading meeting and decision. During live responses or new meetings, the bot uses **Semantic Search** to pull historical meetings that match current market conditions.
+- **Long-Term Context**: Transcripts of every trading meeting and decision are saved as Markdown files in a local vault. During live responses or new meetings, the bot uses the **Vesper Text** engine (TF-IDF semantic search) to pull historical context packets that match current market conditions.
 
 ### Agent Order Book & Autonomy
 Agents trade using an internal **Limit Order Book** simulated in the Discord bot. They can place Take Profits and Stop Losses, and a 60-second background ticker loops through active limits against CoinGecko prices. If a stop-loss is triggered, the bot automatically schedules an emergency meeting.
