@@ -124,16 +124,17 @@ discord-bridge/
 │   ├── main.py              # Bot lifecycle & webhook management
 │   ├── agents.py            # Agent definitions & LLM caller
 │   ├── alerts.py            # Emergency price-threshold monitor
-│   ├── ceo_handler.py       # CEO directive queue
+│   ├── ceo_handler.py       # CEO directive queue & live LLM message router
 │   ├── meetings.py          # Meeting types & turn sequencing
-│   ├── memory.py            # Rolling summaries & decision log
+│   ├── memory.py            # Vesper TF-IDF Semantic Memory & recent context
 │   ├── portfolio.py         # Paper portfolio with JSON persistence
-│   ├── price_feed.py        # CoinGecko + CoinCap price fetcher
+│   ├── price_feed.py        # CoinGecko + CoinCap price fetcher (BTC, ETH, SOL, BNB, XRP, ADA, DOGE, LINK, AVAX)
 │   └── scheduler.py         # APScheduler cron integration
 ├── config/
 │   ├── settings.yaml        # Runtime configuration
 │   └── personas/            # Agent system prompts
-├── data/                    # Runtime state (portfolio, memory)
+├── data/                    # Runtime state (portfolio)
+│   └── vesper_vault/        # Markdown-based semantic memory vault
 ├── .env                     # Secrets (not committed)
 ├── .env.example             # Template
 ├── requirements.txt         # Python dependencies
@@ -200,7 +201,18 @@ Immediately after trade/parameter directives are processed, the Portfolio Manage
 ### 3. Expanded Debate Round
 The debate round dynamically selects **all** non-facilitator participants to speak (instead of capping at 3), giving the entire team a chance to voice disagreements and challenge colleagues.
 
-### 4. Majority Rules & 100% Sizing
+### 4. Semantic Memory & Retrieval (Vesper)
+The bot logs all past meetings, live discussions, and direct messages into a Markdown-based semantic vault (`data/vesper_vault`). When generating the context for an upcoming meeting, it performs a local TF-IDF semantic search to pull in the most historically relevant context, along with the most recent short-term memory.
+
+### 5. Live CEO Message Routing
+Human interactions in the `#trading-floor` channel are processed live by an LLM router, which categorizes intent into one of five actions:
+- `[IGNORE]`: Drops casual chatter or rhetorical statements.
+- `[QUEUE]`: Saves a directive to the agenda for the next scheduled meeting (capped at 3 items).
+- `[EMERGENCY]`: Immediately triggers a full team meeting.
+- `[DIRECT]`: Pings the single most relevant agent to respond instantly.
+- `[DISCUSSION]`: Starts an ad-hoc live debate in the channel between two relevant agents.
+
+### 6. Majority Rules & 100% Sizing
 - **Majority Rules:** Decisions are governed by majority consensus. Unilateral agent vetoes (like from the Risk Auditor) are treated as dissenting votes and can be overridden by a majority vote.
 - **Dynamic Allocation:** The Trader can propose, and the Portfolio Manager can execute, capital allocation sizing up to **100%** of available cash.
 - **Minimum Trade & Dust Bypass:** A minimum trade limit (defaults to **$100**) is strictly enforced for buys and partial sells. Full asset liquidations (sells of the total quantity held) automatically bypass the minimum check to prevent leaving behind fractional "dust" holdings.

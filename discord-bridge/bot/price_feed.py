@@ -14,14 +14,25 @@ logger = logging.getLogger(__name__)
 # API endpoints
 COINGECKO_URL = (
     "https://api.coingecko.com/api/v3/simple/price"
-    "?ids=bitcoin,ethereum&vs_currencies=usd&include_24hr_change=true"
+    "?ids=bitcoin,ethereum,solana,binancecoin,ripple,cardano,dogecoin,chainlink,avalanche-2"
+    "&vs_currencies=usd&include_24hr_change=true"
 )
-COINCAP_URL = "https://api.coincap.io/v2/assets?ids=bitcoin,ethereum"
+COINCAP_URL = "https://api.coincap.io/v2/assets?ids=bitcoin,ethereum,solana,binance-coin,xrp,cardano,dogecoin,chainlink,avalanche"
 DEFILLAMA_YIELDS_URL = "https://yields.llama.fi/pools"
 COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
 
 # Map CoinGecko ids to our ticker symbols
-_GECKO_ID_MAP = {"bitcoin": "BTC", "ethereum": "ETH"}
+_GECKO_ID_MAP = {
+    "bitcoin": "BTC", 
+    "ethereum": "ETH",
+    "solana": "SOL",
+    "binancecoin": "BNB",
+    "ripple": "XRP",
+    "cardano": "ADA",
+    "dogecoin": "DOGE",
+    "chainlink": "LINK",
+    "avalanche-2": "AVAX",
+}
 
 
 class PriceFeed:
@@ -288,21 +299,24 @@ class PriceFeed:
         correlation = self.get_correlation()
         
         lines: List[str] = []
-        for symbol in ("BTC", "ETH"):
+        # Sort so BTC and ETH appear first, then the rest
+        symbols = sorted(prices.keys(), key=lambda s: (s not in ("BTC", "ETH"), s))
+        for symbol in symbols:
             entry = prices.get(symbol, {})
             price = entry.get("price", 0.0)
             change = entry.get("change_24h", 0.0)
             vol = volatility.get(symbol, 0.0)
             fund = funding_rates.get(symbol, 0.0)
             
-            direction = "▲" if change >= 0 else "▼"
+            direction = "🟢" if change >= 0 else "🔴"
             vol_str = f"Vol: {vol*100:.1f}%" if vol > 0 else "Vol: N/A"
             fund_str = f"Fund: {fund*100:+.3f}%"
-            lines.append(f"{symbol}: ${price:,.2f} ({direction} {abs(change):.2f}%, {vol_str}, {fund_str})")
+            lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str})")
             
-        yield_str = f"Stablecoin Yield: {avg_yield:.1f}% APY"
-        corr_str = f"BTC/ETH Correlation: {correlation:.2f}"
-        return " | ".join(lines) + f" | {corr_str} | {yield_str}"
+        yield_str = f"- **Stablecoin Yield**: {avg_yield:.1f}% APY"
+        corr_str = f"- **BTC/ETH Correlation**: {correlation:.2f}"
+        
+        return "\n".join(lines) + f"\n{corr_str}\n{yield_str}"
 
 
 price_feed = PriceFeed()

@@ -18,6 +18,7 @@ from bot.price_feed import price_feed
 from bot.portfolio import portfolio
 from bot.memory import meeting_memory
 from bot.scheduler import meeting_scheduler
+from bot.tools import READ_TOOLS, handle_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -49,15 +50,32 @@ class CEOHandler:
 
         logger.info(f"CEO message received: {user_msg[:80]}...")
         
-        # 1. Ask the Router LLM
+        # 1. Fetch recent chat history for context-aware routing
+        chat_history = []
+        async for msg in message.channel.history(limit=6, before=message):
+            if msg.content.strip():
+                author_name = "Bot" if msg.author.bot else str(msg.author)
+                chat_history.append(f"{author_name}: {msg.clean_content}")
+        chat_history.reverse()
+        chat_str = "\n".join(chat_history) if chat_history else "No recent messages."
+
+        # 2. Ask the Router LLM
         agent_names = ", ".join([a.name for a in AGENTS.values()])
         router_prompt = f"""
-You are the CEO Handler Router. The CEO just said: "{user_msg}"
+You are the CEO Handler Router. 
+
+### Recent Chat Context
+{chat_str}
+
+### Latest Message
+The CEO just said: "{user_msg}"
 
 Categorize this intent. Return ONLY ONE of the following tags:
-- [QUEUE]: It's a general directive, strategy tweak, or order for the next meeting.
-- [EMERGENCY]: They want an immediate full team meeting (e.g., "emergency", "meet now").
-- [DIRECT:agent_id]: They are asking a specific question best answered by an individual agent or mentioning their name.
+- [IGNORE]: The CEO is just chatting, saying thanks, acknowledging something, or making a rhetorical comment that does not require any response or meeting time.
+- [QUEUE]: ONLY use this if the CEO EXPLICITLY requests to save this topic or directive for the next meeting (e.g. "discuss this later", "put this on the agenda"). Do NOT use this for general questions.
+- [EMERGENCY]: The CEO wants an immediate full team meeting (e.g., "emergency", "meet now").
+- [DIRECT:agent_id]: The CEO is asking a question or making a comment that should be answered right now. Pick the most relevant agent (by agent_id) to answer it live. **CRITICAL:** If it's a general question or the CEO doesn't specifically ask for another agent, default to `[DIRECT:meeting_chair]`.
+- [DISCUSSION:agent_id1,agent_id2]: The CEO is asking a complex question or bringing up a topic that requires debate or multiple viewpoints right now. Pick the 2 most relevant agents to debate it live.
 
 Valid agent_ids: {', '.join(AGENTS.keys())}
 Valid names: {agent_names}
@@ -65,23 +83,60 @@ Valid names: {agent_names}
 Tag:"""
 
         try:
-            # We use meeting_chair's persona LLM config for the router, it's fast enough.
-            # Using system role to ensure strict parsing.
-            tag_response, _ = await agent_llm.generate_response(
-                "meeting_chair", 
-                [{"role": "user", "content": router_prompt}],
-                max_tokens=20
-            )
+            async with message.channel.typing():
+                # We use meeting_chair's persona LLM config for the router, it's fast enough.
+                # Using system role to ensure strict parsing.
+                tag_response, _ = await agent_llm.generate_response(
+                    "meeting_chair", 
+                    [{"role": "user", "content": router_prompt}],
+                    max_tokens=20
+                )
             tag = tag_response.strip().upper()
         except Exception as e:
             logger.error(f"Router LLM failed: {e}")
             tag = "[QUEUE]" # fallback
 
         # 2. Handle intent
-        if "[EMERGENCY]" in tag:
+        if "[IGNORE]" in tag:
+            # Just ignore casual chat
+            logger.info("Router categorized message as IGNORE.")
+            return
+            
+        elif "[EMERGENCY]" in tag:
             await message.channel.send("🚨 **Emergency Override Recognized!** Waking up the full team immediately...")
             self._queue_directive(message) # ensure it gets discussed
-            meeting_scheduler.schedule_emergency()
+            
+            asyncio.create_task(
+                meeting_scheduler.schedule_emergency([
+                    {"reason": "CEO invoked emergency meeting", "directive": message.content}
+                ])
+            )
+            
+        elif "[DISCUSSION:" in tag:
+            try:
+                start = tag.find("[DISCUSSION:") + 12
+                end = tag.find("]", start)
+                raw_ids = tag[start:end].lower().split(",")
+                agent_ids = []
+                for a_id in raw_ids:
+                    a_id = a_id.strip()
+                    if a_id in AGENTS:
+                        agent_ids.append(a_id)
+                    else:
+                        for key, agent in AGENTS.items():
+                            first_name = agent.name.split(" ")[0].lower()
+                            if a_id == first_name or a_id in agent.name.lower():
+                                agent_ids.append(key)
+                                break
+                if len(agent_ids) >= 2:
+                    await self._handle_discussion_mode(message, agent_ids[:2], bot)
+                else:
+                    self._queue_directive(message)
+                    await message.channel.send(f"📋 CEO directive queued. Will address in next meeting.")
+            except Exception as e:
+                logger.error(f"Discussion routing failed: {e}")
+                self._queue_directive(message)
+                await message.channel.send(f"📋 CEO directive queued. Will address in next meeting.")
 
         elif "[DIRECT:" in tag:
             # Extract agent_id
@@ -91,7 +146,19 @@ Tag:"""
                 agent_id = tag[start:end].lower()
                 
                 if agent_id not in AGENTS:
-                    raise ValueError("Invalid agent_id")
+                    # Try resolving by name (e.g. 'midas' -> 'portfolio_manager')
+                    resolved_id = None
+                    for key, agent in AGENTS.items():
+                        # agent.name looks like "Midas (Portfolio Manager)"
+                        # Split by space and take the first word, lowercased
+                        first_name = agent.name.split(" ")[0].lower()
+                        if agent_id == first_name or agent_id in agent.name.lower():
+                            resolved_id = key
+                            break
+                    
+                    if not resolved_id:
+                        raise ValueError(f"Invalid agent_id: {agent_id}")
+                    agent_id = resolved_id
                     
                 await self._handle_direct_message(message, agent_id, bot)
             except Exception as e:
@@ -116,7 +183,8 @@ Tag:"""
         try:
             # Fetch context
             price_str = await price_feed.get_market_state_summary()
-            port_str = portfolio.get_summary()
+            prices = await price_feed.get_prices()
+            port_str = portfolio.get_summary(prices)
             memory_str = await meeting_memory.get_semantic_context(message.content, limit=2)
             
             # Fetch recent chat history for follow-up context
@@ -128,6 +196,9 @@ Tag:"""
             chat_history.reverse()
             chat_str = "\n".join(chat_history) if chat_history else "No recent messages."
             
+            next_type, next_time = meeting_scheduler.get_next_meeting_info()
+            schedule_str = f"Next scheduled meeting: {next_type} at {next_time}"
+            
             prompt = f"""
 ### Recent Chat History (Short-Term Memory)
 {chat_str}
@@ -135,26 +206,162 @@ Tag:"""
 ### Live Question from CEO
 {message.author} just asked you directly: "{message.content}"
 
+### Market Data Definitions
+- **Vol (Volatility):** 14-day annualized historical volatility. High volatility means wide price swings.
+- **Fund (Funding Rate):** Perpetual futures funding rate. Positive means longs pay shorts (bullish sentiment, potential long squeeze). Negative means shorts pay longs (bearish sentiment, short squeeze).
+- **Correlation:** Pearson correlation (-1.0 to 1.0) between BTC and ETH. 1.0 means they move perfectly together.
+- **Yield:** Average APY of top stablecoin DeFi pools (risk-free baseline rate).
+
 ### Market State
 {price_str}
 
 ### Portfolio
 {port_str}
 
+### System Status
+{schedule_str}
+
 ### Long-Term Semantic Memory
 {memory_str}
 
 Respond directly to the CEO. Keep it concise, helpful, and in character. Reference the short-term chat history if they are asking a follow-up question. Do not use [TRADE] or [ORDER] tags here, just converse.
 """
-            response, _ = await agent_llm.generate_response(agent_id, [{"role": "user", "content": prompt}])
+            async with message.channel.typing():
+                # Bind tool handler for reading tools only
+                from functools import partial
+                async def direct_post(agent, msg):
+                    await message.channel.send(f"[{AGENTS[agent].name}]: {msg}")
+                bound_tool_handler = partial(handle_tool_call, audit_log_fn=None, post_message_fn=direct_post)
+                
+                response, _ = await agent_llm.generate_response(
+                    agent_id, 
+                    [{"role": "user", "content": prompt}],
+                    tools=READ_TOOLS,
+                    tool_handler=bound_tool_handler
+                )
             
             # Delete ack message and post the real one
             await ack_msg.delete()
             await bot.post_as_agent(agent_id, response)
             
+            # Log the direct interaction to Vesper memory
+            record = meeting_memory.make_meeting_record(
+                meeting_type="direct_message",
+                summary=f"CEO Question: {message.content[:100]}...\nAnswer: {response[:150]}...",
+                agent_contributions={agent_id: response},
+                decisions=[],
+                actions=[]
+            )
+            await meeting_memory.save_meeting(record)
+            
+            
         except Exception as e:
             logger.error(f"Failed to fetch direct response: {e}")
             await ack_msg.edit(content=f"❌ **Error:** {agent_name} is currently unreachable.")
+
+    async def _handle_discussion_mode(self, message: discord.Message, agent_ids: list[str], bot: Any):
+        """Runs a live turn-based debate in the Discord channel between 2 agents, moderated by Athena."""
+        await message.channel.send(f"*(Starting live discussion between {AGENTS[agent_ids[0]].name} and {AGENTS[agent_ids[1]].name}...)*")
+        
+        try:
+            price_str = await price_feed.get_market_state_summary()
+            prices = await price_feed.get_prices()
+            port_str = portfolio.get_summary(prices)
+            memory_str = await meeting_memory.get_semantic_context(message.content, limit=2)
+            
+            # 3 turns max
+            turn_count = 0
+            MAX_TURNS = 3
+            current_agent_idx = 0
+            
+            chat_history = []
+            async for msg in message.channel.history(limit=6, before=message):
+                if msg.content.strip():
+                    author_name = "Bot" if msg.author.bot else str(msg.author)
+                    chat_history.append(f"{author_name}: {msg.clean_content}")
+            chat_history.reverse()
+            chat_history.append(f"{message.author}: {message.content}")
+
+            while turn_count < MAX_TURNS:
+                agent_id = agent_ids[current_agent_idx]
+                chat_str = "\n".join(chat_history)
+                
+                next_type, next_time = meeting_scheduler.get_next_meeting_info()
+                schedule_str = f"Next scheduled meeting: {next_type} at {next_time}"
+                
+                # Bind tool handler
+                from functools import partial
+                async def direct_post(agent, msg):
+                    await message.channel.send(f"[{AGENTS[agent].name}]: {msg}")
+                bound_tool_handler = partial(handle_tool_call, audit_log_fn=None, post_message_fn=direct_post)
+                
+                prompt = f"""
+### Live Chat History
+{chat_str}
+
+### Market State
+{price_str}
+
+### Portfolio
+{port_str}
+
+### System Status
+{schedule_str}
+
+### Semantic Memory
+{memory_str}
+
+You are in a LIVE DISCUSSION in the Discord channel. 
+Read the latest chat history. It is your turn to speak. 
+Acknowledge what the CEO or the other agent just said, and provide your perspective or rebuttal. Keep it concise and conversational.
+"""
+                async with message.channel.typing():
+                    response, _ = await agent_llm.generate_response(
+                        agent_id, 
+                        [{"role": "user", "content": prompt}],
+                        tools=READ_TOOLS,
+                        tool_handler=bound_tool_handler
+                    )
+                await bot.post_as_agent(agent_id, response)
+                
+                chat_history.append(f"{AGENTS[agent_id].name}: {response}")
+                turn_count += 1
+                current_agent_idx = 1 - current_agent_idx # Toggle between 0 and 1
+                
+                if turn_count >= MAX_TURNS:
+                    # Ping Athena (meeting_chair)
+                    athena_prompt = f"""
+### Live Chat History
+{"\n".join(chat_history)}
+
+You are the Meeting Chair. The team has been having a live discussion in the Discord chat.
+It is getting a bit long. You must step in and cut them off to prevent spamming the channel.
+Provide a concluding summary message telling them to wrap it up and save the rest for the next meeting.
+"""
+                    async with message.channel.typing():
+                        athena_resp, _ = await agent_llm.generate_response(
+                            "meeting_chair", 
+                            [{"role": "user", "content": athena_prompt}],
+                            tools=READ_TOOLS,
+                            tool_handler=bound_tool_handler
+                        )
+                    await bot.post_as_agent("meeting_chair", athena_resp)
+                    chat_history.append(f"Meeting Chair: {athena_resp}")
+                    
+                    # Log the discussion to Vesper memory
+                    record = meeting_memory.make_meeting_record(
+                        meeting_type="live_discussion",
+                        summary=f"Live discussion between {AGENTS[agent_ids[0]].name} and {AGENTS[agent_ids[1]].name} triggered by CEO: {message.content[:100]}...",
+                        agent_contributions={"transcript": "\n".join(chat_history)},
+                        decisions=[],
+                        actions=[]
+                    )
+                    await meeting_memory.save_meeting(record)
+                    break
+                
+        except Exception as e:
+            logger.error(f"Failed in discussion mode: {e}")
+            await message.channel.send(f"❌ **Error during discussion.**")
 
     def _queue_directive(self, message: discord.Message):
         directive = {
@@ -164,6 +371,10 @@ Respond directly to the CEO. Keep it concise, helpful, and in character. Referen
             "channel_id": message.channel.id,
         }
         self.directive_queue.append(directive)
+        
+        # Cap queue at 3 items to prevent overloading meetings
+        if len(self.directive_queue) > 3:
+            self.directive_queue.pop(0)
 
     # ------------------------------------------------------------------
     # Query interface (used by scheduler / meeting engine)

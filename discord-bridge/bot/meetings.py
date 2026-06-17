@@ -15,6 +15,7 @@ from typing import Callable, Awaitable, Dict, List, Optional
 
 from bot.agents import AGENTS, agent_llm
 from bot.memory import meeting_memory, MeetingMemory
+from bot.tools import READ_TOOLS, ACTION_TOOLS, handle_tool_call
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +188,7 @@ class MeetingEngine:
         portfolio_summary: str = "",
         ceo_directives: str = "",
         memory_context: str = "",
+        audit_log_fn: Optional[Callable[[str], Awaitable[None]]] = None,
     ) -> dict:
         """
         Run a complete meeting with debate and return the meeting record.
@@ -202,33 +204,21 @@ class MeetingEngine:
             try:
                 from bot import settings
                 budget = settings.get("token_budgets", {}).get("meeting_history", 500)
-                similar = meeting_memory.query_similar_meetings(query_text, n=3)
-                if similar:
-                    lines = []
-                    current_words = 0
-                    for m in similar:
-                        ts = m.get("timestamp", "?")
-                        mtype = m.get("type", "?")
-                        summary = m.get("summary", "—")
-                        formatted = f"• [{ts}] {mtype} — {summary}"
-                        
-                        # Approximate token counts via word count
-                        words = formatted.split()
-                        if current_words + len(words) > budget:
-                            if not lines:
-                                # Truncate the first meeting to fit the budget
-                                allowed_words = max(1, budget - current_words)
-                                truncated_formatted = " ".join(words[:allowed_words])
-                                lines.append(truncated_formatted)
-                            break
-                        lines.append(formatted)
-                        current_words += len(words)
-                    memory_context = "\n".join(lines) or "No prior meetings on record."
-                else:
+                memory_context = await meeting_memory.get_semantic_context(query_text, limit=3)
+                if not memory_context or "No matching meeting context found" in memory_context:
                     memory_context = "No prior meetings on record."
+                else:
+                    # Very simple truncation to respect budget if it's too long
+                    words = memory_context.split()
+                    if len(words) > budget:
+                        memory_context = " ".join(words[:budget]) + "\n... (truncated)"
             except Exception:
                 logger.exception("Failed to query similar meetings")
                 memory_context = "No prior meetings on record."
+
+        # Bind tool handler
+        from functools import partial
+        bound_tool_handler = partial(handle_tool_call, audit_log_fn=audit_log_fn, post_message_fn=post_message_fn)
 
         # ---- 1. Facilitator opening message --------------------------------
         opening_msg = self._build_opening(mt, price_data, portfolio_summary, ceo_directives)
@@ -249,7 +239,9 @@ class MeetingEngine:
                 price_data, portfolio_summary, ceo_directives, memory_context,
                 is_debate_round=False,
             )
-            response, latency = await agent_llm.generate_response(agent_id, context)
+            response, latency = await agent_llm.generate_response(
+                agent_id, context, tools=READ_TOOLS, tool_handler=bound_tool_handler
+            )
             agent_contributions[agent_id] = response
 
             await post_message_fn(agent_id, response)
@@ -279,7 +271,9 @@ class MeetingEngine:
                     price_data, portfolio_summary, ceo_directives, memory_context,
                     is_debate_round=True,
                 )
-                response, latency = await agent_llm.generate_response(agent_id, context)
+                response, latency = await agent_llm.generate_response(
+                    agent_id, context, tools=READ_TOOLS, tool_handler=bound_tool_handler
+                )
                 agent_contributions[agent_id] += f"\n\n[DEBATE]: {response}"
 
                 await post_message_fn(agent_id, response)
@@ -288,147 +282,18 @@ class MeetingEngine:
                 )
                 logger.debug("%s (debate) responded in %.2fs", agent_id, latency)
 
-        # ---- 4. Facilitator closing summary --------------------------------
+        # ---- 4. Facilitator closing summary & Execution -------------------
         closing_msg, _ = await self._build_closing(
-            mt, conversation_log, price_data, portfolio_summary,
+            mt, conversation_log, price_data, portfolio_summary, bound_tool_handler
         )
+        
         agent_contributions[mt.facilitator_id] = closing_msg
         await post_message_fn(mt.facilitator_id, closing_msg)
 
-        # ---- 4.5 Parse and execute directives from closing message -------
+        # Print updated running totals after tools may have executed
         try:
-            await self._parse_and_execute_directives(closing_msg, post_message_fn)
-        except Exception:
-            logger.exception("Failed to parse and execute directives")
-
-        # ---- 5. Persist meeting record -------------------------------------
-        meeting_record = MeetingMemory.make_meeting_record(
-            meeting_type=mt.id,
-            summary=closing_msg[:300],
-            agent_contributions=agent_contributions,
-            decisions=self._extract_decisions(closing_msg),
-            actions=self._extract_actions(closing_msg),
-        )
-        await meeting_memory.save_meeting(meeting_record)
-
-        logger.info("Meeting %s completed (%s).", mt.name, meeting_record["id"])
-        return meeting_record
-
-    async def _parse_and_execute_directives(
-        self,
-        closing_msg: str,
-        post_message_fn: PostMessageFn,
-    ) -> None:
-        """Parse structured tags [TRADE: ...] and [PARAM: ...] and apply them."""
-        import re
-        from bot.portfolio import portfolio
-        from bot.price_feed import price_feed
-
-        # 1. Parse parameters: [PARAM: min_trade_usd=150.0]
-        param_matches = re.findall(r"\[PARAM:\s*([a-zA-Z0-9_]+)\s*=\s*([0-9.]+)\]", closing_msg)
-        for param_name, param_val in param_matches:
-            if param_name == "min_trade_usd":
-                try:
-                    val = float(param_val)
-                    if 10.0 <= val <= 1000.0:
-                        portfolio.min_trade_usd = val
-                        await post_message_fn(
-                            "portfolio_manager",
-                            f"⚙️ **Parameter Updated:** `min_trade_usd` set to **${val:.2f}**"
-                        )
-                        logger.info("Updated min_trade_usd parameter to %f", val)
-                    else:
-                        await post_message_fn(
-                            "portfolio_manager",
-                            f"⚠️ **Parameter Update Rejected:** `min_trade_usd` value **${val:.2f}** is out of bounds ($10 to $1,000)."
-                        )
-                except ValueError:
-                    logger.exception("Failed to parse param value: %s", param_val)
-
-        # 2. Parse trades: [TRADE: BUY BTC 500] or [TRADE: SELL BTC 0.15]
-        trade_matches = re.findall(
-            r"\[TRADE:\s*(BUY|SELL)\s+([a-zA-Z0-9]+)\s+([0-9.]+)\]",
-            closing_msg,
-            re.IGNORECASE
-        )
-        for action, asset, amount_str in trade_matches:
-            action = action.upper()
-            asset = asset.upper()
-            try:
-                amount = float(amount_str)
-                # Fetch latest price
-                prices = await price_feed.get_prices()
-                asset_data = prices.get(asset)
-                if not asset_data:
-                    raise ValueError(f"Asset price for {asset} not found in price feed")
-                price = float(asset_data["price"])
-
-                if action == "BUY":
-                    trade = portfolio.buy(asset, amount, price)
-                    await post_message_fn(
-                        "trader",
-                        f"💰 **Trade Executed:** **BUY** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}** "
-                        f"(Value: **${trade['usd_amount']:,.2f}**)"
-                    )
-                elif action == "SELL":
-                    trade = portfolio.sell(asset, amount, price)
-                    await post_message_fn(
-                        "trader",
-                        f"💰 **Trade Executed:** **SELL** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}** "
-                        f"(Proceeds: **${trade['usd_amount']:,.2f}**)"
-                    )
-            except Exception as e:
-                logger.exception("Trade execution failed")
-                await post_message_fn(
-                    "trader",
-                    f"❌ **Trade Execution Failed:** {str(e)}"
-                )
-
-        # 3. Parse orders: [ORDER: LIMIT BUY BTC 500 @ 60000]
-        order_matches = re.findall(
-            r"\[ORDER:\s*(LIMIT|STOP|TAKE_PROFIT)\s+(BUY|SELL)\s+([a-zA-Z0-9]+)\s+([0-9.]+)\s*@\s*([0-9.]+)\]",
-            closing_msg,
-            re.IGNORECASE
-        )
-        for order_type, action, asset, amount_str, price_str in order_matches:
-            try:
-                amount = float(amount_str)
-                price = float(price_str)
-                order_id = portfolio.place_order(order_type, action, asset, amount, price)
-                await post_message_fn(
-                    "portfolio_manager",
-                    f"📝 **Order Placed:** **{order_type.upper()} {action.upper()}** {amount} {asset.upper()} @ **${price:,.2f}** (ID: {order_id})"
-                )
-            except Exception as e:
-                logger.exception("Order placement failed")
-                await post_message_fn("portfolio_manager", f"❌ **Order Placement Failed:** {str(e)}")
-
-        # 4. Parse [CANCEL: ALL <ASSET>]
-        cancel_matches = re.findall(r"\[CANCEL:\s*ALL\s+([a-zA-Z0-9]+)\]", closing_msg, re.IGNORECASE)
-        for asset in cancel_matches:
-            count = portfolio.cancel_all_orders(asset)
-            if count > 0:
-                await post_message_fn(
-                    "portfolio_manager",
-                    f"🗑️ **Orders Canceled:** Canceled {count} pending orders for **{asset.upper()}**."
-                )
-
-        # 5. Parse [SCHEDULE_MEETING: <MINUTES>]
-        schedule_matches = re.findall(r"\[SCHEDULE_MEETING:\s*([0-9]+)\]", closing_msg, re.IGNORECASE)
-        for mins_str in schedule_matches:
-            try:
-                mins = int(mins_str)
-                from bot.scheduler import meeting_scheduler
-                meeting_scheduler.schedule_dynamic_meeting(mins)
-                await post_message_fn(
-                    "meeting_chair",
-                    f"⏱️ **Dynamic Meeting Scheduled:** We will reconvene in **{mins}** minutes."
-                )
-            except Exception as e:
-                logger.exception("Failed to schedule dynamic meeting")
-
-        # 3. Always print updated running totals
-        try:
+            from bot.price_feed import price_feed
+            from bot.portfolio import portfolio
             prices = await price_feed.get_prices()
             cash = portfolio._state["cash"]
             total_val = portfolio.get_total_value(prices)
@@ -448,9 +313,27 @@ class MeetingEngine:
             lines.append(f"• **Total Value:** ${total_val:,.2f} (P&L: ${pnl:,.2f})")
             lines.append(f"• **Current Min Trade Limit:** ${min_trade:,.2f}")
 
-            await post_message_fn("portfolio_manager", "\n".join(lines))
+            summary_msg = "\n".join(lines)
+            await post_message_fn("portfolio_manager", summary_msg)
+            if audit_log_fn:
+                await audit_log_fn(summary_msg)
         except Exception:
             logger.exception("Failed to post portfolio totals")
+
+        # ---- 5. Persist meeting record -------------------------------------
+        meeting_record = MeetingMemory.make_meeting_record(
+            meeting_type=mt.id,
+            summary=closing_msg[:300],
+            agent_contributions=agent_contributions,
+            decisions=self._extract_decisions(closing_msg),
+            actions=self._extract_actions(closing_msg),
+        )
+        await meeting_memory.save_meeting(meeting_record)
+
+        logger.info("Meeting %s completed (%s).", mt.name, meeting_record["id"])
+        return meeting_record
+
+
 
     def _pick_debate_agents(
         self,
@@ -522,7 +405,7 @@ class MeetingEngine:
         if portfolio_summary:
             user_content_parts.append(f"### Portfolio\n{portfolio_summary}")
         if ceo_directives:
-            user_content_parts.append(f"### CEO Directives\n{ceo_directives}")
+            user_content_parts.append(f"### CEO Directives\n{ceo_directives}\n\n*(Note: Address these directives if relevant, but your PRIMARY duty is the Meeting Focus. Do not let these side-items derail the main agenda.)*")
         if memory_context:
             user_content_parts.append(f"### Recent Meeting History\n{memory_context}")
 
@@ -568,6 +451,7 @@ class MeetingEngine:
         conversation_log: List[str],
         price_data: str,
         portfolio_summary: str,
+        tool_handler: Optional[Callable] = None,
     ) -> tuple[str, float]:
         """Ask the facilitator LLM to produce a closing summary."""
         recent_convo = "\n\n".join(conversation_log[-8:])
@@ -582,20 +466,15 @@ class MeetingEngine:
             f"2. Decision(s)\n"
             f"3. Action items\n"
             f"4. Next review checkpoint\n\n"
-            f"CRITICAL: If a trade, order, or parameter change is approved by the majority, you MUST append the exact execution tag at the very end of your response:\n"
-            f"- `[TRADE: BUY <ASSET> <USD_AMOUNT>]` (e.g. `[TRADE: BUY BTC 500]`)\n"
-            f"- `[TRADE: SELL <ASSET> <QUANTITY>]` (e.g. `[TRADE: SELL BTC 0.15]`)\n"
-            f"- `[ORDER: LIMIT BUY <ASSET> <USD_AMOUNT> @ <PRICE>]` (e.g. `[ORDER: LIMIT BUY BTC 500 @ 62000]`)\n"
-            f"- `[ORDER: STOP SELL <ASSET> <QUANTITY> @ <PRICE>]` (e.g. `[ORDER: STOP SELL ETH 0.5 @ 3000]`)\n"
-            f"- `[ORDER: TAKE_PROFIT SELL <ASSET> <QUANTITY> @ <PRICE>]` (e.g. `[ORDER: TAKE_PROFIT SELL BTC 0.25 @ 75000]`)\n"
-            f"- `[CANCEL: ALL <ASSET>]` (e.g. `[CANCEL: ALL BTC]`)\n"
-            f"- `[SCHEDULE_MEETING: <MINUTES>]` (e.g. `[SCHEDULE_MEETING: 60]`)\n"
-            f"- `[PARAM: min_trade_usd=<VALUE>]` (e.g. `[PARAM: min_trade_usd=150]`)\n\n"
+            f"CRITICAL: If a trade, order, or parameter change is approved by the majority, you MUST use the appropriate tool (execute_trade, schedule_meeting, update_parameter, cancel_orders) to execute it natively. DO NOT use text tags.\n\n"
             f"Be concise — under 250 words."
         )
 
         messages = [{"role": "user", "content": closing_prompt}]
-        return await agent_llm.generate_response(mt.facilitator_id, messages, max_tokens=600)
+        return await agent_llm.generate_response(
+            mt.facilitator_id, messages, max_tokens=600,
+            tools=READ_TOOLS + ACTION_TOOLS, tool_handler=tool_handler
+        )
 
     # -- helpers ------------------------------------------------------------
 

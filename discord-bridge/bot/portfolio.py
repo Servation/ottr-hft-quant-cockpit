@@ -67,11 +67,15 @@ class Portfolio:
                 with open(_PORTFOLIO_FILE, "r", encoding="utf-8") as f:
                     self._state = json.load(f)
                 # Healing/upgrade check
+                if "total_pnl" not in self._state:
+                    self._state["total_pnl"] = 0.0
+                if "trade_history" not in self._state:
+                    self._state["trade_history"] = []
                 if "min_trade_usd" not in self._state:
                     self._state["min_trade_usd"] = _DEFAULT_MIN_TRADE_USD
                 if "orders" not in self._state:
                     self._state["orders"] = []
-                    self.save()
+                self.save()
                 logger.info("Loaded portfolio from %s", _PORTFOLIO_FILE)
             except (json.JSONDecodeError, OSError) as e:
                 logger.error("Failed to load portfolio (%s), resetting to default", e)
@@ -304,19 +308,36 @@ class Portfolio:
             total += holding["quantity"] * asset_price
         return total
 
-    def get_summary(self) -> Dict[str, Any]:
+    def get_summary(self, prices_dict: Dict[str, Dict[str, Any]] = None) -> Dict[str, Any]:
         """Returns a snapshot of the portfolio for display or LLM context."""
+        holdings_summary = {}
+        total_unrealized_pnl = 0.0
+        
+        for asset, h in self._state["holdings"].items():
+            qty = h["quantity"]
+            avg_cost = h["avg_cost"]
+            current_price = prices_dict.get(asset, {}).get("price", avg_cost) if prices_dict else avg_cost
+            
+            unrealized = (current_price - avg_cost) * qty
+            total_unrealized_pnl += unrealized
+            
+            holdings_summary[asset] = {
+                "quantity": qty,
+                "avg_cost": avg_cost,
+                "current_price": current_price,
+                "unrealized_pnl": unrealized
+            }
+            
+        realized_pnl = self._state["total_pnl"]
+        
         return {
             "cash": self._state["cash"],
-            "holdings": {
-                asset: {
-                    "quantity": h["quantity"],
-                    "avg_cost": h["avg_cost"],
-                }
-                for asset, h in self._state["holdings"].items()
-            },
+            "total_portfolio_value": self.get_total_value(prices_dict) if prices_dict else self._state["cash"] + sum([h["quantity"] * h["avg_cost"] for h in self._state["holdings"].values()]),
+            "holdings": holdings_summary,
             "pending_orders": self._state.setdefault("orders", []),
-            "total_pnl": self._state["total_pnl"],
+            "realized_pnl": realized_pnl,
+            "unrealized_pnl": total_unrealized_pnl,
+            "net_pnl": realized_pnl + total_unrealized_pnl,
             "min_trade_usd": self.min_trade_usd,
             "recent_trades": self._state["trade_history"][-5:],
         }

@@ -58,6 +58,7 @@ class TradingFloorBot(discord.Client):
         self.webhooks: Dict[str, discord.Webhook] = {}
         self._trading_floor_channel: Optional[discord.TextChannel] = None
         self._system_status_channel: Optional[discord.TextChannel] = None
+        self._audit_log_channel: Optional[discord.TextChannel] = None
         self._last_webhook_post: float = 0.0
 
     # ------------------------------------------------------------------
@@ -81,6 +82,9 @@ class TradingFloorBot(discord.Client):
 
         self._trading_floor_channel = self.get_channel(int(trading_floor_id))
         self._system_status_channel = self.get_channel(int(system_status_id))
+        
+        audit_log_id = settings.get("discord_audit_logs_channel_id", 0)
+        self._audit_log_channel = self.get_channel(int(audit_log_id)) if audit_log_id else None
 
         if not self._trading_floor_channel:
             logger.error(f"Trading floor channel {trading_floor_id} not found")
@@ -93,6 +97,9 @@ class TradingFloorBot(discord.Client):
                 "status messages will go to trading floor"
             )
             self._system_status_channel = self._trading_floor_channel
+            
+        if not self._audit_log_channel:
+            logger.warning("Audit log channel not configured or not found.")
 
         # Set up agent webhooks
         await self._setup_webhooks(self._trading_floor_channel)
@@ -229,6 +236,16 @@ class TradingFloorBot(discord.Client):
             await channel.send(f"🔧 **System** | {message}")
         except discord.HTTPException as exc:
             logger.error(f"System status post failed: {exc}")
+
+    async def post_audit_log(self, message: str) -> None:
+        """Post an audit log message to the audit logs channel."""
+        channel = self._audit_log_channel or self._system_status_channel or self._trading_floor_channel
+        if channel is None:
+            return
+        try:
+            await channel.send(f"📜 **Audit** | {message}")
+        except discord.HTTPException as exc:
+            logger.error(f"Audit log post failed: {exc}")
 
     # ------------------------------------------------------------------
     # Event handlers

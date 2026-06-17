@@ -11,7 +11,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Callable
 
 from openai import AsyncOpenAI
 
@@ -165,6 +165,8 @@ class AgentLLM:
         agent_id: str,
         context_messages: list[dict],
         max_tokens: Optional[int] = None,
+        tools: Optional[list[dict]] = None,
+        tool_handler: Optional[Callable] = None,
     ) -> Tuple[str, float]:
         """
         Generate a chat completion for the given agent.
@@ -200,56 +202,70 @@ class AgentLLM:
         # Load token budget from settings
         token_limit = max_tokens or settings.get("token_budgets", {}).get("max_response", 300)
 
+        total_latency = 0.0
+        final_content = ""
+
         try:
             async with self.lock:
-                start = time.perf_counter()
-                response = await self._client.chat.completions.create(
-                    model=settings["llm_model_id"],
-                    messages=messages,
-                    temperature=persona.temperature,
-                    max_tokens=token_limit,
-                    timeout=60.0,
-                )
-                latency = time.perf_counter() - start
+                # We allow a maximum of 1 tool loop per turn
+                for _ in range(2):
+                    kwargs = {
+                        "model": settings["llm_model_id"],
+                        "messages": messages,
+                        "temperature": persona.temperature,
+                        "max_tokens": token_limit,
+                        "timeout": 60.0,
+                    }
+                    if tools:
+                        kwargs["tools"] = tools
 
-            content = response.choices[0].message.content or ""
+                    start = time.perf_counter()
+                    response = await self._client.chat.completions.create(**kwargs)
+                    latency = time.perf_counter() - start
+                    total_latency += latency
+
+                    message = response.choices[0].message
+
+                    if message.tool_calls and tool_handler:
+                        # Convert to dict for appending to messages
+                        # (Omit None values which sometimes cause issues with LLM endpoints)
+                        msg_dict = message.model_dump(exclude_none=True)
+                        messages.append(msg_dict)
+
+                        for tool_call in message.tool_calls:
+                            import json
+                            try:
+                                args = json.loads(tool_call.function.arguments)
+                            except Exception:
+                                args = {}
+                            tool_result = await tool_handler(tool_call.function.name, args)
+
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": tool_call.id,
+                                "name": tool_call.function.name,
+                                "content": str(tool_result)
+                            })
+                        
+                        # Remove tools to force a final text response on the next iteration
+                        tools = None
+                        continue
+                    else:
+                        final_content = message.content or ""
+                        break
+
             logger.info(
                 "LLM response for %s in %.2fs (%d chars)",
                 agent_id,
-                latency,
-                len(content),
+                total_latency,
+                len(final_content),
             )
-            return content.strip(), latency
+            return final_content.strip(), total_latency
 
         except Exception as exc:
             logger.error("LLM call failed for %s: %s", agent_id, exc)
             return f"[error] LLM call failed: {exc}", 0.0
 
-    async def generate_embedding(
-        self,
-        text: str | list[str],
-        model: Optional[str] = None,
-    ) -> list[float] | list[list[float]]:
-        """
-        Generate a vector embedding for the given text.
-        This method does not acquire self._lock.
-        """
-        model_id = model or settings.get("embedding_model_id", "text-embedding-ada-002")
-        try:
-            response = await self._client.embeddings.create(
-                input=text,
-                model=model_id,
-            )
-            if isinstance(text, str):
-                return response.data[0].embedding
-            else:
-                return [item.embedding for item in response.data]
-        except Exception as exc:
-            logger.error("Failed to generate embedding: %s", exc)
-            if isinstance(text, str):
-                return []
-            else:
-                return [[] for _ in text]
 
 
 

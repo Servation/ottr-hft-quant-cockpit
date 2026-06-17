@@ -33,5 +33,8 @@ settings["discord_trading_floor_channel_id"] = int(
 settings["discord_system_status_channel_id"] = int(
     os.getenv("DISCORD_SYSTEM_STATUS_CHANNEL_ID", "0")
 )
+settings["discord_audit_logs_channel_id"] = int(
+    os.getenv("DISCORD_AUDIT_LOGS_CHANNEL_ID", "0")
+)
 settings["llm_base_url"] = os.getenv("LLM_BASE_URL", "http://localhost:1234/v1")
 settings["llm_model_id"] = os.getenv("LLM_MODEL_ID", "gemma-4-12b")

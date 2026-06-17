@@ -144,7 +144,7 @@ class MeetingScheduler:
 
             portfolio_summary = ""
             try:
-                portfolio_summary = portfolio.get_summary()
+                portfolio_summary = portfolio.get_summary(prices)
             except Exception:
                 logger.exception("Failed to get portfolio summary")
 
@@ -160,15 +160,26 @@ class MeetingScheduler:
                 logger.exception("Failed to format market state summary")
 
             memory_context = ""
+            recent_context = ""
+            try:
+                recent_context = meeting_memory.get_recent_context(n=1)
+            except Exception:
+                logger.exception("Failed to load recent memory context")
+
+            semantic_context = ""
             try:
                 query_text = f"Meeting Type: {meeting_type}. Market State: {price_str}. Directives: {ceo_directives}"
-                memory_context = await meeting_memory.get_semantic_context(query_text, limit=3)
+                semantic_context = await meeting_memory.get_semantic_context(query_text, limit=2)
             except Exception:
                 logger.exception("Failed to load semantic memory context")
-                try:
-                    memory_context = meeting_memory.get_recent_context()
-                except Exception:
-                    pass
+
+            parts = []
+            if recent_context and recent_context != "No prior meetings on record.":
+                parts.append("### IMMEDIATELY PREVIOUS MEETING (Short-Term Memory)\n" + recent_context)
+            if semantic_context and semantic_context != "No matching meeting context found." and not semantic_context.startswith("Failed to"):
+                parts.append("### HISTORICAL PRECEDENT (Long-Term Semantic Matches)\n" + semantic_context)
+            
+            memory_context = "\n\n".join(parts) if parts else "No prior meetings on record."
 
             # Format portfolio summary for context
             portfolio_str = ""
@@ -188,7 +199,7 @@ class MeetingScheduler:
                     logger.exception("Failed to format portfolio summary")
                     portfolio_str = str(portfolio_summary)
 
-            # Run the meeting ------------------------------------------------
+            # Run the meeting! ----------------------------------------------
             await meeting_engine.run_meeting(
                 meeting_type_id=meeting_type,
                 post_message_fn=self._bot.post_as_agent,
@@ -196,6 +207,7 @@ class MeetingScheduler:
                 portfolio_summary=portfolio_str,
                 ceo_directives=ceo_directives,
                 memory_context=memory_context,
+                audit_log_fn=self._bot.post_audit_log
             )
 
             await self._bot.post_system_status(

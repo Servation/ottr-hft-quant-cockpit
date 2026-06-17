@@ -240,11 +240,18 @@ class AlertMonitor:
 
         message = "\n".join(lines)
         
-        if bot and bot._trading_floor_channel:
+        if bot:
+            if bot._trading_floor_channel:
+                try:
+                    await bot._trading_floor_channel.send(message)
+                except Exception:
+                    logger.exception("Failed to post order execution to trading floor")
+            
             try:
-                await bot._trading_floor_channel.send(message)
+                if hasattr(bot, "post_audit_log"):
+                    await bot.post_audit_log(message)
             except Exception:
-                logger.exception("Failed to post order execution to trading floor")
+                logger.exception("Failed to post order execution to audit log")
                 
         if stop_loss_hit:
             try:
