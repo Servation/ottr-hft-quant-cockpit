@@ -112,9 +112,11 @@ export default function AssetAllocation({ strategy, marketPrices, paperEquity, p
         </div>
 
         {/* Short strategy brief */}
-        <p className="text-[11px] font-mono text-neutral-400 bg-black/40 border border-neutral-800 p-2.5 rounded mb-6 leading-relaxed">
-          {isDD ? t.allocationStrategyDesc["DD90/10"] : t.allocationStrategyDesc["AdaptiveTrend"]}
-        </p>
+        {(isDD ? t.allocationStrategyDesc["DD90/10"] : t.allocationStrategyDesc["AdaptiveTrend"]) && (
+          <p className="text-[11px] font-mono text-neutral-400 bg-black/40 border border-neutral-800 p-2.5 rounded mb-6 leading-relaxed">
+            {isDD ? t.allocationStrategyDesc["DD90/10"] : t.allocationStrategyDesc["AdaptiveTrend"]}
+          </p>
+        )}
 
         {/* Visual Rings layout section */}
         <div className="grid grid-cols-1 sm:grid-cols-12 gap-6 items-center mb-6 relative z-10">
