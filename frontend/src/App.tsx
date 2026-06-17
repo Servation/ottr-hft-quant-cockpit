@@ -292,14 +292,14 @@ export default function App() {
       } catch (e) {}
     }
     return [
-      { id: 'technical_analyst', name: 'Atlas (Technical Analyst)', status: 'IDLE', message: { en: 'IDLE: Awaiting next price frame computation...', ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'sentiment_analyst', name: 'Luna (Sentiment Analyst)', status: 'IDLE', message: { en: 'IDLE: Polling social indexes and order books...', ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'trader', name: 'Mercury (Trader)', status: 'IDLE', message: { en: 'IDLE: Position sizing pipeline in standby...', ru: 'ОЖИДАНИЕ: Конвейер сайзинга позиций находится в режиме ожидания...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'risk_auditor', name: 'Rogue (Risk Auditor)', status: 'IDLE', message: { en: 'IDLE: Compliance monitors at zero utilization...', ru: 'ОЖИДАНИЕ: Мониторы комплаенса не загружены...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'altcoin_screener', name: 'Nova (Altcoin Screener)', status: 'IDLE', message: { en: 'IDLE: Waiting to screen next cycle...', ru: 'ОЖИДАНИЕ: Ожидание анализа следующего цикла...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'performance_optimizer', name: 'Zephyr (Performance Optimizer)', status: 'IDLE', message: { en: 'IDLE: Optimizing hyper-parameters...', ru: 'ОЖИДАНИЕ: Оптимизация параметров...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'portfolio_manager', name: 'Midas (Portfolio Manager)', status: 'IDLE', message: { en: 'IDLE: Rebalancing constraints in standby...', ru: 'ОЖИДАНИЕ: Ребалансировка...' }, lastUpdated: getFormattedTime(), history: [] },
-      { id: 'meeting_chair', name: 'Athena (Meeting Chair)', status: 'IDLE', message: { en: 'IDLE: No consensus meetings scheduled...', ru: 'ОЖИДАНИЕ: Собрания не запланированы...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'technical_analyst', name: 'Atlas (Technical Analyst)', description: 'Evaluates technical indicators & chart trends', status: 'IDLE', message: { en: 'IDLE: Awaiting next price frame computation...', ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'sentiment_analyst', name: 'Luna (Sentiment Analyst)', description: 'Analyzes social feeds & on-chain SOPR', status: 'IDLE', message: { en: 'IDLE: Polling social indexes and order books...', ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'trader', name: 'Mercury (Trader)', description: 'Sizes positions & executes final orders', status: 'IDLE', message: { en: 'IDLE: Position sizing pipeline in standby...', ru: 'ОЖИДАНИЕ: Конвейер сайзинга позиций находится в режиме ожидания...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'risk_auditor', name: 'Rogue (Risk Auditor)', description: 'Enforces risk limits & vetoes bad trades', status: 'IDLE', message: { en: 'IDLE: Compliance monitors at zero utilization...', ru: 'ОЖИДАНИЕ: Мониторы комплаенса не загружены...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'altcoin_screener', name: 'Nova (Altcoin Screener)', description: 'Screens altcoin trends & volume momentum', status: 'IDLE', message: { en: 'IDLE: Waiting to screen next cycle...', ru: 'ОЖИДАНИЕ: Ожидание анализа следующего цикла...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'performance_optimizer', name: 'Zephyr (Performance Optimizer)', description: 'Retrospectively analyzes trades to tune risk limits', status: 'IDLE', message: { en: 'IDLE: Optimizing hyper-parameters...', ru: 'ОЖИДАНИЕ: Оптимизация параметров...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'portfolio_manager', name: 'Midas (Portfolio Manager)', description: 'Rebalances allocations and tracks paper equity', status: 'IDLE', message: { en: 'IDLE: Rebalancing constraints in standby...', ru: 'ОЖИДАНИЕ: Ребалансировка...' }, lastUpdated: getFormattedTime(), history: [] },
+      { id: 'meeting_chair', name: 'Athena (Meeting Chair)', description: 'Coordinates inter-agent Discord consensus meetings', status: 'IDLE', message: { en: 'IDLE: No consensus meetings scheduled...', ru: 'ОЖИДАНИЕ: Собрания не запланированы...' }, lastUpdated: getFormattedTime(), history: [] },
     ];
   });
 
@@ -460,6 +460,14 @@ export default function App() {
                 const timeStr = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
                 const newMsg = { en: bState.current_task || bState.status, ru: bState.current_task || bState.status };
                 
+                const getDesc = (name: string) => {
+                  if (name.includes("Data") || name.includes("Research")) return "Evaluates technical indicators & chart trends";
+                  if (name.includes("Sentiment")) return "Analyzes social feeds & on-chain SOPR";
+                  if (name.includes("Trad") || name.includes("Strategist")) return "Sizes positions & executes final orders";
+                  if (name.includes("Risk") || name.includes("Manager")) return "Enforces risk limits & vetoes bad trades";
+                  return agent.description || "Autocoded Discord Agent";
+                };
+
                 const history = agent.history || [];
                 const lastEntry = history[history.length - 1];
                 const updatedHistory = (lastEntry && lastEntry.message.en === newMsg.en && lastEntry.status === bState.status)
@@ -468,6 +476,8 @@ export default function App() {
 
                 return {
                   ...agent,
+                  name: bState.name || agent.name,
+                  description: getDesc(bState.name || agent.name),
                   status: bState.status,
                   message: newMsg,
                   lastUpdated: timeStr,

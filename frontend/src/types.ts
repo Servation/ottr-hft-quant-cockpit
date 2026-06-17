@@ -8,6 +8,7 @@ export type AgentStatusType = 'IDLE' | 'EXECUTING' | 'COMPLETED' | 'VETOED' | 'T
 export interface TradingAgentState {
   id: string;
   name: string;
+  description?: string;
   status: AgentStatusType;
   message: { en: string; ru: string };
   lastUpdated: string;
@@ -17,6 +18,7 @@ export interface TradingAgentState {
 export interface BackendAgentState {
   id: string;
   name: string;
+  description?: string;
   status: AgentStatusType;
   current_task: string;
 }

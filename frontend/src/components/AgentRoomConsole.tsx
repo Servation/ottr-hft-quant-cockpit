@@ -123,6 +123,11 @@ export default function AgentRoomConsole({
                     <div className="text-xs font-mono font-bold text-neutral-100 uppercase tracking-wide">
                       {agent.name}
                     </div>
+                    {agent.description && (
+                      <div className="text-[9px] font-mono text-neutral-400 tracking-wide mt-0.5 leading-tight">
+                        {agent.description}
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
