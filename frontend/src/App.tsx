@@ -282,15 +282,6 @@ export default function App() {
 
   // Pre-seed current agents state list
   const [agents, setAgents] = useState<TradingAgentState[]>(() => {
-    const savedAgents = localStorage.getItem('ottr_agents');
-    if (savedAgents) {
-      try {
-        const parsed = JSON.parse(savedAgents);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      } catch (e) {}
-    }
     return [
       { id: 'technical_analyst', name: 'Atlas (Technical Analyst)', description: 'Evaluates technical indicators & chart trends', status: 'IDLE', message: { en: 'IDLE: Awaiting next price frame computation...', ru: 'ОЖИДАНИЕ: Ожидание вычисления следующего тика цен...' }, lastUpdated: getFormattedTime(), history: [] },
       { id: 'sentiment_analyst', name: 'Luna (Sentiment Analyst)', description: 'Analyzes social feeds & on-chain SOPR', status: 'IDLE', message: { en: 'IDLE: Polling social indexes and order books...', ru: 'ОЖИДАНИЕ: Опрос социальных индексов и стаканов заявок...' }, lastUpdated: getFormattedTime(), history: [] },
@@ -303,9 +294,10 @@ export default function App() {
     ];
   });
 
+  // Remove old stale cache
   useEffect(() => {
-    localStorage.setItem('ottr_agents', JSON.stringify(agents));
-  }, [agents]);
+    localStorage.removeItem('ottr_agents');
+  }, []);
 
   const activeTranslations = translations[lang];
 
