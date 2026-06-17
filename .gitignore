@@ -33,6 +33,11 @@ Thumbs.db
 *.log
 .env
 
+# AI Agent State & Testing Caches
+.agent/
+.agents/
+.pytest_cache/
+
 # Discord Bridge
 discord-bridge/.env
 discord-bridge/__pycache__/
