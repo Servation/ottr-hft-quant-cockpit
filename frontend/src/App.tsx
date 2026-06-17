@@ -318,15 +318,7 @@ export default function App() {
         try {
           const initialLogs = await fetchExecutionLogs();
           if (initialLogs && initialLogs.length > 0) {
-            setLogs((prev) => {
-              const combined = [...prev];
-              initialLogs.forEach((newLog) => {
-                if (!combined.some((l) => l.id === newLog.id)) {
-                  combined.push(newLog);
-                }
-              });
-              return combined.slice(-50);
-            });
+            setLogs(initialLogs.slice(-50));
           }
           const portfolio = await fetchPortfolioSnapshot();
           if (portfolio.tradingActive !== undefined) {
