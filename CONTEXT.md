@@ -1,4 +1,4 @@
-# OTTR Quant Dashboard: Domain Context & Terminology
+# OTTR: Domain Context & Terminology
 
 This document defines the core domain terms and concepts of the OTTR algorithmic trading system. These definitions guide the architectural design, agent interactions, and user interface.
 

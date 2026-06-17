@@ -245,7 +245,7 @@ export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
           <div className="grid grid-cols-2 gap-4">
             <div>
               <div className="text-[10px] font-mono text-neutral-500">{t.statsSharpe}</div>
-              <div className="text-base font-light text-neutral-200">3.42<span className="text-xs text-violet-400 font-normal"> / HFT</span></div>
+              <div className="text-base font-light text-neutral-200">3.42<span className="text-xs text-violet-400 font-normal"> / DAY</span></div>
             </div>
             <div>
               <div className="text-[10px] font-mono text-neutral-500">{t.statsWinRate}</div>

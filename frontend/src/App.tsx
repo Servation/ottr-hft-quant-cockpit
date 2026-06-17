@@ -779,7 +779,7 @@ export default function App() {
 
                   nextStatus = 'VETOED';
                   nextMessage = {
-                    en: 'VETOED: HFT order dropped due to auditing protection guidelines.',
+                    en: 'VETOED: Order dropped due to auditing protection guidelines.',
                     ru: 'ОТМЕНЕНО: Заявка отклонена по регламенту защиты от проскальзывания.'
                   };
                 }
@@ -844,7 +844,7 @@ export default function App() {
   return (
     <div className="min-h-screen bg-[#070707] text-neutral-200 flex flex-col selection:bg-emerald-500/30 selection:text-emerald-200">
       
-      {/* Top Cockpit Professional Navigation Bar */}
+      {/* Top Professional Navigation Bar */}
       <header className="border-b border-neutral-900 bg-neutral-950/80 backdrop-blur-md px-6 py-4 sticky top-0 z-50">
         <div className="max-w-7xl mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
           

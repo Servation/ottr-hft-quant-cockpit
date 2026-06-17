@@ -1,15 +1,15 @@
-# OTTR HFT Cockpit: AI Agent Trading System
+# OTTR: AI Agent Trading System
 
-OTTR is a quantitative dashboard for cryptocurrency markets, driven by a cooperative multi-agent AI system operating out of a Discord channel. It utilizes a modular microservice architecture to link a high-fidelity React web terminal directly to the Discord autonomous trading floor.
+OTTR is a dashboard for cryptocurrency markets, driven by a cooperative multi-agent AI system operating out of a Discord channel. It utilizes a modular microservice architecture to link a high-fidelity React web terminal directly to the Discord autonomous trading floor.
 
 ---
 
 ## The Discord Trading Floor (Core Feature)
 
-The defining feature of OTTR is its 8 autonomous AI agents, living and interacting within a Discord channel (`#trading-floor`). The React Cockpit acts as a window into this bridge, allowing the CEO (human user) to interact live with the trading agents seamlessly from the web UI.
+The defining feature of OTTR is its 8 autonomous AI agents, living and interacting within a Discord channel (`#trading-floor`). The React Web UI acts as a window into this bridge, allowing the CEO (human user) to interact live with the trading agents seamlessly from the web UI.
 
 ### Live LLM Intent Router & Agent Collaboration
-Every message typed into the React CEO Terminal is proxied to the Discord bot and parsed by an LLM intent router which categorizes the message:
+Every message typed into the React UI is proxied to the Discord bot and parsed by an LLM intent router which categorizes the message:
 1. **`[QUEUE]`**: General strategy notes are saved and injected into the next scheduled consensus meeting.
 2. **`[EMERGENCY]`**: Words like "Emergency" wake up the entire team instantly for a live roundtable discussion.
 3. **`[DIRECT:agent]`**: If you ping an agent or ask a direct question, the router fetches their Live Context, processes your request, and has them reply directly in chat, with the ability to execute tools (e.g., updating `min_trade_usd`).
@@ -40,10 +40,10 @@ graph TD
    - **Role**: **The single source of truth for the system.** Connects the 8 OTTR agents to a Discord channel (`#trading-floor`). Features a Live LLM Intent Router, semantic memory, portfolio state management, and a fully functional order book simulator.
 2. **Frontend (`/frontend`)**
    - **Stack**: React 19, Vite 6, Tailwind CSS v4, Lucide Icons.
-   - **Role**: High-fidelity trading terminal cockpit. Features a clean, flat-design 8-agent status grid and a live CEO directive input terminal.
+   - **Role**: High-fidelity trading terminal. Features a clean, flat-design 8-agent status grid and a live directive input terminal.
 3. **Agent Gateway (`/agent-gateway`)**
    - **Stack**: Python 3.12, FastAPI, Uvicorn, Pydantic v2, HTTPX, SSE-Starlette.
-   - **Role**: Serves Server-Sent Events (SSE) to the frontend for real-time agent state and execution logs, and proxies CEO directives from the React UI to the Discord Bridge.
+   - **Role**: Serves Server-Sent Events (SSE) to the frontend for real-time agent state and execution logs, and proxies directives from the React UI to the Discord Bridge.
 
 ---
 
@@ -78,7 +78,7 @@ Make sure you have [Docker](https://www.docker.com/) and Docker Compose installe
    ```
 
 3. **Access Services**
-   - **React Cockpit**: [http://localhost:3000](http://localhost:3000)
+   - **React Terminal**: [http://localhost:3000](http://localhost:3000)
    - **FastAPI Documentation**: [http://localhost:8000/docs](http://localhost:8000/docs)
 
 ---
