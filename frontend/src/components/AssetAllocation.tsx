@@ -30,13 +30,15 @@ export default function AssetAllocation({ strategy, marketPrices, paperEquity, p
   let cashVal = portfolioSnapshot ? portfolioSnapshot.cash : (paperEquity * 0.10); // default 10% cash in sim
   
   if (hasLiveHoldings && portfolioSnapshot && portfolioSnapshot.holdings) {
-    btcQty = portfolioSnapshot.holdings["BTCUSDT"] || 0;
-    ethQty = portfolioSnapshot.holdings["ETHUSDT"] || 0;
+    const getQty = (val: any) => (typeof val === 'object' && val !== null ? (val.quantity || 0) : Number(val || 0));
+
+    btcQty = getQty(portfolioSnapshot.holdings["BTC"]) || getQty(portfolioSnapshot.holdings["BTCUSDT"]);
+    ethQty = getQty(portfolioSnapshot.holdings["ETH"]) || getQty(portfolioSnapshot.holdings["ETHUSDT"]);
     
     // Sum up values of all other holdings as altcoins
     Object.keys(portfolioSnapshot.holdings).forEach((symbolKey) => {
-      if (symbolKey !== "BTCUSDT" && symbolKey !== "ETHUSDT") {
-        const qty = portfolioSnapshot.holdings[symbolKey] || 0;
+      if (!symbolKey.startsWith("BTC") && !symbolKey.startsWith("ETH")) {
+        const qty = getQty(portfolioSnapshot.holdings![symbolKey]);
         const cleanSymbol = symbolKey.replace("USDT", "");
         const price = portfolioSnapshot.currentPrices?.[symbolKey] || marketPrices[cleanSymbol]?.price || 0;
         altsVal += qty * price;
@@ -44,8 +46,8 @@ export default function AssetAllocation({ strategy, marketPrices, paperEquity, p
     });
   }
   
-  const btcPrice = portfolioSnapshot?.currentPrices?.["BTCUSDT"] || marketPrices.BTC?.price || 88100;
-  const ethPrice = portfolioSnapshot?.currentPrices?.["ETHUSDT"] || marketPrices.ETH?.price || 3450;
+  const btcPrice = portfolioSnapshot?.currentPrices?.["BTC"] || portfolioSnapshot?.currentPrices?.["BTCUSDT"] || marketPrices.BTC?.price || 88100;
+  const ethPrice = portfolioSnapshot?.currentPrices?.["ETH"] || portfolioSnapshot?.currentPrices?.["ETHUSDT"] || marketPrices.ETH?.price || 3450;
   
   const btcAllocValue = hasLiveHoldings ? (btcQty * btcPrice) : ((paperEquity * (isDD ? 90.0 : 60.0)) / 100);
   const ethAllocValue = hasLiveHoldings ? (ethQty * ethPrice) : ((paperEquity * (isDD ? 7.0 : 25.0)) / 100);
@@ -60,27 +62,7 @@ export default function AssetAllocation({ strategy, marketPrices, paperEquity, p
   const altsAllocPct = totalVal > 0 ? Number(((altsAllocValue / totalVal) * 100).toFixed(1)) : 0;
   const cashPct = totalVal > 0 ? Number(((cashVal / totalVal) * 100).toFixed(1)) : 0;
 
-  // Rebalancing threshold drift check
-  const targetBtc = isDD ? 81.8 : 54.5;
-  const targetEth = isDD ? 6.4 : 22.7;
-  const targetAlts = isDD ? 2.7 : 13.6;
-  const targetCash = 9.1;
 
-  const btcDrift = Math.abs(btcAllocPct - targetBtc);
-  const ethDrift = Math.abs(ethAllocPct - targetEth);
-  const altsDrift = Math.abs(altsAllocPct - targetAlts);
-  const cashDrift = Math.abs(cashPct - targetCash);
-
-  const maxDrift = Math.max(btcDrift, ethDrift, altsDrift, cashDrift);
-  const isDeviated = maxDrift > 5.0;
-
-  const ShieldIcon = isDeviated ? ShieldAlert : ShieldCheck;
-  const textStatusColor = isDeviated ? 'text-amber-400' : 'text-emerald-400';
-  const dotBgColor = isDeviated ? 'bg-amber-500' : 'bg-emerald-500';
-  const pingColor = isDeviated ? 'bg-amber-400' : 'bg-emerald-400';
-  const statusText = isDeviated
-    ? (lang === 'en' ? 'DEVIATED' : 'ТРЕБУЕТСЯ РЕБАЛАНСИРОВКА')
-    : (lang === 'en' ? 'OPTIMIZED' : 'ОПТИМАЛЬНО');
 
   // Let's format money nicely
   const formatCurrency = (val: number) => {
@@ -322,24 +304,7 @@ export default function AssetAllocation({ strategy, marketPrices, paperEquity, p
         </div>
       </div>
 
-      {/* Safety auditing status bar */}
-      <div className="border-t border-neutral-850 pt-4 mt-auto">
-        <div className="flex items-center justify-between bg-black/40 p-3 rounded border border-neutral-850 text-xs font-mono">
-          <div className="flex items-center gap-2">
-            <ShieldIcon className={`w-4 h-4 ${textStatusColor}`} />
-            <span className="text-neutral-400">
-              {lang === 'en' ? 'Risk Rebalancing Protocol' : 'Ребалансировка Рисков'}
-            </span>
-          </div>
-          <span className={`${textStatusColor} font-semibold flex items-center gap-1.5`}>
-            <span className="relative flex h-1.5 w-1.5">
-              <span className={`animate-ping absolute inline-flex h-full w-full rounded ${pingColor} opacity-75`}></span>
-              <span className={`relative inline-flex rounded h-1.5 w-1.5 ${dotBgColor}`}></span>
-            </span>
-            {statusText}
-          </span>
-        </div>
-      </div>
+      {/* Safety auditing status bar removed as requested */}
 
     </div>
   );
