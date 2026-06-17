@@ -457,7 +457,7 @@ export default function App() {
             return prevAgents.map((agent) => {
               const bState = backendStates.find((b) => b.id === agent.id);
               if (bState) {
-                const timeStr = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+                const timeStr = new Date().toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
                 const newMsg = { en: bState.current_task || bState.status, ru: bState.current_task || bState.status };
                 
                 const getDesc = (name: string) => {
