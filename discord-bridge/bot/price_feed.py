@@ -4,6 +4,8 @@ import math
 import asyncio
 from typing import Dict, Any, List, Optional
 from collections import deque
+import pandas as pd
+import pandas_ta as ta
 
 import httpx
 
@@ -64,6 +66,14 @@ class PriceFeed:
 
         self._cached_funding_rates: Dict[str, float] = {}
         self._funding_timestamp: float = 0.0
+
+        self._cached_tech: Optional[Dict[str, Dict[str, float]]] = None
+        self._tech_timestamp: float = 0.0
+        self._tech_cache_ttl: float = 3600  # 1 hour
+
+        self._cached_fng: Optional[Dict[str, Any]] = None
+        self._fng_timestamp: float = 0.0
+        self._fng_cache_ttl: float = 3600  # 1 hour
 
         # Rolling history: deque of (timestamp, prices_dict) tuples
         self._history: deque = deque(maxlen=60)
@@ -126,10 +136,7 @@ class PriceFeed:
                     if self._cached_prices:
                         logger.warning("Returning stale cached prices")
                         return self._cached_prices
-                    return {
-                        "BTC": {"price": 0.0, "change_24h": 0.0},
-                        "ETH": {"price": 0.0, "change_24h": 0.0},
-                    }
+                    raise Exception("Critical Market Data Unavailable: Both primary and fallback APIs failed.")
 
         self._cached_prices = prices
         self._cache_timestamp = now
@@ -232,23 +239,18 @@ class PriceFeed:
         return 0.0
 
     async def _fetch_derivatives(self, client: httpx.AsyncClient) -> Dict[str, float]:
-        """Fetch funding rates from CoinGecko Derivatives API."""
+        """Fetch funding rates from OKX Public API."""
         funding_rates = {"BTC": 0.0, "ETH": 0.0}
         try:
-            response = await client.get(COINGECKO_DERIVATIVES_URL, timeout=10.0)
-            response.raise_for_status()
-            data = response.json()
-            
-            for item in data:
-                sym = item.get("symbol", "").upper()
-                market = item.get("market", "").lower()
-                if "binance" in market:
-                    if sym == "BTCUSDT":
-                        funding_rates["BTC"] = float(item.get("funding_rate", 0.0))
-                    elif sym == "ETHUSDT":
-                        funding_rates["ETH"] = float(item.get("funding_rate", 0.0))
+            for sym in ["BTC", "ETH"]:
+                url = f"https://www.okx.com/api/v5/public/funding-rate?instId={sym}-USDT-SWAP"
+                response = await client.get(url, timeout=5.0)
+                response.raise_for_status()
+                data = response.json()
+                if data.get("code") == "0" and data.get("data"):
+                    funding_rates[sym] = float(data["data"][0].get("fundingRate", 0.0))
         except Exception as e:
-            logger.error("Failed to fetch derivatives: %s", e)
+            logger.error("Failed to fetch derivatives from OKX: %s", e)
         return funding_rates
 
     async def get_volatility(self) -> Dict[str, float]:
@@ -283,9 +285,109 @@ class PriceFeed:
             
         async with httpx.AsyncClient() as client:
             rates = await self._fetch_derivatives(client)
-            self._cached_funding_rates = rates
-            self._funding_timestamp = now
+            # Only cache if we actually got valid data (not the default 0.0 fallback from errors)
+            if rates.get("BTC") != 0.0 or rates.get("ETH") != 0.0:
+                self._cached_funding_rates = rates
+                self._funding_timestamp = now
+            elif self._cached_funding_rates:
+                # If fetch failed but we have a stale cache, keep using it
+                rates = self._cached_funding_rates
             return rates
+
+    async def _fetch_klines(self, client: httpx.AsyncClient, symbol: str) -> Optional[pd.DataFrame]:
+        """Fetch 100 daily klines from Kraken public API to avoid US geoblocking."""
+        kraken_pair = "XBTUSD" if symbol == "BTC" else "ETHUSD" if symbol == "ETH" else None
+        if not kraken_pair:
+            return None
+            
+        url = f"https://api.kraken.com/0/public/OHLC?pair={kraken_pair}&interval=1440"
+        try:
+            response = await client.get(url, timeout=5.0)
+            response.raise_for_status()
+            data = response.json()
+            
+            if data.get("error"):
+                logger.error("Kraken error for %s: %s", symbol, data["error"])
+                return None
+                
+            # Kraken result key might be XXBTZUSD for BTC or XETHZUSD for ETH
+            result_keys = list(data.get("result", {}).keys())
+            data_key = [k for k in result_keys if k != "last"][0]
+            
+            klines = data["result"][data_key]
+            # Kraken format: [time, open, high, low, close, vwap, volume, count]
+            # We only need the last 100 rows
+            klines = klines[-100:]
+            
+            df = pd.DataFrame(klines, columns=[
+                "open_time", "open", "high", "low", "close", "vwap", "volume", "count"
+            ])
+            df["close"] = df["close"].astype(float)
+            return df
+        except Exception as e:
+            logger.error("Failed to fetch klines for %s: %s", symbol, e)
+            return None
+
+    async def get_technical_indicators(self) -> Dict[str, Dict[str, float]]:
+        """Returns EMA, RSI, and MACD for BTC and ETH, utilizing a 1-hour cache."""
+        now = time.time()
+        if self._cached_tech and (now - self._tech_timestamp) < self._tech_cache_ttl:
+            return self._cached_tech
+            
+        indicators = {}
+        async with httpx.AsyncClient() as client:
+            for symbol in ["BTC", "ETH"]:
+                df = await self._fetch_klines(client, symbol)
+                if df is not None and len(df) >= 50:
+                    try:
+                        ema_20 = float(ta.ema(df["close"], length=20).iloc[-1])
+                        ema_50 = float(ta.ema(df["close"], length=50).iloc[-1])
+                        rsi_14 = float(ta.rsi(df["close"], length=14).iloc[-1])
+                        macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
+                        macd_val = float(macd["MACD_12_26_9"].iloc[-1])
+                        
+                        indicators[symbol] = {
+                            "EMA_20": ema_20,
+                            "EMA_50": ema_50,
+                            "RSI_14": rsi_14,
+                            "MACD": macd_val
+                        }
+                    except Exception as e:
+                        logger.error("Failed to calculate indicators for %s: %s", symbol, e)
+                        
+        if indicators:
+            self._cached_tech = indicators
+            self._tech_timestamp = now
+        elif self._cached_tech:
+            indicators = self._cached_tech
+            
+        return indicators
+
+    async def get_fear_and_greed_index(self) -> Optional[Dict[str, Any]]:
+        """Fetch Fear & Greed index from alternative.me API with 1-hour cache."""
+        now = time.time()
+        if self._cached_fng and (now - self._fng_timestamp) < self._fng_cache_ttl:
+            return self._cached_fng
+            
+        url = "https://api.alternative.me/fng/"
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(url, timeout=5.0)
+                response.raise_for_status()
+                data = response.json()
+                if data and data.get("data"):
+                    fng_data = data["data"][0]
+                    result = {
+                        "value": int(fng_data.get("value", 50)),
+                        "classification": fng_data.get("value_classification", "Neutral")
+                    }
+                    self._cached_fng = result
+                    self._fng_timestamp = now
+                    return result
+        except Exception as e:
+            logger.error("Failed to fetch Fear & Greed index: %s", e)
+            
+        return self._cached_fng
 
     async def get_market_state_summary(self) -> str:
         """
@@ -296,9 +398,16 @@ class PriceFeed:
         volatility = await self.get_volatility()
         avg_yield = await self.get_yield()
         funding_rates = await self.get_funding_rates()
+        tech_indicators = await self.get_technical_indicators()
         correlation = self.get_correlation()
+        fng = await self.get_fear_and_greed_index()
         
         lines: List[str] = []
+        now = time.time()
+        
+        if self._cache_timestamp > 0 and (now - self._cache_timestamp) > self._cache_ttl:
+            stale_minutes = (now - self._cache_timestamp) / 60
+            lines.append(f"⚠️ **WARNING**: Live API is down. Data is stale by {stale_minutes:.1f} minutes. Exercise caution with market orders.")
         # Sort so BTC and ETH appear first, then the rest
         symbols = sorted(prices.keys(), key=lambda s: (s not in ("BTC", "ETH"), s))
         for symbol in symbols:
@@ -311,12 +420,23 @@ class PriceFeed:
             direction = "🟢" if change >= 0 else "🔴"
             vol_str = f"Vol: {vol*100:.1f}%" if vol > 0 else "Vol: N/A"
             fund_str = f"Fund: {fund*100:+.3f}%"
-            lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str})")
+            
+            tech = tech_indicators.get(symbol)
+            if tech:
+                tech_str = f" | EMA(20/50): {tech['EMA_20']:.0f}/{tech['EMA_50']:.0f} | RSI: {tech['RSI_14']:.1f} | MACD: {tech['MACD']:.1f}"
+                lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str}{tech_str})")
+            else:
+                lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str})")
             
         yield_str = f"- **Stablecoin Yield**: {avg_yield:.1f}% APY"
         corr_str = f"- **BTC/ETH Correlation**: {correlation:.2f}"
+        lines.append(corr_str)
+        lines.append(yield_str)
         
-        return "\n".join(lines) + f"\n{corr_str}\n{yield_str}"
+        if fng:
+            lines.append(f"- **Fear & Greed Index**: {fng['value']} ({fng['classification']})")
+        
+        return "\n".join(lines)
 
 
 price_feed = PriceFeed()

@@ -4,7 +4,8 @@ from typing import Dict, Any
 
 logger = logging.getLogger(__name__)
 
-GATEWAY_URL = "http://localhost:8000/api/internal/discord-sync"
+import os
+GATEWAY_URL = f"{os.environ.get('AGENT_GATEWAY_URL', 'http://localhost:8000')}/api/internal/discord-sync"
 
 async def send_gateway_event(event_name: str, data: Any):
     """

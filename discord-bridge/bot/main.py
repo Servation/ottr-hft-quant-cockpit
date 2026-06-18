@@ -118,13 +118,16 @@ class TradingFloorBot(discord.Client):
             f"✅ Bot online. {len(self.webhooks)}/{len(AGENTS)} agent webhooks ready."
         )
 
-        # Start background services
-        await meeting_scheduler.start(self)
-        self.loop.create_task(alert_monitor.start(self))
-        self.api_runner = await start_api_server(self, port=8001)
+        # Start background services (only once)
+        if not getattr(self, "services_started", False):
+            await meeting_scheduler.start(self)
+            self.loop.create_task(alert_monitor.start(self))
+            self.api_runner = await start_api_server(self, port=8001)
 
-        # Fire a startup meeting after a short delay (lets webhooks settle)
-        self.loop.create_task(self._startup_meeting())
+            # Fire a startup meeting after a short delay (lets webhooks settle)
+            self.loop.create_task(self._startup_meeting())
+            
+            self.services_started = True
 
         logger.info("on_ready complete — bot is fully operational")
 
@@ -253,8 +256,11 @@ class TradingFloorBot(discord.Client):
     # Event handlers
     # ------------------------------------------------------------------
     async def on_message(self, message: discord.Message) -> None:
-        # Ignore bots (including ourselves) and DMs
-        if message.author.bot or message.guild is None:
+        # Allow dashboard directives even if sent by the bot itself
+        is_dashboard_directive = message.content.startswith("**[CEO DIRECTIVE from Dashboard]**:")
+        
+        # Ignore bots (including ourselves) unless it's a dashboard directive
+        if (message.author.bot and not is_dashboard_directive) or message.guild is None:
             return
 
         # Only process messages in the trading floor channel

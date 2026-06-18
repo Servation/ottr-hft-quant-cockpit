@@ -76,14 +76,6 @@ AGENTS: Dict[str, AgentPersona] = {
         persona_file="risk_auditor.txt",
         temperature=0.3,
     ),
-    "altcoin_screener": AgentPersona(
-        id="altcoin_screener",
-        name="Nova (Altcoin Screener)",
-        emoji="🔍",
-        avatar_url="https://api.dicebear.com/7.x/bottts-neutral/png?seed=altcoin_screener",
-        persona_file="altcoin_screener.txt",
-        temperature=0.8,
-    ),
     "performance_optimizer": AgentPersona(
         id="performance_optimizer",
         name="Zephyr (Performance Optimizer)",
@@ -157,6 +149,16 @@ class AgentLLM:
         self._persona_cache[agent_id] = text
         logger.debug("Loaded persona for %s (%d chars)", agent_id, len(text))
         return text
+
+    async def check_health(self) -> bool:
+        """Check if the LLM backend (LM Studio) is reachable."""
+        try:
+            # Pinging the models endpoint is a standard way to check OpenAI-compatible server health
+            await self._client.models.list(timeout=2.0)
+            return True
+        except Exception as e:
+            logger.error(f"LLM health check failed: {e}")
+            return False
 
     # -- inference ----------------------------------------------------------
 

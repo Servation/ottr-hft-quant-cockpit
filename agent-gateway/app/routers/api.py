@@ -154,6 +154,33 @@ async def start_trading():
 async def stop_trading():
     return {"status": "SUCCESS"}
 
+class TradingConfigRequest(BaseModel):
+    strategy: str
+    ticksPerMinute: int
+    activeCryptos: List[str]
+    stopLossLimit: float
+
+@router.post("/trading/config")
+async def set_trading_config(req: TradingConfigRequest):
+    return {"status": "SUCCESS"}
+
+@router.get("/optimizer/history")
+async def get_optimizer_history():
+    return []
+
+class LLMConfigRequest(BaseModel):
+    base_url: str
+    api_key: str = ""
+    model_id: str
+    fallback_base_url: str = ""
+    fallback_api_key: str = ""
+    fallback_model_id: str = ""
+    fallback_active: bool = True
+
+@router.post("/llm/configure")
+async def configure_llm(req: LLMConfigRequest):
+    return {"status": "SUCCESS"}
+
 class ResetBalanceRequest(BaseModel):
     balance: float = Field(..., ge=1.0, description="New starting balance value")
 
@@ -165,7 +192,7 @@ async def reset_balance(req: ResetBalanceRequest):
 
 @router.post("/agent/chat")
 async def agent_chat(req: AgentChatRequest):
-    discord_api_url = "http://127.0.0.1:8001/api/directive"
+    discord_api_url = "http://discord-bridge:8001/api/directive"
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(discord_api_url, json={"message": req.message}, timeout=5.0)

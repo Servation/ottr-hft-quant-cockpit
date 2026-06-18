@@ -15,6 +15,8 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from bot import settings
+from bot.security import sanitize_market_data
+from bot.agents import agent_llm
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,8 @@ class MeetingScheduler:
                 id=f"meeting_{hour:02d}",
                 name=f"Scheduled meeting @ {hour:02d}:00 PT",
                 replace_existing=True,
+                misfire_grace_time=None,
+                coalesce=True,
             )
 
         self._scheduler.start()
@@ -152,12 +156,25 @@ class MeetingScheduler:
             # Consume the directives so they don't repeat
             ceo_handler.get_pending_directives()
 
+            # Check if LLM is online
+            if not await agent_llm.check_health():
+                logger.error("LLM Server is offline.")
+                await self._bot.post_system_status("🚨 **MEETING ABORTED**: LLM Server (LM Studio) is offline.")
+                return
+
             # Format price data for context
             price_str = ""
             try:
                 price_str = await price_feed.get_market_state_summary()
-            except Exception:
+            except Exception as e:
                 logger.exception("Failed to format market state summary")
+                await self._bot.post_system_status(
+                    f"🚨 **MEETING ABORTED**: {str(e)}"
+                )
+                return  # Abort the meeting if data is unavailable
+                
+            # Sanitize to prevent Prompt Injection
+            price_str = sanitize_market_data(price_str)
 
             memory_context = ""
             recent_context = ""
@@ -210,8 +227,10 @@ class MeetingScheduler:
                 audit_log_fn=self._bot.post_audit_log
             )
 
+            next_type, next_time = self.get_next_meeting_info()
             await self._bot.post_system_status(
-                f"✅ Meeting completed: **{meeting_type}**"
+                f"✅ Meeting completed: **{meeting_type}**\n"
+                f"⏳ Next meeting (**{next_type}**) scheduled for {next_time}"
             )
             logger.info(f"Meeting '{meeting_type}' completed successfully")
 

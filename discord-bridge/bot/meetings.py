@@ -116,23 +116,24 @@ MEETING_TYPES: Dict[str, MeetingType] = {
         ),
         focus="Trade history review, parameter tuning proposals",
     ),
-    "altcoin_scouting": MeetingType(
-        id="altcoin_scouting",
-        name="Altcoin Scouting",
-        emoji="🔭",
-        facilitator_id="meeting_chair",
-        participant_ids=[
-            "altcoin_screener",
-            "technical_analyst",
-            "risk_auditor",
-            "portfolio_manager",
-        ],
-        opening_prompt=(
-            "Altcoin scouting session. Let's scan for alpha — any sectors "
-            "heating up, breakout setups, or new narratives worth tracking?"
-        ),
-        focus="Altcoin opportunity scanning and watchlist updates",
-    ),
+    # DEPRECATED: altcoin_screener (Nova) has been removed from the system.
+    # "altcoin_scouting": MeetingType(
+    #     id="altcoin_scouting",
+    #     name="Altcoin Scouting",
+    #     emoji="🔭",
+    #     facilitator_id="meeting_chair",
+    #     participant_ids=[
+    #         "altcoin_screener",
+    #         "technical_analyst",
+    #         "risk_auditor",
+    #         "portfolio_manager",
+    #     ],
+    #     opening_prompt=(
+    #         "Altcoin scouting session. Let's scan for alpha — any sectors "
+    #         "heating up, breakout setups, or new narratives worth tracking?"
+    #     ),
+    #     focus="Altcoin opportunity scanning and watchlist updates",
+    # ),
     "emergency_alert": MeetingType(
         id="emergency_alert",
         name="Emergency Alert",
@@ -175,7 +176,6 @@ class MeetingEngine:
     # Agents most likely to clash — used to pick debate participants
     _NATURAL_TENSIONS = {
         ("trader", "risk_auditor"),        # aggression vs caution
-        ("altcoin_screener", "risk_auditor"),  # opportunity vs risk
         ("technical_analyst", "sentiment_analyst"),  # data vs narrative
         ("trader", "portfolio_manager"),    # action vs balance
         ("performance_optimizer", "trader"),  # hindsight vs execution
@@ -431,6 +431,19 @@ class MeetingEngine:
 
         user_content_parts.append(f"### Conversation So Far\n{convo_text}")
 
+        # Inject strong identity anchor to prevent Identity Disassociation
+        agent_persona = AGENTS.get(agent_id)
+        if agent_persona:
+            identity_anchor = (
+                f"CRITICAL REMINDER: You are {agent_persona.name}. "
+                "Do NOT refer to yourself in the third person or act as an external narrator. "
+                "Maintain your first-person persona at all times. "
+            )
+            if is_debate_round:
+                identity_anchor += f"If '{agent_persona.name}' is mentioned in the transcript, that is YOU speaking earlier."
+            
+            user_content_parts.append(identity_anchor)
+
         if is_debate_round:
             user_content_parts.append(
                 "### YOUR TASK — DEBATE ROUND\n"
@@ -438,7 +451,8 @@ class MeetingEngine:
                 "You must critically evaluate the proposals. You MUST:\n"
                 "1. If you disagree with a colleague, push back directly. Name them and explain why.\n"
                 "2. If you agree with a trade, use your turn to refine the sizing or timing.\n"
-                "3. Do NOT simply repeat or pile onto someone else's critique. Bring a unique perspective based on your specific role.\n\n"
+                "3. End your response with your final standardized vote format:\n"
+                "   - Final Vote: [BUY / SELL / HOLD / ABSTAIN] [ASSET]\n\n"
                 "Do NOT just summarize your own point again. Engage with what others have said.\n"
                 "Keep it under 150 words."
             )
@@ -446,8 +460,9 @@ class MeetingEngine:
             user_content_parts.append(
                 "### YOUR TASK — INDEPENDENT REPORT\n"
                 "Give your independent report based on the Market Data. You MUST:\n"
-                "1. State your own position clearly based on the data.\n"
-                "2. Do NOT critique or react to your colleagues yet. Just put your foundational analysis on the table.\n\n"
+                "1. State your own position clearly based on the data using the 'Initial Assessment' format from your persona.\n"
+                "2. Do NOT critique or react to your colleagues yet. Just put your foundational analysis on the table.\n"
+                "3. Do NOT cast a 'Final Vote' yet. That is reserved for the Debate Round.\n\n"
                 "Keep it concise (under 150 words). Bullet points preferred."
             )
 

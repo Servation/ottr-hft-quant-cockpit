@@ -36,3 +36,6 @@ agent-gateway/portfolio_state.json
 agent-gateway/trade_journal.json
 discord-bridge/data/*
 !discord-bridge/data/.gitkeep
+
+# Scratch Scripts
+test_funding.py
