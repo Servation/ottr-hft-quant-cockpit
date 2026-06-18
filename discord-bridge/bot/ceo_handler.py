@@ -318,8 +318,10 @@ Respond directly to the CEO. Keep it concise, helpful, and in character. Referen
 {memory_str}
 
 You are in a LIVE DISCUSSION in the Discord channel. 
+Your name in the chat history is {AGENTS[agent_id].name}.
 Read the latest chat history. It is your turn to speak. 
 Acknowledge what the CEO or the other agent just said, and provide your perspective or rebuttal. Keep it concise and conversational.
+CRITICAL: Speak ONLY for yourself. Do NOT simulate the other agent's response or generate multiple turns of dialogue.
 """
                 async with message.channel.typing():
                     response, _ = await agent_llm.generate_response(
