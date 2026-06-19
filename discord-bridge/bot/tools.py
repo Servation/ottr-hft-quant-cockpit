@@ -87,6 +87,17 @@ ACTION_TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "start_meeting_now",
+            "description": "Immediately start a full team consensus meeting. Use this if the CEO requests to meet right now.",
+            "parameters": {
+                "type": "object",
+                "properties": {}
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "cancel_orders",
             "description": "Cancel all pending limit/stop orders for an asset.",
             "parameters": {
@@ -163,6 +174,20 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             minutes = int(arguments.get("minutes", 0))
             meeting_scheduler.schedule_dynamic_meeting(minutes)
             msg = f"⏱️ **Dynamic Meeting Scheduled:** We will reconvene in **{minutes}** minutes."
+            if post_message_fn:
+                await post_message_fn("meeting_chair", msg)
+            if audit_log_fn:
+                await audit_log_fn(msg)
+            return msg
+            
+        elif tool_name == "start_meeting_now":
+            import asyncio
+            asyncio.create_task(
+                meeting_scheduler.schedule_emergency([
+                    {"reason": "CEO invoked meeting via tool", "directive": "Meeting started immediately."}
+                ])
+            )
+            msg = "🚨 **Meeting Initiated:** Waking up the full team immediately..."
             if post_message_fn:
                 await post_message_fn("meeting_chair", msg)
             if audit_log_fn:

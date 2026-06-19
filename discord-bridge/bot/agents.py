@@ -119,6 +119,7 @@ class AgentLLM:
             base_url=settings["llm_base_url"],
             api_key="lm-studio",
         )
+        print("AgentLLM initializing with base_url:", settings["llm_base_url"])
         self._lock: Optional[asyncio.Lock] = None
         self._persona_cache: Dict[str, str] = {}
 
@@ -255,6 +256,23 @@ class AgentLLM:
                     else:
                         final_content = message.content or ""
                         break
+
+            # Clean up known reasoning tags that some models might leak
+            import re
+            # Log the raw content so we can debug if it leaks again
+            logger.debug(f"Raw LLM response before cleaning: {repr(final_content)}")
+            
+            # Remove DeepSeek <think>...</think>
+            final_content = re.sub(r"<think>.*?</think>\n?", "", final_content, flags=re.DOTALL | re.IGNORECASE)
+            
+            # Remove <|channel>thought ... <channel|>-
+            final_content = re.sub(r"<\|?channel\|?>\s*thought.*?<\|?channel\|?>-?\n?", "", final_content, flags=re.DOTALL | re.IGNORECASE)
+            
+            # Catch-all for standalone <|channel> tags that might still be lingering at the very start
+            final_content = re.sub(r"^\s*<\|?channel\|?>\s*thought\s*", "", final_content, flags=re.IGNORECASE)
+            final_content = re.sub(r"^\s*<\|?channel\|?>-?\s*", "", final_content, flags=re.IGNORECASE)
+            
+            final_content = final_content.strip()
 
             logger.info(
                 "LLM response for %s in %.2fs (%d chars)",

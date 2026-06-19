@@ -100,10 +100,10 @@ class MeetingScheduler:
         if not self._scheduler or not self._scheduler.running:
             return
             
-        from datetime import datetime, timedelta
-        import pytz
-        tz = pytz.timezone(_TIMEZONE)
-        run_time = datetime.now(tz) + timedelta(minutes=minutes)
+        from datetime import datetime, timedelta, timezone
+        
+        # Use UTC or local timezone instead of pytz
+        run_time = datetime.now(timezone.utc) + timedelta(minutes=minutes)
         
         self._scheduler.add_job(
             self._run_scheduled_meeting,
@@ -111,6 +111,7 @@ class MeetingScheduler:
             run_date=run_time,
             id=f"dynamic_meeting_{int(run_time.timestamp())}",
             name=f"Dynamic meeting in {minutes}m",
+            misfire_grace_time=None,
         )
         logger.info("Scheduled dynamic meeting for %s", run_time)
 
