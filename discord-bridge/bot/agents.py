@@ -255,6 +255,33 @@ class AgentLLM:
                         continue
                     else:
                         final_content = message.content or ""
+                        
+                        # Fallback for Gemma leaking raw tool calls
+                        if tool_handler and "<|tool_call>" in final_content:
+                            import re, json
+                            raw_calls = re.findall(r"<\|?tool_call\|?>call:([a-zA-Z0-9_]+)(\{.*?\})<\|?/?tool_call\|?>", final_content)
+                            if raw_calls:
+                                messages.append({"role": "assistant", "content": final_content})
+                                for func_name, raw_args in raw_calls:
+                                    clean_args = raw_args.replace('<|"|>', '"')
+                                    clean_args = re.sub(r'([{,]\s*)([a-zA-Z0-9_]+)\s*:', r'\1"\2":', clean_args)
+                                    try:
+                                        args = json.loads(clean_args)
+                                    except Exception:
+                                        args = {}
+                                    tool_result = await tool_handler(func_name, args)
+                                    messages.append({
+                                        "role": "tool",
+                                        "name": func_name,
+                                        "content": str(tool_result),
+                                        "tool_call_id": "call_" + func_name
+                                    })
+                                
+                                # Strip it from final content so it doesn't leak to Discord
+                                final_content = re.sub(r"<\|?tool_call\|?>.*?<\|?/?tool_call\|?>", "", final_content, flags=re.DOTALL)
+                                tools = None
+                                continue
+                                
                         break
 
             # Clean up known reasoning tags that some models might leak
