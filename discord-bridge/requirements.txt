@@ -8,3 +8,4 @@ scikit-learn
 tzdata
 pandas
 pandas-ta
+networkx
