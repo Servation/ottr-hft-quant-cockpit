@@ -109,7 +109,7 @@ class TradingFloorBot(discord.Client):
         await self._trading_floor_channel.send(
             "```\n"
             "╔══════════════════════════════════════════╗\n"
-            "║   🦦 OTTR Trading Floor — ONLINE        ║\n"
+            "║   🦦 OTTR Trading Floor — ONLINE         ║\n"
             "║   Agents syncing… meetings scheduled.    ║\n"
             "╚══════════════════════════════════════════╝\n"
             "```"

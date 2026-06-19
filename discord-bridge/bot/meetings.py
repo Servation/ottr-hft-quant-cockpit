@@ -292,7 +292,7 @@ class MeetingEngine:
         # ---- 4. Facilitator closing summary & Execution -------------------
         await sync_agent_state([{"id": mt.facilitator_id, "name": AGENTS[mt.facilitator_id].name, "status": "THINKING", "current_task": "Drafting summary & executing"}])
         closing_msg, _ = await self._build_closing(
-            mt, conversation_log, price_data, portfolio_summary, bound_tool_handler
+            mt, conversation_log, price_data, portfolio_summary, bound_tool_handler, agent_contributions
         )
         
         agent_contributions[mt.facilitator_id] = closing_msg
@@ -305,6 +305,23 @@ class MeetingEngine:
             from bot.price_feed import price_feed
             from bot.portfolio import portfolio
             prices = await price_feed.get_prices()
+            
+            # Record agent votes to knowledge graph
+            try:
+                from bot.knowledge_graph import reputation_graph
+                import re
+                for a_id, text in agent_contributions.items():
+                    if "[DEBATE]:" in text:
+                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", text, re.IGNORECASE)
+                        if match:
+                            direction = match.group(1).upper()
+                            asset = match.group(2).upper()
+                            asset_price = prices.get(asset.lower(), {}).get("price", 0.0)
+                            if asset_price > 0:
+                                reputation_graph.record_vote(a_id, direction, asset, asset_price)
+            except Exception as e:
+                logger.error(f"Failed to record votes to knowledge graph: {e}")
+                
             cash = portfolio._state["cash"]
             total_val = portfolio.get_total_value(prices)
             pnl = portfolio._state["total_pnl"]
@@ -419,6 +436,18 @@ class MeetingEngine:
         if memory_context:
             user_content_parts.append(f"### Recent Meeting History\n{memory_context}")
 
+        try:
+            from bot.knowledge_graph import reputation_graph
+            rep_summary = reputation_graph.get_reputation_summary()
+            if rep_summary and "No historical predictions" not in rep_summary:
+                user_content_parts.append(
+                    f"### Historical Agent Reputations (Win Rates)\n{rep_summary}\n\n"
+                    "*(Note: Use these track records to weight each other's opinions. "
+                    "If someone has a high win rate on an asset, defer to them.)*"
+                )
+        except Exception as e:
+            logger.error(f"Failed to inject reputation summary: {e}")
+
         user_content_parts.append(
             "### Available Tools\n"
             "You can recommend the following actions to the Meeting Chair:\n"
@@ -448,12 +477,13 @@ class MeetingEngine:
             user_content_parts.append(
                 "### YOUR TASK — DEBATE ROUND\n"
                 "Now that all initial reports are on the table, this is the full assessment round.\n"
+                "IGNORE your persona's strict 'OUTPUT FORMAT' for this round. Speak conversationally, directly, and forcefully.\n"
                 "You must critically evaluate the proposals. You MUST:\n"
-                "1. If you disagree with a colleague, push back directly. Name them and explain why.\n"
+                "1. Direct confrontation is expected. If you disagree with a colleague, quote or name them specifically and tear down their logic.\n"
                 "2. If you agree with a trade, use your turn to refine the sizing or timing.\n"
-                "3. End your response with your final standardized vote format:\n"
+                "3. End your response strictly with your final standardized vote format:\n"
                 "   - Final Vote: [BUY / SELL / HOLD / ABSTAIN] [ASSET]\n\n"
-                "Do NOT just summarize your own point again. Engage with what others have said.\n"
+                "Do NOT just summarize your own point again. Do NOT use your initial bullet-point format. Engage directly with what others have said.\n"
                 "Keep it under 150 words."
             )
         else:
@@ -478,6 +508,7 @@ class MeetingEngine:
         price_data: str,
         portfolio_summary: str,
         tool_handler: Optional[Callable] = None,
+        agent_contributions: Optional[Dict[str, str]] = None,
     ) -> tuple[str, float]:
         """Ask the facilitator LLM to produce a closing summary."""
         recent_convo = "\n\n".join(conversation_log[-8:])
@@ -487,6 +518,54 @@ class MeetingEngine:
             f"You are the facilitator. Summarize the discussion, state any "
             f"decisions made, and list action items with assigned agents.\n\n"
             f"### Discussion\n{recent_convo}\n\n"
+        )
+
+        try:
+            from bot.knowledge_graph import reputation_graph
+            import re
+            rep_summary = reputation_graph.get_reputation_summary()
+            if rep_summary and "No historical predictions" not in rep_summary:
+                closing_prompt += (
+                    f"### Historical Agent Reputations (Win Rates)\n{rep_summary}\n\n"
+                    "*(Note: Use these track records to weight each other's opinions. "
+                    "If someone has a high win rate on an asset, defer to them.)*\n\n"
+                )
+                
+            if agent_contributions:
+                weights = reputation_graph.get_agent_weights()
+                asset_scores = {}
+                for a_id, text in agent_contributions.items():
+                    if "[DEBATE]:" in text:
+                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", text, re.IGNORECASE)
+                        if match:
+                            direction = match.group(1).upper()
+                            asset = match.group(2).upper()
+                            
+                            w = weights.get(a_id, {}).get(asset, 0.0)
+                            
+                            if asset not in asset_scores:
+                                asset_scores[asset] = 0.0
+                                
+                            if direction == "BUY":
+                                asset_scores[asset] += w
+                            elif direction == "SELL":
+                                asset_scores[asset] -= w
+                                
+                if asset_scores:
+                    closing_prompt += "### Algorithmic Weighted Consensus\n"
+                    for asset, score in asset_scores.items():
+                        if score > 0:
+                            consensus_dir = "BUY"
+                        elif score < 0:
+                            consensus_dir = "SELL"
+                        else:
+                            consensus_dir = "HOLD/NEUTRAL"
+                        closing_prompt += f"- **{asset}**: {consensus_dir} (Net Score: {score:+.2f})\n"
+                    closing_prompt += "\n*(Note: As the Chair, you MUST heavily consider this mathematical consensus when making your final decision.)*\n\n"
+        except Exception as e:
+            logger.error(f"Failed to inject reputation summary: {e}")
+
+        closing_prompt += (
             f"Produce a structured closing with:\n"
             f"1. Key perspectives summary (2-3 bullets)\n"
             f"2. Decision(s)\n"

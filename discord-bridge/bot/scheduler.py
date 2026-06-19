@@ -53,6 +53,17 @@ class MeetingScheduler:
                 coalesce=True,
             )
 
+        # Add background job for evaluating agent predictions
+        from apscheduler.triggers.interval import IntervalTrigger
+        self._scheduler.add_job(
+            self._evaluate_predictions,
+            trigger=IntervalTrigger(minutes=15, timezone=_TIMEZONE),
+            id="evaluate_predictions",
+            name="Evaluate agent predictions",
+            replace_existing=True,
+            coalesce=True,
+        )
+
         self._scheduler.start()
         next_type, next_time = self.get_next_meeting_info()
         logger.info(
@@ -81,6 +92,23 @@ class MeetingScheduler:
 
         async with self._meeting_lock:
             await self._execute_meeting(emergency_data=None)
+
+    async def _evaluate_predictions(self) -> None:
+        """Background job to grade agent predictions in the Knowledge Graph."""
+        try:
+            from bot.knowledge_graph import reputation_graph
+            from bot.price_feed import price_feed
+            prices = await price_feed.get_prices()
+            
+            # Format to { "SOL": 140.5 }
+            standardized_prices = {
+                data.get("symbol", k).upper(): data.get("price", 0.0) 
+                for k, data in prices.items()
+            }
+            reputation_graph.evaluate_pending_votes(standardized_prices)
+            logger.debug("Evaluated agent predictions successfully.")
+        except Exception as e:
+            logger.error(f"Failed to evaluate agent predictions: {e}")
 
     # ------------------------------------------------------------------
     # Emergency meeting
