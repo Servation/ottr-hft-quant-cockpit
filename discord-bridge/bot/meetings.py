@@ -312,7 +312,8 @@ class MeetingEngine:
                 import re
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
-                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", text, re.IGNORECASE)
+                        debate_text = text.split("[DEBATE]:")[-1]
+                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE)
                         if match:
                             direction = match.group(1).upper()
                             asset = match.group(2).upper()
@@ -492,7 +493,7 @@ class MeetingEngine:
                 "Give your independent report based on the Market Data. You MUST:\n"
                 "1. State your own position clearly based on the data using the 'Initial Assessment' format from your persona.\n"
                 "2. Do NOT critique or react to your colleagues yet. Just put your foundational analysis on the table.\n"
-                "3. Do NOT cast a 'Final Vote' yet. That is reserved for the Debate Round.\n\n"
+                "3. Provide ONLY your Initial Assessment. Do not use the exact phrase 'Final Vote' in your response.\n\n"
                 "Keep it concise (under 150 words). Bullet points preferred."
             )
 
@@ -536,7 +537,8 @@ class MeetingEngine:
                 asset_scores = {}
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
-                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", text, re.IGNORECASE)
+                        debate_text = text.split("[DEBATE]:")[-1]
+                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE)
                         if match:
                             direction = match.group(1).upper()
                             asset = match.group(2).upper()
