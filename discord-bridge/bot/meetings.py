@@ -535,6 +535,7 @@ class MeetingEngine:
             if agent_contributions:
                 weights = reputation_graph.get_agent_weights()
                 asset_scores = {}
+                breakdown_lines = []
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
                         debate_text = text.split("[DEBATE]:")[-1]
@@ -553,8 +554,16 @@ class MeetingEngine:
                             elif direction == "SELL":
                                 asset_scores[asset] -= w
                                 
+                            agent_name = AGENTS[a_id].name.split()[0]
+                            breakdown_lines.append(f"- **{agent_name}**: {direction} {asset} *(Weight: {w:+.2f})*")
+                                
                 if asset_scores:
                     closing_prompt += "### Algorithmic Weighted Consensus\n"
+                    discord_msg = "```markdown\n# 🧮 Algorithmic Consensus Breakdown\n\n"
+                    if breakdown_lines:
+                        discord_msg += "## Individual Votes\n" + "\n".join(breakdown_lines) + "\n\n"
+                    discord_msg += "## Net Asset Scores\n"
+                    
                     for asset, score in asset_scores.items():
                         if score > 0:
                             consensus_dir = "BUY"
@@ -563,7 +572,15 @@ class MeetingEngine:
                         else:
                             consensus_dir = "HOLD/NEUTRAL"
                         closing_prompt += f"- **{asset}**: {consensus_dir} (Net Score: {score:+.2f})\n"
+                        discord_msg += f"- {asset}: {consensus_dir} (Net Score: {score:+.2f})\n"
+                    
+                    discord_msg += "```"
                     closing_prompt += "\n*(Note: As the Chair, you MUST heavily consider this mathematical consensus when making your final decision.)*\n\n"
+                    
+                    try:
+                        await self._trading_floor_channel.send(discord_msg)
+                    except Exception as e:
+                        logger.error(f"Failed to post breakdown: {e}")
         except Exception as e:
             logger.error(f"Failed to inject reputation summary: {e}")
 
