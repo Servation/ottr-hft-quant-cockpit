@@ -1,9 +1,14 @@
 # Multi-stage Node build for Vite SPA
 FROM node:22-alpine AS builder
 WORKDIR /app
-COPY package.json ./
+COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
+# VITE_-prefixed vars are inlined into the bundle at build time. Passed from
+# docker-compose (VITE_OTTR_API_KEY=${OTTR_API_KEY}) so the dashboard can
+# authenticate its state-changing API calls.
+ARG VITE_OTTR_API_KEY
+ENV VITE_OTTR_API_KEY=$VITE_OTTR_API_KEY
 RUN npm run build
 
 FROM nginx:alpine
