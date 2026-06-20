@@ -1,9 +1,14 @@
+# Local commits do NOT run the test suite. pytest depends on the project's Python
+# environment (conda/venv), which pre-commit's shell does not share — that caused
+# false "collection error" failures on commit. Tests run in CI instead
+# (.github/workflows/ci.yml). Run them locally any time with:
+#     cd discord-bridge && pytest -k "not live" tests/
 repos:
 -   repo: local
     hooks:
-    -   id: pytest
-        name: Run pytest (discord-bridge)
-        entry: bash -c 'cd discord-bridge && pytest -k "not live" tests/'
+    -   id: tests-in-ci
+        name: tests run in CI, not pre-commit (no-op)
+        entry: python -c "import sys; sys.exit(0)"
         language: system
         pass_filenames: false
         always_run: true
