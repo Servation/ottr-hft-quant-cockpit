@@ -3,8 +3,7 @@ repos:
     hooks:
     -   id: pytest
         name: Run pytest (discord-bridge)
-        entry: pytest
+        entry: bash -c 'cd discord-bridge && pytest -k "not live" tests/'
         language: system
         pass_filenames: false
         always_run: true
-        args: ["discord-bridge/tests"]

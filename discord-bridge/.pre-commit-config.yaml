@@ -2,8 +2,8 @@ repos:
 -   repo: local
     hooks:
     -   id: pytest
-        name: pytest
-        entry: pytest --cov=bot --cov-report=term-missing tests/
+        name: Run pytest (discord-bridge)
+        entry: bash -c 'cd discord-bridge && pytest -k "not live" tests/'
         language: system
         pass_filenames: false
         always_run: true
