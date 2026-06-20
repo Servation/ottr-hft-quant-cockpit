@@ -15,6 +15,13 @@ def mock_bot():
 def scheduler():
     return MeetingScheduler()
 
+
+@pytest.fixture(autouse=True)
+def _llm_online(mocker):
+    # _execute_meeting aborts if the LLM health check fails; tests don't run a
+    # real LLM, so force it healthy. No test exercises the offline-abort path.
+    mocker.patch("bot.agents.agent_llm.check_health", new_callable=AsyncMock, return_value=True)
+
 @pytest.mark.asyncio
 async def test_scheduler_lifecycle(scheduler, mock_bot):
     """Test start and stop of MeetingScheduler."""
@@ -24,9 +31,12 @@ async def test_scheduler_lifecycle(scheduler, mock_bot):
     assert scheduler._scheduler is not None
     assert scheduler._scheduler.running
     
-    # 6 meeting hours
+    # 6 meeting-hour cron jobs + 1 background "evaluate_predictions" job.
     jobs = scheduler._scheduler.get_jobs()
-    assert len(jobs) == 6
+    meeting_jobs = [j for j in jobs if j.id.startswith("meeting_")]
+    assert len(meeting_jobs) == 6
+    assert any(j.id == "evaluate_predictions" for j in jobs)
+    assert len(jobs) == 7
     
     await scheduler.stop()
     # apscheduler wait=False might not immediately reflect running status if pending jobs

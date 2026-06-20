@@ -20,7 +20,10 @@ def mock_portfolio(tmp_path, mocker):
     p.save()
     
     mocker.patch("bot.tools.portfolio", p)
-    mocker.patch("bot.meetings.portfolio", p)
+    # meetings.py imports the portfolio singleton lazily (from bot.portfolio import
+    # portfolio inside functions), so there's no bot.meetings.portfolio attribute
+    # to patch. Patch the source so the deferred import resolves to the mock.
+    mocker.patch("bot.portfolio.portfolio", p)
     
     yield p
     

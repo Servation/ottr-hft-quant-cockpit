@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import json
 import logging
 
-from bot.meetings import MeetingEngine, MeetingRotation, MEETING_TYPES
+from bot.meetings import MeetingEngine, MeetingRotation, MEETING_TYPES, ROTATION_ORDER
 from bot.portfolio import portfolio
 from bot.memory import meeting_memory
 
@@ -85,13 +85,16 @@ def test_meeting_rotation(tmp_path, mocker):
     mocker.patch("bot.meetings.ROTATION_STATE_PATH", state_file)
     
     rot = MeetingRotation()
-    assert rot.peek_next_meeting_type() == "morning_briefing"
-    
-    assert rot.get_next_meeting_type() == "morning_briefing"
-    assert rot.peek_next_meeting_type() == "strategy_session"
-    assert rot.get_next_meeting_type() == "strategy_session"
-    
-    # Test invalid json reload
+    # peek returns the head of the rotation without advancing
+    assert rot.peek_next_meeting_type() == ROTATION_ORDER[0]
+    assert rot.peek_next_meeting_type() == ROTATION_ORDER[0]
+
+    # get advances through the full order, then wraps back to the start
+    for expected in ROTATION_ORDER:
+        assert rot.get_next_meeting_type() == expected
+    assert rot.peek_next_meeting_type() == ROTATION_ORDER[0]
+
+    # Corrupt state file -> index resets to 0 on reload
     state_file.write_text("INVALID JSON")
     rot2 = MeetingRotation()
-    assert rot2.peek_next_meeting_type() == "morning_briefing"
+    assert rot2.peek_next_meeting_type() == ROTATION_ORDER[0]

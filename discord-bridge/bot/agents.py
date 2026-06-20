@@ -170,6 +170,7 @@ class AgentLLM:
         max_tokens: Optional[int] = None,
         tools: Optional[list[dict]] = None,
         tool_handler: Optional[Callable] = None,
+        strip_output_format: bool = False,
     ) -> Tuple[str, float]:
         """
         Generate a chat completion for the given agent.
@@ -198,6 +199,10 @@ class AgentLLM:
 
         # Ensure the system prompt is the first message
         system_prompt = self._load_persona(agent_id)
+        if strip_output_format:
+            import re
+            system_prompt = re.sub(r"OUTPUT FORMAT.*", "", system_prompt, flags=re.IGNORECASE | re.DOTALL).strip()
+            
         messages = list(context_messages)  # shallow copy
         if not messages or messages[0].get("role") != "system":
             messages.insert(0, {"role": "system", "content": system_prompt})
@@ -207,6 +212,18 @@ class AgentLLM:
 
         total_latency = 0.0
         final_content = ""
+
+        # Track tool calls already executed this turn so a model that repeats
+        # the same call (e.g. a local model re-leaking a raw <|tool_call> tag on
+        # the next loop iteration) cannot execute the same side-effecting tool twice.
+        executed_tool_signatures: set[str] = set()
+
+        def _tool_signature(name: str, args: dict) -> str:
+            import json as _json
+            try:
+                return name + ":" + _json.dumps(args, sort_keys=True, default=str)
+            except Exception:
+                return name + ":" + str(args)
 
         try:
             async with self.lock:
@@ -241,7 +258,17 @@ class AgentLLM:
                                 args = json.loads(tool_call.function.arguments)
                             except Exception:
                                 args = {}
-                            tool_result = await tool_handler(tool_call.function.name, args)
+
+                            sig = _tool_signature(tool_call.function.name, args)
+                            if sig in executed_tool_signatures:
+                                logger.warning(
+                                    "Skipping duplicate tool call %s (already executed this turn)",
+                                    tool_call.function.name,
+                                )
+                                tool_result = f"[skipped] {tool_call.function.name} was already executed in this turn."
+                            else:
+                                executed_tool_signatures.add(sig)
+                                tool_result = await tool_handler(tool_call.function.name, args)
 
                             messages.append({
                                 "role": "tool",
@@ -269,36 +296,46 @@ class AgentLLM:
                                         args = json.loads(clean_args)
                                     except Exception:
                                         args = {}
-                                    tool_result = await tool_handler(func_name, args)
+
+                                    sig = _tool_signature(func_name, args)
+                                    if sig in executed_tool_signatures:
+                                        logger.warning(
+                                            "Skipping duplicate raw tool call %s (already executed this turn)",
+                                            func_name,
+                                        )
+                                        tool_result = f"[skipped] {func_name} was already executed in this turn."
+                                    else:
+                                        executed_tool_signatures.add(sig)
+                                        tool_result = await tool_handler(func_name, args)
                                     messages.append({
                                         "role": "tool",
                                         "name": func_name,
                                         "content": str(tool_result),
                                         "tool_call_id": "call_" + func_name
                                     })
-                                
+
                                 # Strip it from final content so it doesn't leak to Discord
                                 final_content = re.sub(r"<\|?tool_call\|?>.*?<\|?/?tool_call\|?>", "", final_content, flags=re.DOTALL)
                                 tools = None
                                 continue
-                                
+
                         break
 
             # Clean up known reasoning tags that some models might leak
             import re
             # Log the raw content so we can debug if it leaks again
             logger.debug(f"Raw LLM response before cleaning: {repr(final_content)}")
-            
+
             # Remove DeepSeek <think>...</think>
             final_content = re.sub(r"<think>.*?</think>\n?", "", final_content, flags=re.DOTALL | re.IGNORECASE)
-            
+
             # Remove <|channel>thought ... <channel|>-
             final_content = re.sub(r"<\|?channel\|?>\s*thought.*?<\|?channel\|?>-?\n?", "", final_content, flags=re.DOTALL | re.IGNORECASE)
-            
+
             # Catch-all for standalone <|channel> tags that might still be lingering at the very start
             final_content = re.sub(r"^\s*<\|?channel\|?>\s*thought\s*", "", final_content, flags=re.IGNORECASE)
             final_content = re.sub(r"^\s*<\|?channel\|?>-?\s*", "", final_content, flags=re.IGNORECASE)
-            
+
             final_content = final_content.strip()
 
             logger.info(
@@ -312,8 +349,6 @@ class AgentLLM:
         except Exception as exc:
             logger.error("LLM call failed for %s: %s", agent_id, exc)
             return f"[error] LLM call failed: {exc}", 0.0
-
-
 
 
 # ---------------------------------------------------------------------------

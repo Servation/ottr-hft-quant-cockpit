@@ -24,13 +24,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Setup CORS middleware for frontend communication
+# CORS: restrict to known dashboard origin(s). `allow_origins=["*"]` with
+# credentials is both insecure and invalid per the CORS spec. Auth is via the
+# X-API-Key header (not cookies), so credentials are disabled.
+_cors_origins = [o.strip() for o in settings.allowed_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=_cors_origins,
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "X-API-Key", "Accept"],
 )
 
 # Include versioned API router

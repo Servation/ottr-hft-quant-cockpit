@@ -89,6 +89,7 @@ class Portfolio:
     def save(self) -> None:
         """Atomically persist state: write temp file then os.replace()."""
         _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        tmp_path = None
         try:
             fd, tmp_path = tempfile.mkstemp(
                 dir=str(_DATA_DIR), suffix=".tmp", prefix="portfolio_"
@@ -96,9 +97,18 @@ class Portfolio:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 json.dump(self._state, f, indent=2)
             os.replace(tmp_path, str(_PORTFOLIO_FILE))
+            tmp_path = None  # successfully renamed; nothing left to clean up
             logger.debug("Portfolio saved to %s", _PORTFOLIO_FILE)
         except OSError as e:
             logger.error("Failed to save portfolio: %s", e)
+        finally:
+            # If os.replace() never ran (write or replace failed), the temp file
+            # would otherwise be orphaned in _DATA_DIR. Clean it up.
+            if tmp_path is not None and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except OSError:
+                    logger.warning("Could not remove stale temp file %s", tmp_path)
 
     # ── Trading ──────────────────────────────────────────────────
 

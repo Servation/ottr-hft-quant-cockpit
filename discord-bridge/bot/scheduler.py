@@ -198,7 +198,7 @@ class MeetingScheduler:
             except Exception as e:
                 logger.exception("Failed to format market state summary")
                 await self._bot.post_system_status(
-                    f"🚨 **MEETING ABORTED**: {str(e)}"
+                    "🚨 **MEETING ABORTED**: market data unavailable."
                 )
                 return  # Abort the meeting if data is unavailable
                 
@@ -285,9 +285,17 @@ class MeetingScheduler:
         if not jobs:
             return ("unknown", "no jobs scheduled")
 
-        # Find the soonest next-fire-time
+        # Find the soonest next-fire-time. Jobs can be stored in different
+        # timezones (cron/interval jobs use _TIMEZONE; dynamic meetings are
+        # created in UTC), so normalize the display to a single timezone to
+        # avoid confusing mixed "PDT"/"UTC" output that is impossible to compare.
         soonest = min(jobs, key=lambda j: j.next_run_time)
-        next_time = soonest.next_run_time.strftime("%Y-%m-%d %H:%M %Z")
+        try:
+            from zoneinfo import ZoneInfo
+            local_next = soonest.next_run_time.astimezone(ZoneInfo(_TIMEZONE))
+        except Exception:
+            local_next = soonest.next_run_time
+        next_time = local_next.strftime("%Y-%m-%d %H:%M %Z")
 
         # Determine meeting type from rotation (deferred import)
         try:

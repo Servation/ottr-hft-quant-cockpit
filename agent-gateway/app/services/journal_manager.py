@@ -7,7 +7,7 @@ from typing import List, Dict, Any, Optional
 logger = logging.getLogger(__name__)
 
 # Default file location in workspace
-JOURNAL_FILE = os.path.join(os.getcwd(), "trade_journal.json")
+JOURNAL_FILE = os.getenv("JOURNAL_FILE", os.path.join(os.getcwd(), "trade_journal.json"))
 
 class JournalManager:
     def __init__(self, filepath: str = JOURNAL_FILE):

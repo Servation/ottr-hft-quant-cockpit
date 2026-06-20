@@ -59,9 +59,23 @@ async def test_get_prices_both_fail_no_cache(price_feed_instance, mocker):
     mock_get = mocker.patch("httpx.AsyncClient.get", new_callable=AsyncMock)
     mock_get.side_effect = httpx.RequestError("Both Down")
     
+    # Both APIs down with no cache: get_prices must RAISE rather than return fake
+    # $0.00 prices (which could drive catastrophic trades).
+    with pytest.raises(Exception, match="Critical Market Data Unavailable"):
+        await price_feed_instance.get_prices()
+    assert price_feed_instance._cached_prices is None
+
+
+@pytest.mark.asyncio
+async def test_get_prices_both_fail_uses_stale_cache(price_feed_instance, mocker):
+    # If both APIs fail but a cached snapshot exists, fall back to the stale cache.
+    price_feed_instance._cached_prices = {"BTC": {"price": 123.0}, "ETH": {"price": 9.0}}
+    price_feed_instance._cache_timestamp = 0  # force "expired" so it tries to refetch
+    mock_get = mocker.patch("httpx.AsyncClient.get", new_callable=AsyncMock)
+    mock_get.side_effect = httpx.RequestError("Both Down")
+
     prices = await price_feed_instance.get_prices()
-    assert prices["BTC"]["price"] == 0.0
-    assert prices["ETH"]["price"] == 0.0
+    assert prices["BTC"]["price"] == 123.0
 
 @pytest.mark.asyncio
 async def test_get_price_history(price_feed_instance):
@@ -149,23 +163,23 @@ async def test_fetch_defi_yields(price_feed_instance, mocker):
 async def test_fetch_derivatives(price_feed_instance, mocker):
     mock_get = mocker.patch("httpx.AsyncClient.get", new_callable=AsyncMock)
     
-    # Success
-    mock_resp = MagicMock()
-    mock_resp.raise_for_status = MagicMock()
-    mock_resp.json.return_value = [
-        {"symbol": "BTCUSDT", "market": "Binance", "funding_rate": 0.01},
-        {"symbol": "ETHUSDT", "market": "binance", "funding_rate": 0.02},
-        {"symbol": "DOGEUSDT", "market": "binance", "funding_rate": 0.05}
-    ]
-    mock_get.return_value = mock_resp
-    
+    # Success: _fetch_derivatives queries OKX once per symbol and parses
+    # {"code": "0", "data": [{"fundingRate": ...}]}.
+    def okx_side_effect(url, *args, **kwargs):
+        rate = "0.01" if "BTC-USDT-SWAP" in url else "0.02" if "ETH-USDT-SWAP" in url else "0.0"
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"code": "0", "data": [{"fundingRate": rate}]}
+        return resp
+    mock_get.side_effect = okx_side_effect
+
     rates = await price_feed_instance.get_funding_rates()
     assert rates["BTC"] == 0.01
     assert rates["ETH"] == 0.02
-    
-    # Failure
+
+    # Failure: requests raise -> defaults to 0.0 (no stale cache available).
     mock_get.side_effect = Exception("Fail")
-    price_feed_instance._cached_funding_rates = None
-    price_feed_instance._funding_rates_timestamp = 0
+    price_feed_instance._cached_funding_rates = {}
+    price_feed_instance._funding_timestamp = 0
     rates = await price_feed_instance.get_funding_rates()
     assert rates["BTC"] == 0.0

@@ -87,10 +87,6 @@ export interface PortfolioSnapshot {
   holdings?: Record<string, number>;
   purchasePrices?: Record<string, number>;
   currentPrices?: Record<string, number>;
-  llm_fallback_base_url?: string;
-  llm_fallback_api_key?: string;
-  llm_fallback_model_id?: string;
-  llm_fallback_active?: boolean;
 }
 
 export interface NewsItem {

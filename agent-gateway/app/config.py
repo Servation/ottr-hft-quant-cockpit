@@ -3,6 +3,17 @@ from typing import Dict, Any, Optional
 from pydantic_settings import BaseSettings
 from pydantic import BaseModel
 
+# Load .env so local (non-Docker) runs pick up OTTR_API_KEY (and friends) into
+# os.environ. In Docker, compose injects these directly. Guarded so a missing
+# python-dotenv degrades gracefully to "env must be set externally".
+try:
+    from pathlib import Path as _Path
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(_Path(__file__).resolve().parents[1] / ".env")   # agent-gateway/.env
+    _load_dotenv(_Path(__file__).resolve().parents[2] / ".env")   # repo-root .env
+except Exception:
+    pass
+
 class Settings(BaseSettings):
     # LLM configurations (must be empty by default)
     llm_base_url: str = ""
@@ -18,6 +29,8 @@ class Settings(BaseSettings):
     # Service configurations
     java_engine_url: str = "http://localhost:8080"
     locale: str = "en"  # "en" or "ru"
+    # Comma-separated allowed CORS origins (GATEWAY_ALLOWED_ORIGINS).
+    allowed_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     
     # Mempool & Blockchain URLs
     mempool_api_url: str = "https://mempool.space/api"

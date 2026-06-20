@@ -8,7 +8,7 @@ load_dotenv()
 
 # Fix for Windows console emoji printing
 sys.stdout.reconfigure(encoding='utf-8')
-from bot.agents import AGENTS, AgentLLM
+from bot.agents import AGENTS, agent_llm
 from bot.meetings import MeetingEngine
 from bot.meetings import MEETING_TYPES
 
@@ -56,11 +56,12 @@ async def run_phase_eval():
         )
         
         try:
-            service = AgentLLM()
-            response_p1, _ = await service.generate_response(
+            is_strategy = (mt.id == "strategy_session")
+            response_p1, _ = await agent_llm.generate_response(
                 agent_id=agent_id,
                 context_messages=context_msgs_phase1,
-                max_tokens=300
+                max_tokens=300,
+                strip_output_format=is_strategy,  # mirror production round-1 path
             )
             print("=== RESPONSE (Phase 1) ===")
             print(response_p1)
@@ -92,11 +93,11 @@ async def run_phase_eval():
         )
         
         try:
-            service = AgentLLM()
-            response_p2, _ = await service.generate_response(
+            response_p2, _ = await agent_llm.generate_response(
                 agent_id=agent_id,
                 context_messages=context_msgs_phase2,
-                max_tokens=300
+                max_tokens=300,
+                strip_output_format=True,  # mirror production debate-round path
             )
             print("=== RESPONSE (Phase 2) ===")
             print(response_p2)

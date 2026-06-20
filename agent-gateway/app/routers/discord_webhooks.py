@@ -26,6 +26,8 @@ async def discord_sync(request: Request):
             logger.warning(f"Received unknown event type from Discord bot: {event_type}")
 
         return {"status": "ok"}
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error processing discord sync webhook: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail="Internal server error")

@@ -14,6 +14,26 @@ import {
 
 const API_BASE = '/api/v1';
 
+// Shared-secret API key for state-changing requests. Reads a build-time Vite var
+// (VITE_OTTR_API_KEY) with a runtime localStorage override for self-hosted setups.
+// Read-only endpoints do not send it (the SSE stream can't carry headers).
+function getApiKey(): string {
+  let ls = '';
+  try {
+    ls = typeof localStorage !== 'undefined' ? (localStorage.getItem('ottr_api_key') || '') : '';
+  } catch {
+    ls = '';
+  }
+  return ((import.meta as any).env?.VITE_OTTR_API_KEY as string) || ls || '';
+}
+
+function writeHeaders(json: boolean = true): Record<string, string> {
+  const h: Record<string, string> = json ? { 'Content-Type': 'application/json' } : {};
+  const key = getApiKey();
+  if (key) h['X-API-Key'] = key;
+  return h;
+}
+
 // Health check to determine gateway availability
 export async function checkGatewayHealth(): Promise<boolean> {
   try {
@@ -90,10 +110,6 @@ export async function fetchPortfolioSnapshot(): Promise<PortfolioSnapshot> {
     holdings: data.holdings,
     purchasePrices: data.purchase_prices,
     currentPrices: data.current_prices,
-    llm_fallback_base_url: data.llm_fallback_base_url,
-    llm_fallback_api_key: data.llm_fallback_api_key,
-    llm_fallback_model_id: data.llm_fallback_model_id,
-    llm_fallback_active: data.llm_fallback_active
   };
 }
 
@@ -114,7 +130,7 @@ export async function fetchExecutionLogs(limit: number = 50): Promise<ExecutionL
 
 // Start trading loops on gateway
 export async function postTradingStart(): Promise<void> {
-  const response = await fetch(`${API_BASE}/trading/start`, { method: 'POST' });
+  const response = await fetch(`${API_BASE}/trading/start`, { method: 'POST', headers: writeHeaders(false) });
   if (!response.ok) {
     throw new Error(`Failed to start trading: ${response.statusText}`);
   }
@@ -122,7 +138,7 @@ export async function postTradingStart(): Promise<void> {
 
 // Stop trading loops on gateway
 export async function postTradingStop(): Promise<void> {
-  const response = await fetch(`${API_BASE}/trading/stop`, { method: 'POST' });
+  const response = await fetch(`${API_BASE}/trading/stop`, { method: 'POST', headers: writeHeaders(false) });
   if (!response.ok) {
     throw new Error(`Failed to stop trading: ${response.statusText}`);
   }
@@ -132,7 +148,7 @@ export async function postTradingStop(): Promise<void> {
 export async function postResetBalance(balance: number): Promise<void> {
   const response = await fetch(`${API_BASE}/portfolio/reset-balance`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: writeHeaders(),
     body: JSON.stringify({ balance }),
   });
   if (!response.ok) {
@@ -210,7 +226,7 @@ export function subscribeToAgentEvents(
 export async function postAgentChat(message: string, history: ChatMessage[]): Promise<{ text: string }> {
   const response = await fetch(`${API_BASE}/agent/chat`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: writeHeaders(),
     body: JSON.stringify({
       message,
       history: history.map(h => ({ sender: h.sender, text: h.text }))
@@ -235,7 +251,7 @@ export async function getOptimizerHistory(): Promise<OptimizationLogEntry[]> {
 export async function postLLMConfigure(config: LLMConfig): Promise<void> {
   const response = await fetch(`${API_BASE}/llm/configure`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: writeHeaders(),
     body: JSON.stringify(config),
   });
   if (!response.ok) {
@@ -247,7 +263,7 @@ export async function postLLMConfigure(config: LLMConfig): Promise<void> {
 export async function postTradingConfig(config: TradingConfig): Promise<void> {
   const response = await fetch(`${API_BASE}/trading/config`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: writeHeaders(),
     body: JSON.stringify(config),
   });
   if (!response.ok) {

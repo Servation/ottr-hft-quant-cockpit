@@ -1,9 +1,23 @@
 import logging
+import os
 from bot.price_feed import price_feed
 from bot.portfolio import portfolio
 from bot.scheduler import meeting_scheduler
+from bot.audit import audit_event
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Kill-switch / dry-run safety
+# ---------------------------------------------------------------------------
+# State-mutating tools that are blocked when TRADING_DRY_RUN is enabled. Read
+# tools (prices, portfolio summary, volatility) are always allowed.
+DRY_RUN_BLOCKED_TOOLS = {"execute_trade", "update_parameter", "cancel_orders"}
+
+
+def dry_run_enabled() -> bool:
+    """True when the TRADING_DRY_RUN kill-switch is on."""
+    return os.getenv("TRADING_DRY_RUN", "0").strip().lower() in ("1", "true", "yes", "on")
 
 READ_TOOLS = [
     {
@@ -113,6 +127,18 @@ ACTION_TOOLS = [
 
 async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, post_message_fn=None) -> str:
     try:
+        # Kill-switch: block state-mutating tools without touching any state.
+        if dry_run_enabled() and tool_name in DRY_RUN_BLOCKED_TOOLS:
+            msg = (
+                f"🧪 **[DRY-RUN]** `{tool_name}` was blocked by the kill-switch "
+                f"(TRADING_DRY_RUN). Requested args: `{arguments}`. No state changed."
+            )
+            logger.warning("DRY-RUN blocked %s with args %s", tool_name, arguments)
+            audit_event("tool_blocked", tool=tool_name, reason="dry_run", args=arguments)
+            if audit_log_fn:
+                await audit_log_fn(msg)
+            return msg
+
         if tool_name == "get_asset_price":
             symbol = arguments.get("symbol", "").upper()
             prices = await price_feed.get_prices()
@@ -138,9 +164,31 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             if asset not in prices:
                 return f"Error: Price for {asset} not found."
             price = prices[asset]["price"]
-            
+
+            # Authorization gate: cap the notional size of any single trade so a
+            # runaway or prompt-injected order cannot exceed a safe limit. BUY
+            # `amount` is USD; SELL `amount` is quantity (notional = qty * price).
+            max_trade = float(os.getenv("MAX_TRADE_USD", "0") or 0)
+            notional = amount if action == "BUY" else amount * price
+            if max_trade > 0 and notional > max_trade:
+                msg = (
+                    f"🚫 **Trade blocked:** {action} {asset} notional "
+                    f"${notional:,.2f} exceeds the MAX_TRADE_USD cap of ${max_trade:,.2f}."
+                )
+                logger.warning(
+                    "Trade authorization gate blocked oversized %s %s (notional $%.2f > cap $%.2f)",
+                    action, asset, notional, max_trade,
+                )
+                audit_event("trade_blocked", reason="max_trade_usd", action=action,
+                            asset=asset, notional=notional, cap=max_trade)
+                if audit_log_fn:
+                    await audit_log_fn(msg)
+                return msg
+
             if action == "BUY":
                 trade = portfolio.buy(asset, amount, price)
+                audit_event("trade", action="BUY", asset=asset, usd_amount=amount,
+                            quantity=trade["quantity"], fill_price=trade["fill_price"])
                 msg = f"💰 **Trade Executed:** **BUY** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}**"
                 if post_message_fn:
                     await post_message_fn("portfolio_manager", msg)
@@ -149,6 +197,8 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                 return msg
             elif action == "SELL":
                 trade = portfolio.sell(asset, amount, price)
+                audit_event("trade", action="SELL", asset=asset, quantity=trade["quantity"],
+                            fill_price=trade["fill_price"])
                 msg = f"💰 **Trade Executed:** **SELL** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}**"
                 if post_message_fn:
                     await post_message_fn("portfolio_manager", msg)
@@ -161,7 +211,9 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             name = arguments.get("name")
             value = float(arguments.get("value", 0))
             if name == "min_trade_usd":
+                old_value = portfolio.min_trade_usd
                 portfolio.min_trade_usd = value
+                audit_event("param_change", name="min_trade_usd", old=old_value, new=value)
                 msg = f"⚙️ **Parameter Updated:** `min_trade_usd` set to **${value:.2f}**"
                 if post_message_fn:
                     await post_message_fn("portfolio_manager", msg)
@@ -197,6 +249,7 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
         elif tool_name == "cancel_orders":
             asset = arguments.get("asset", "").upper()
             count = portfolio.cancel_all_orders(asset)
+            audit_event("cancel_orders", asset=asset, count=count)
             msg = f"🗑️ **Orders Canceled:** Canceled {count} pending orders for **{asset}**."
             if post_message_fn:
                 await post_message_fn("portfolio_manager", msg)

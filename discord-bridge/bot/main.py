@@ -72,6 +72,11 @@ class TradingFloorBot(discord.Client):
     async def on_ready(self) -> None:
         logger.info(f"Logged in as {self.user} (ID: {self.user.id})")
 
+        # Fail loudly on missing/placeholder configuration.
+        from bot.security import validate_runtime_config
+        for _problem in validate_runtime_config():
+            logger.error("CONFIG: %s", _problem)
+
         # Resolve channels
         trading_floor_id = settings.get("discord_trading_floor_channel_id")
         system_status_id = settings.get("discord_system_status_channel_id")
