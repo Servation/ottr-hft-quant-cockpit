@@ -40,6 +40,35 @@ order above that notional is blocked (`trade_blocked reason=max_trade_usd`).
 Rotate the Discord bot token via the Discord developer portal, then update
 `DISCORD_BOT_TOKEN` and restart.
 
+## Docker deployment
+Compose runs three services: `frontend` (:3000), `agent-gateway` (:8000), and
+`discord-bridge` (API :8001, internal-only). Environment is interpolated from the
+repo-root `.env`; a single `OTTR_API_KEY` is reused by all three and baked into the
+frontend bundle at build time.
+
+Rebuild + restart (data is preserved — it lives in the host bind-mount
+`./discord-bridge/data`):
+```
+docker compose up -d --build        # or:  ./redeploy.ps1
+docker compose logs -f discord-bridge
+```
+
+- **A rebuild (`--build`) is required** after pulling changes: the frontend bakes
+  `VITE_OTTR_API_KEY` at build time and the gateway installs deps from pyproject.
+- **Shared state:** the bridge mounts `./discord-bridge/data:/app/data`; the gateway
+  mounts the same host dir at `/discord-bridge/data` (it reads `PORTFOLIO_STATE_PATH`
+  and `JOURNAL_FILE` from there). One source of truth, survives restarts.
+- **LLM on the host:** `LLM_BASE_URL` defaults to `host.docker.internal:1234`
+  (LM Studio); `extra_hosts` makes that resolve on Linux too.
+- **Never `docker compose down -v`** — `-v` deletes volumes. Plain `down` keeps your
+  data (it's a host bind-mount regardless).
+- Secrets stay out of images via `.dockerignore` (`.env`, `data/`, caches).
+- Tests are NOT run on commit (the pre-commit hook is a no-op); CI is the gate.
+
+A healthy bridge startup shows: a Discord login line, "Webhook ready" for all 7
+agents, "Scheduler started — 6 meeting slots", "API Server running on port 8001",
+and **no `CONFIG:` errors**.
+
 ## Deploy checklist
 - [ ] `cd discord-bridge && pytest -k "not live" tests/` green.
 - [ ] `cd agent-gateway && pytest tests/` green.

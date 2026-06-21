@@ -20,6 +20,13 @@ python run_evals.py             # agent/eval suite (auto-detects the LLM; --no-l
 CI (`.github/workflows/ci.yml`, Python 3.12) runs both as blocking gates. Run the
 full suite green before and after changes.
 
+## Deploy (Docker)
+`docker compose up -d --build` (or `./redeploy.ps1`). **A rebuild is required** —
+the frontend bakes `VITE_OTTR_API_KEY` at build time and the gateway installs deps.
+Env is interpolated from the repo-root `.env`; one `OTTR_API_KEY` feeds all three
+services. Bridge + gateway share `./discord-bridge/data` (single source of truth,
+persists across restarts). Never `down -v`. Full procedure in `docs/RUNBOOK.md`.
+
 ## Safety invariants — do NOT regress
 - **Idempotent tool execution** (`bot/agents.py`): a repeated tool call (native or
   raw `<|tool_call>` tag) executes once. Prevents double-trades.
@@ -48,6 +55,8 @@ full suite green before and after changes.
 - Required deps: `pandas-ta` (price feed), `pytest-mock` (tests).
 - Avoid backslashes inside f-string expressions (locks Python to 3.12+).
 - For a local (non-Docker) run, set `LLM_BASE_URL=http://localhost:1234/v1`.
+- The pre-commit hook is a deliberate **no-op** — tests run in CI, not on commit
+  (pytest needs the project env, which pre-commit's shell doesn't share).
 
 ## Conventions
 - Make file edits, then verify with `pytest`/`run_evals.py`. Add a test for any

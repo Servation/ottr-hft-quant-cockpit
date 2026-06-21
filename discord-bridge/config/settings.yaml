@@ -15,6 +15,9 @@ thresholds:
   emergency_price_drop_pct: 5.0
   emergency_price_spike_pct: 8.0
   stop_loss_pct: 10.0
+  # Midas/Zephyr: hard cap on SOL as a % of total portfolio value.
+  # Any BUY that would push SOL above this is blocked at the execution gate.
+  max_sol_exposure_pct: 20.0
 
 portfolio:
   starting_balance: 10000

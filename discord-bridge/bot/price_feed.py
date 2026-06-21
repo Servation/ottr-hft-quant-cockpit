@@ -345,12 +345,14 @@ class PriceFeed:
                         rsi_14 = float(ta.rsi(df["close"], length=14).iloc[-1])
                         macd = ta.macd(df["close"], fast=12, slow=26, signal=9)
                         macd_val = float(macd["MACD_12_26_9"].iloc[-1])
-                        
+                        macd_signal = float(macd["MACDs_12_26_9"].iloc[-1])
+
                         indicators[symbol] = {
                             "EMA_20": ema_20,
                             "EMA_50": ema_50,
                             "RSI_14": rsi_14,
-                            "MACD": macd_val
+                            "MACD": macd_val,
+                            "MACD_signal": macd_signal,
                         }
                     except Exception as e:
                         logger.error("Failed to calculate indicators for %s: %s", symbol, e)

@@ -32,6 +32,9 @@ class AlertMonitor:
         self._running: bool = False
         self._task: Optional[asyncio.Task] = None
         self._last_alert_time: float = 0.0
+        self._last_macd_alert_time: float = 0.0
+        # Tracks the previous MACD histogram (MACD - signal) per asset to detect sign flips.
+        self._prev_macd_histogram: dict = {}
         self._bot = None  # set in start()
 
     # ------------------------------------------------------------------
@@ -95,6 +98,12 @@ class AlertMonitor:
                 if alerts and self._cooldown_elapsed():
                     await self._trigger_emergency(alerts, self._bot)
                     self._last_alert_time = time.monotonic()
+
+                # 3. Check MACD signal-line crossovers (Atlas entry confirmation)
+                macd_flips = await self.check_macd_flip()
+                if macd_flips and self._macd_cooldown_elapsed():
+                    await self._trigger_macd_alert(macd_flips, self._bot)
+                    self._last_macd_alert_time = time.monotonic()
 
             except asyncio.CancelledError:
                 raise
@@ -260,6 +269,78 @@ class AlertMonitor:
                 await meeting_scheduler.schedule_emergency(alerts)
             except Exception:
                 logger.exception("Failed to schedule emergency meeting for stop loss")
+
+    # ------------------------------------------------------------------
+    # MACD flip detection (Atlas entry confirmation)
+    # ------------------------------------------------------------------
+    async def check_macd_flip(self) -> list[dict]:
+        """Detect MACD signal-line crossovers for tracked assets.
+
+        A flip is when the MACD histogram (MACD − signal) changes sign between
+        two consecutive checks.  Bullish = negative→positive, bearish = positive→negative.
+        Returns a list of dicts: {asset, direction, macd, signal}.
+        """
+        try:
+            indicators = await price_feed.get_technical_indicators()
+        except Exception:
+            logger.exception("Failed to fetch technical indicators for MACD check")
+            return []
+
+        flips: list[dict] = []
+        for asset, tech in indicators.items():
+            macd = tech.get("MACD")
+            signal = tech.get("MACD_signal")
+            if macd is None or signal is None:
+                continue
+
+            histogram = macd - signal
+            prev = self._prev_macd_histogram.get(asset)
+            self._prev_macd_histogram[asset] = histogram
+
+            # Need at least one prior reading and a real sign change (skip exact zero)
+            if prev is None or prev == 0 or histogram == 0:
+                continue
+
+            if prev < 0 and histogram > 0:
+                flips.append({"asset": asset, "direction": "BULLISH", "macd": macd, "signal": signal})
+                logger.info("MACD bullish crossover detected for %s (histogram %.4f → %.4f)", asset, prev, histogram)
+            elif prev > 0 and histogram < 0:
+                flips.append({"asset": asset, "direction": "BEARISH", "macd": macd, "signal": signal})
+                logger.info("MACD bearish crossover detected for %s (histogram %.4f → %.4f)", asset, prev, histogram)
+
+        return flips
+
+    async def _trigger_macd_alert(self, flips: list[dict], bot) -> None:
+        """Post MACD crossover alert and schedule an emergency meeting for entry confirmation."""
+        lines = ["📊 **MACD Crossover — Entry Signal Detected** 📊", ""]
+        for f in flips:
+            emoji = "🟢" if f["direction"] == "BULLISH" else "🔴"
+            lines.append(
+                f"{emoji} **{f['asset']}**: {f['direction']} crossover "
+                f"(MACD {f['macd']:.2f} / Signal {f['signal']:.2f})"
+            )
+        lines += ["", "⏰ Convening team for entry confirmation…"]
+        message = "\n".join(lines)
+
+        if bot and bot._trading_floor_channel:
+            try:
+                await bot._trading_floor_channel.send(message)
+            except Exception:
+                logger.exception("Failed to post MACD alert to trading floor")
+
+        try:
+            from bot.scheduler import meeting_scheduler
+            alert_data = [
+                {"asset": f["asset"], "direction": f"MACD_{f['direction']}", "pct_change": 0.0}
+                for f in flips
+            ]
+            await meeting_scheduler.schedule_emergency(alert_data)
+        except Exception:
+            logger.exception("Failed to schedule emergency meeting for MACD flip")
+
+    def _macd_cooldown_elapsed(self) -> bool:
+        """Use a 4-hour cooldown for MACD alerts — matches the technical indicator cache TTL."""
+        return (time.monotonic() - self._last_macd_alert_time) >= (4 * 3600)
 
     # ------------------------------------------------------------------
     # Helpers
