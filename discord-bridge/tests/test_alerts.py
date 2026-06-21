@@ -104,6 +104,8 @@ async def test_monitor_loop_execution(alert_monitor, mock_bot, mocker):
     mocker.patch.object(alert_monitor, "_notify_executed_orders", new_callable=AsyncMock)
     mocker.patch.object(alert_monitor, "check_thresholds", new_callable=AsyncMock, return_value=[{"asset": "BTC", "direction": "DROP"}])
     mocker.patch.object(alert_monitor, "_trigger_emergency", new_callable=AsyncMock)
+    mocker.patch.object(alert_monitor, "_cooldown_elapsed", return_value=True)
+    mocker.patch.object(alert_monitor, "check_macd_flip", new_callable=AsyncMock, return_value=[])
     
     with pytest.raises(asyncio.CancelledError):
         await alert_monitor._monitor_loop()
