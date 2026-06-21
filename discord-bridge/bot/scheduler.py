@@ -253,7 +253,8 @@ class MeetingScheduler:
                 portfolio_summary=portfolio_str,
                 ceo_directives=ceo_directives,
                 memory_context=memory_context,
-                audit_log_fn=self._bot.post_audit_log
+                audit_log_fn=self._bot.post_audit_log,
+                next_meeting_info=self.get_next_meeting_info(),
             )
 
             next_type, next_time = self.get_next_meeting_info()

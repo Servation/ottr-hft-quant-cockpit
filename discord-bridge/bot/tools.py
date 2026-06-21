@@ -4,6 +4,7 @@ from bot.price_feed import price_feed
 from bot.portfolio import portfolio
 from bot.scheduler import meeting_scheduler
 from bot.audit import audit_event
+from bot import settings
 
 logger = logging.getLogger(__name__)
 
@@ -12,7 +13,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # State-mutating tools that are blocked when TRADING_DRY_RUN is enabled. Read
 # tools (prices, portfolio summary, volatility) are always allowed.
-DRY_RUN_BLOCKED_TOOLS = {"execute_trade", "update_parameter", "cancel_orders"}
+DRY_RUN_BLOCKED_TOOLS = {"execute_trade", "update_parameter", "cancel_orders", "place_limit_order"}
 
 
 def dry_run_enabled() -> bool:
@@ -88,11 +89,11 @@ ACTION_TOOLS = [
         "type": "function",
         "function": {
             "name": "schedule_meeting",
-            "description": "Schedule a dynamic follow-up meeting.",
+            "description": "Schedule an early follow-up meeting before the next automatic 4-hour slot. Use only when a specific event warrants reconvening sooner — e.g. a limit order fills, a major price swing triggers a stop, or an urgent CEO directive arrives. Do NOT use this to duplicate the next scheduled meeting.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "minutes": {"type": "integer", "description": "Minutes from now to schedule the meeting"}
+                    "minutes": {"type": "integer", "description": "Minutes from now to hold the follow-up meeting"}
                 },
                 "required": ["minutes"]
             }
@@ -120,6 +121,41 @@ ACTION_TOOLS = [
                     "asset": {"type": "string", "description": "The ticker symbol (e.g. BTC)"}
                 },
                 "required": ["asset"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "place_limit_order",
+            "description": (
+                "Place a persistent limit order at a key price level. "
+                "A BUY triggers when price falls to or below the target; "
+                "a SELL triggers when price rises to or above the target. "
+                "Orders are checked every 60 seconds and survive between meetings."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["BUY", "SELL"],
+                        "description": "BUY at support or SELL at resistance."
+                    },
+                    "asset": {
+                        "type": "string",
+                        "description": "Ticker symbol (e.g. BTC, ETH, SOL)."
+                    },
+                    "amount": {
+                        "type": "number",
+                        "description": "USD amount for BUY, or coin quantity for SELL."
+                    },
+                    "target_price": {
+                        "type": "number",
+                        "description": "Price level that triggers the order."
+                    }
+                },
+                "required": ["action", "asset", "amount", "target_price"]
             }
         }
     }
@@ -184,6 +220,38 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                 if audit_log_fn:
                     await audit_log_fn(msg)
                 return msg
+
+            # SOL exposure cap: block BUY if it would push SOL above the portfolio % limit.
+            # Midas/Zephyr set this via thresholds.max_sol_exposure_pct in settings.yaml.
+            if action == "BUY" and asset == "SOL":
+                max_sol_pct = float(settings.get("thresholds", {}).get("max_sol_exposure_pct", 0) or 0)
+                if max_sol_pct > 0:
+                    total_value = portfolio.get_total_value(prices)
+                    sol_qty = portfolio._state["holdings"].get("SOL", {}).get("quantity", 0.0)
+                    current_sol_value = sol_qty * price
+                    projected_sol_value = current_sol_value + amount
+                    projected_total = total_value + amount
+                    if projected_total > 0:
+                        projected_pct = (projected_sol_value / projected_total) * 100
+                        if projected_pct > max_sol_pct:
+                            msg = (
+                                f"🚫 **SOL exposure cap:** buying ${amount:,.2f} would push SOL to "
+                                f"**{projected_pct:.1f}%** of the portfolio, exceeding the "
+                                f"**{max_sol_pct:.0f}%** cap. Reduce position size or wait for rebalancing."
+                            )
+                            logger.warning(
+                                "SOL exposure cap blocked BUY SOL $%.2f "
+                                "(projected %.1f%% > cap %.1f%%)",
+                                amount, projected_pct, max_sol_pct,
+                            )
+                            audit_event(
+                                "trade_blocked", reason="sol_exposure_cap",
+                                action=action, asset=asset, notional=amount,
+                                projected_pct=projected_pct, cap=max_sol_pct,
+                            )
+                            if audit_log_fn:
+                                await audit_log_fn(msg)
+                            return msg
 
             if action == "BUY":
                 trade = portfolio.buy(asset, amount, price)
@@ -256,7 +324,29 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             if audit_log_fn:
                 await audit_log_fn(msg)
             return msg
-            
+
+        elif tool_name == "place_limit_order":
+            action = arguments.get("action", "").upper()
+            asset = arguments.get("asset", "").upper()
+            amount = float(arguments.get("amount", 0))
+            target_price = float(arguments.get("target_price", 0))
+
+            order_id = portfolio.place_order("LIMIT", action, asset, amount, target_price)
+            audit_event(
+                "order_placed", order_type="LIMIT", action=action,
+                asset=asset, amount=amount, target_price=target_price, order_id=order_id,
+            )
+            direction_sym = "≤" if action == "BUY" else "≥"
+            msg = (
+                f"📝 **Limit Order Placed:** **{action}** {asset} triggers when price "
+                f"{direction_sym} **${target_price:,.2f}** | Amount: {amount} | ID: `{order_id}`"
+            )
+            if post_message_fn:
+                await post_message_fn("portfolio_manager", msg)
+            if audit_log_fn:
+                await audit_log_fn(msg)
+            return msg
+
         else:
             return f"Error: Tool {tool_name} not found."
             

@@ -191,6 +191,7 @@ class MeetingEngine:
         ceo_directives: str = "",
         memory_context: str = "",
         audit_log_fn: Optional[Callable[[str], Awaitable[None]]] = None,
+        next_meeting_info: Optional[tuple] = None,
     ) -> dict:
         """
         Run a complete meeting with debate and return the meeting record.
@@ -295,7 +296,8 @@ class MeetingEngine:
         # ---- 4. Facilitator closing summary & Execution -------------------
         await sync_agent_state([{"id": mt.facilitator_id, "name": AGENTS[mt.facilitator_id].name, "status": "THINKING", "current_task": "Drafting summary & executing"}])
         closing_msg, _ = await self._build_closing(
-            mt, conversation_log, price_data, portfolio_summary, bound_tool_handler, agent_contributions, post_message_fn
+            mt, conversation_log, price_data, portfolio_summary, bound_tool_handler, agent_contributions, post_message_fn,
+            next_meeting_info=next_meeting_info,
         )
         
         agent_contributions[mt.facilitator_id] = closing_msg
@@ -522,6 +524,7 @@ class MeetingEngine:
         tool_handler: Optional[Callable] = None,
         agent_contributions: Optional[Dict[str, str]] = None,
         post_message_fn: Optional[Callable] = None,
+        next_meeting_info: Optional[tuple] = None,
     ) -> tuple[str, float]:
         """Ask the facilitator LLM to produce a closing summary."""
         recent_convo = "\n\n".join(conversation_log[-8:])
@@ -600,12 +603,28 @@ class MeetingEngine:
         except Exception as e:
             logger.error(f"Failed to inject reputation summary: {e}")
 
+        if next_meeting_info:
+            next_type, next_time = next_meeting_info
+            schedule_note = (
+                f"The team meets automatically every 4 hours. "
+                f"Next scheduled meeting: **{next_type}** at **{next_time}**. "
+                f"Only call `schedule_meeting` if the situation requires reconvening BEFORE that slot "
+                f"(e.g. a limit order fills, a major price swing triggers a stop, or the CEO issues an urgent directive). "
+                f"Do NOT schedule a meeting that duplicates the next automatic slot."
+            )
+        else:
+            schedule_note = (
+                f"The team meets automatically every 4 hours. "
+                f"Call `schedule_meeting` only if you need to reconvene before the next automatic slot "
+                f"(e.g. order fill, major price move, urgent CEO directive)."
+            )
+
         closing_prompt += (
             f"Produce a structured closing with:\n"
             f"1. Key perspectives summary (2-3 bullets)\n"
             f"2. Decision(s)\n"
             f"3. Action items\n"
-            f"4. Next review checkpoint\n\n"
+            f"4. Next review checkpoint — {schedule_note}\n\n"
             f"CRITICAL: If a trade, order, or parameter change is approved by the majority, you MUST use the appropriate tool (execute_trade, schedule_meeting, update_parameter, cancel_orders) to execute it natively. DO NOT use text tags.\n\n"
             f"Be concise — under 250 words."
         )
