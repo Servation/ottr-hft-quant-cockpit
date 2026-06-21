@@ -14,6 +14,13 @@ Thumbs.db
 .pytest_cache/
 .coverage
 
+# AI Tool Config (not project code)
+CLAUDE.md
+CONTEXT.md
+
+# AI-generated agent docs (keep RUNBOOK.md, TEST_BASELINE.md)
+discord-bridge/docs/agent_*.md
+
 # Node.js
 node_modules/
 dist/
