@@ -31,76 +31,102 @@ def test_record_vote(fresh_graph):
 
 def test_evaluate_hit_buy(fresh_graph):
     fresh_graph.record_vote("trader", "BUY", "SOL", 100.0)
-    # Price went up 2% (> 1.5%)
+    # Price went up 2% within 4h window → STRONG_HIT
     fresh_graph.evaluate_pending_votes({"SOL": 102.0})
-    
+
     votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
-    assert fresh_graph.graph.nodes[votes[0]]["status"] == "HIT"
+    assert fresh_graph.graph.nodes[votes[0]]["status"] == "STRONG_HIT"
 
 def test_evaluate_miss_buy(fresh_graph):
     fresh_graph.record_vote("trader", "BUY", "SOL", 100.0)
-    # Price went down 2% (< -1.5%)
+    # Price went down 2% within 4h window → STRONG_MISS
     fresh_graph.evaluate_pending_votes({"SOL": 98.0})
-    
+
     votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
-    assert fresh_graph.graph.nodes[votes[0]]["status"] == "MISS"
-    
+    assert fresh_graph.graph.nodes[votes[0]]["status"] == "STRONG_MISS"
+
 def test_evaluate_hit_sell(fresh_graph):
     fresh_graph.record_vote("risk_auditor", "SELL", "BTC", 50000.0)
-    # Price went down 2% (< -1.5%)
+    # Price went down 2% within 4h window → STRONG_HIT
     fresh_graph.evaluate_pending_votes({"BTC": 49000.0})
-    
+
     votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
-    assert fresh_graph.graph.nodes[votes[0]]["status"] == "HIT"
-    
+    assert fresh_graph.graph.nodes[votes[0]]["status"] == "STRONG_HIT"
+
 def test_evaluate_miss_sell(fresh_graph):
     fresh_graph.record_vote("risk_auditor", "SELL", "BTC", 50000.0)
-    # Price went up 2% (> 1.5%)
+    # Price went up 2% within 4h window → STRONG_MISS
     fresh_graph.evaluate_pending_votes({"BTC": 51000.0})
-    
+
     votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
-    assert fresh_graph.graph.nodes[votes[0]]["status"] == "MISS"
+    assert fresh_graph.graph.nodes[votes[0]]["status"] == "STRONG_MISS"
+
+def test_evaluate_weak_hit(fresh_graph):
+    fresh_graph.record_vote("trader", "BUY", "SOL", 100.0)
+    # Hack timestamp to 5 hours ago (past 4h strong window)
+    votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
+    vote_node = votes[0]
+    fresh_graph.graph.nodes[vote_node]["timestamp"] = (
+        datetime.now(timezone.utc) - timedelta(hours=5)
+    ).isoformat()
+    # Price moved in right direction → WEAK_HIT (beyond 4h window)
+    fresh_graph.evaluate_pending_votes({"SOL": 102.0})
+    assert fresh_graph.graph.nodes[vote_node]["status"] == "WEAK_HIT"
+
+def test_evaluate_weak_miss(fresh_graph):
+    fresh_graph.record_vote("trader", "BUY", "SOL", 100.0)
+    votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
+    vote_node = votes[0]
+    fresh_graph.graph.nodes[vote_node]["timestamp"] = (
+        datetime.now(timezone.utc) - timedelta(hours=5)
+    ).isoformat()
+    # Price moved wrong direction beyond 4h → WEAK_MISS
+    fresh_graph.evaluate_pending_votes({"SOL": 98.0})
+    assert fresh_graph.graph.nodes[vote_node]["status"] == "WEAK_MISS"
 
 def test_time_decay(fresh_graph):
     fresh_graph.record_vote("trader", "BUY", "ETH", 2000.0)
-    
-    # Manually hack the timestamp to be 1.5 hours ago
+
+    # Hack timestamp to 25 hours ago (past 24h weak horizon)
     votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
     vote_node = votes[0]
-    old_time = datetime.now(timezone.utc) - timedelta(hours=1.5)
-    fresh_graph.graph.nodes[vote_node]["timestamp"] = old_time.isoformat()
-    
-    # Price hasn't moved enough (0% change)
+    fresh_graph.graph.nodes[vote_node]["timestamp"] = (
+        datetime.now(timezone.utc) - timedelta(hours=25)
+    ).isoformat()
+
+    # Price hasn't moved enough → timeout as WEAK_MISS
     fresh_graph.evaluate_pending_votes({"ETH": 2000.0})
-    
-    assert fresh_graph.graph.nodes[vote_node]["status"] == "MISS" # Time decay triggers MISS
-    
+
+    assert fresh_graph.graph.nodes[vote_node]["status"] == "WEAK_MISS"
+
 def test_time_decay_hold(fresh_graph):
     fresh_graph.record_vote("trader", "HOLD", "ETH", 2000.0)
-    
-    # Manually hack the timestamp to be 1.5 hours ago
+
+    # Hack timestamp to 25 hours ago (past 24h weak horizon)
     votes = [n for n, d in fresh_graph.graph.nodes(data=True) if d.get("type") == "vote"]
     vote_node = votes[0]
-    old_time = datetime.now(timezone.utc) - timedelta(hours=1.5)
-    fresh_graph.graph.nodes[vote_node]["timestamp"] = old_time.isoformat()
-    
-    # Price hasn't moved enough (0% change)
+    fresh_graph.graph.nodes[vote_node]["timestamp"] = (
+        datetime.now(timezone.utc) - timedelta(hours=25)
+    ).isoformat()
+
+    # Price hasn't moved enough → HOLD timeout is WEAK_HIT
     fresh_graph.evaluate_pending_votes({"ETH": 2000.0})
-    
-    assert fresh_graph.graph.nodes[vote_node]["status"] == "HIT" # Time decay triggers HIT for HOLD
+
+    assert fresh_graph.graph.nodes[vote_node]["status"] == "WEAK_HIT"
 
 def test_reputation_summary(fresh_graph):
     fresh_graph.record_vote("trader", "BUY", "SOL", 100.0)
-    fresh_graph.evaluate_pending_votes({"SOL": 102.0}) # HIT
-    
+    fresh_graph.evaluate_pending_votes({"SOL": 102.0})  # STRONG_HIT
+
     fresh_graph.record_vote("trader", "BUY", "SOL", 100.0)
-    fresh_graph.evaluate_pending_votes({"SOL": 98.0}) # MISS
-    
+    fresh_graph.evaluate_pending_votes({"SOL": 98.0})   # STRONG_MISS
+
     fresh_graph.record_vote("trader", "SELL", "ETH", 2000.0)
-    fresh_graph.evaluate_pending_votes({"ETH": 1900.0}) # HIT
-    
+    fresh_graph.evaluate_pending_votes({"ETH": 1900.0}) # STRONG_HIT
+
     summary = fresh_graph.get_reputation_summary()
-    assert "- **trader**: SOL: 50% (1/2), ETH: 100% (1/1)" in summary or "- **trader**: ETH: 100% (1/1), SOL: 50% (1/2)" in summary
+    assert "SOL: 1⚡/0~/1✗/0≈" in summary
+    assert "ETH: 1⚡/0~/0✗/0≈" in summary
 
 def test_regex_extraction():
     import re

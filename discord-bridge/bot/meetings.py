@@ -318,11 +318,10 @@ class MeetingEngine:
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
                         debate_text = text.split("[DEBATE]:")[-1]
-                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE)
-                        if match:
+                        for match in re.finditer(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE):
                             direction = match.group(1).upper()
                             asset = match.group(2).upper()
-                            asset_price = prices.get(asset.lower(), {}).get("price", 0.0)
+                            asset_price = prices.get(asset, {}).get("price", 0.0)
                             if asset_price > 0:
                                 reputation_graph.record_vote(a_id, direction, asset, asset_price)
             except Exception as e:

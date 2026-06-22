@@ -19,7 +19,8 @@ DATA_DIR = PROJECT_ROOT / "data"
 GRAPH_PATH = DATA_DIR / "agent_reputation_graph.json"
 
 THRESHOLD_PCT = 1.5
-HORIZON_HOURS = 1.0
+STRONG_HORIZON_HOURS = 4.0   # threshold hit within 4h = full credit
+WEAK_HORIZON_HOURS = 24.0    # threshold hit within 24h = half credit; no hit by 24h = timeout
 
 class AgentReputationGraph:
     def __init__(self):
@@ -103,28 +104,29 @@ class AgentReputationGraph:
             pct_change = ((current_price - vote_price) / vote_price) * 100.0
             hours_elapsed = (now - vote_time).total_seconds() / 3600.0
             
+            strong = hours_elapsed <= STRONG_HORIZON_HOURS
             status = "PENDING"
             if direction == "BUY":
                 if pct_change >= THRESHOLD_PCT:
-                    status = "HIT"
+                    status = "STRONG_HIT" if strong else "WEAK_HIT"
                 elif pct_change <= -THRESHOLD_PCT:
-                    status = "MISS"
+                    status = "STRONG_MISS" if strong else "WEAK_MISS"
             elif direction == "SELL":
                 if pct_change <= -THRESHOLD_PCT:
-                    status = "HIT"
+                    status = "STRONG_HIT" if strong else "WEAK_HIT"
                 elif pct_change >= THRESHOLD_PCT:
-                    status = "MISS"
+                    status = "STRONG_MISS" if strong else "WEAK_MISS"
             elif direction == "HOLD":
                 if abs(pct_change) >= THRESHOLD_PCT:
-                    status = "MISS"
+                    status = "STRONG_MISS" if strong else "WEAK_MISS"
             elif direction == "ABSTAIN":
                 status = "IGNORED"
-                
-            if status == "PENDING" and hours_elapsed >= HORIZON_HOURS:
+
+            if status == "PENDING" and hours_elapsed >= WEAK_HORIZON_HOURS:
                 if direction == "HOLD":
-                    status = "HIT"
+                    status = "WEAK_HIT"
                 else:
-                    status = "MISS"
+                    status = "WEAK_MISS"
                     
             if status != "PENDING":
                 self.graph.nodes[node]["status"] = status
@@ -136,97 +138,99 @@ class AgentReputationGraph:
             self.save()
 
     def get_reputation_summary(self) -> str:
+        _ZERO = {"strong_hits": 0, "weak_hits": 0, "strong_misses": 0, "weak_misses": 0}
+
         agent_stats = {}
         for node, data in self.graph.nodes(data=True):
             if data.get("type") == "agent":
                 agent_stats[node] = {}
-        
+
         for u, v, edgedata in self.graph.edges(data=True):
-            if edgedata.get("relation") == "cast_vote":
-                agent_id = u
-                vote_id = v
-                vote_data = self.graph.nodes[vote_id]
-                status = vote_data.get("status")
-                
-                if status in ("HIT", "MISS"):
-                    asset_edges = list(self.graph.out_edges(vote_id))
-                    if not asset_edges: continue
-                    asset = asset_edges[0][1]
-                    
-                    if asset not in agent_stats[agent_id]:
-                        agent_stats[agent_id][asset] = {"hits": 0, "misses": 0}
-                        
-                    if status == "HIT":
-                        agent_stats[agent_id][asset]["hits"] += 1
-                    else:
-                        agent_stats[agent_id][asset]["misses"] += 1
-                        
+            if edgedata.get("relation") != "cast_vote":
+                continue
+            vote_data = self.graph.nodes[v]
+            status = vote_data.get("status")
+            if status not in ("STRONG_HIT", "WEAK_HIT", "STRONG_MISS", "WEAK_MISS"):
+                continue
+            asset_edges = list(self.graph.out_edges(v))
+            if not asset_edges:
+                continue
+            asset = asset_edges[0][1]
+            agent_id = u
+            if asset not in agent_stats[agent_id]:
+                agent_stats[agent_id][asset] = dict(_ZERO)
+            agent_stats[agent_id][asset][{
+                "STRONG_HIT": "strong_hits", "WEAK_HIT": "weak_hits",
+                "STRONG_MISS": "strong_misses", "WEAK_MISS": "weak_misses",
+            }[status]] += 1
+
         lines = []
         for agent, assets in agent_stats.items():
             if not assets:
                 continue
-                
             asset_strs = []
-            for asset, counts in assets.items():
-                total = counts["hits"] + counts["misses"]
-                if total > 0:
-                    win_rate = (counts["hits"] / total) * 100
-                    asset_strs.append(f"{asset}: {win_rate:.0f}% ({counts['hits']}/{total})")
-            
+            for asset, c in assets.items():
+                total = c["strong_hits"] + c["weak_hits"] + c["strong_misses"] + c["weak_misses"]
+                if total == 0:
+                    continue
+                asset_strs.append(
+                    f"{asset}: {c['strong_hits']}⚡/{c['weak_hits']}~/{c['strong_misses']}✗/{c['weak_misses']}≈"
+                    f" ({total} votes)"
+                )
             if asset_strs:
                 lines.append(f"- **{agent}**: " + ", ".join(asset_strs))
-                
+
         if not lines:
             return "No historical predictions recorded yet."
-            
         return "\n".join(lines)
 
     def get_agent_weights(self) -> dict:
         """
-        Returns a dict mapping agent_id -> asset -> weight (from -1.0 to 1.0)
-        Using Bayesian Smoothing: pseudo_wins = 2.5, pseudo_trades = 5.0
+        Returns a dict mapping agent_id -> asset -> weight (from -1.0 to 1.0).
+        Strong hits/misses count fully; weak hits/misses count as half.
+        Uses Bayesian smoothing (pseudo_wins=2.5, pseudo_trades=5.0) to shrink
+        agents with few votes toward neutral.
         """
+        # hit_credit and vote_weight per status
+        _WEIGHTS = {
+            "STRONG_HIT":  (1.0, 1.0),
+            "WEAK_HIT":    (0.5, 1.0),
+            "STRONG_MISS": (0.0, 1.0),
+            "WEAK_MISS":   (0.0, 0.5),
+        }
+
         agent_stats = {}
         for node, data in self.graph.nodes(data=True):
             if data.get("type") == "agent":
                 agent_stats[node] = {}
-                
+
         for u, v, edgedata in self.graph.edges(data=True):
-            if edgedata.get("relation") == "cast_vote":
-                agent_id = u
-                vote_id = v
-                vote_data = self.graph.nodes[vote_id]
-                status = vote_data.get("status")
-                
-                if status in ("HIT", "MISS"):
-                    asset_edges = list(self.graph.out_edges(vote_id))
-                    if not asset_edges: continue
-                    asset = asset_edges[0][1]
-                    
-                    if asset not in agent_stats[agent_id]:
-                        agent_stats[agent_id][asset] = {"hits": 0, "total": 0}
-                        
-                    agent_stats[agent_id][asset]["total"] += 1
-                    if status == "HIT":
-                        agent_stats[agent_id][asset]["hits"] += 1
-                        
+            if edgedata.get("relation") != "cast_vote":
+                continue
+            vote_data = self.graph.nodes[v]
+            status = vote_data.get("status")
+            if status not in _WEIGHTS:
+                continue
+            asset_edges = list(self.graph.out_edges(v))
+            if not asset_edges:
+                continue
+            asset = asset_edges[0][1]
+            agent_id = u
+            if asset not in agent_stats[agent_id]:
+                agent_stats[agent_id][asset] = {"weighted_hits": 0.0, "weighted_total": 0.0}
+            hit_credit, vote_weight = _WEIGHTS[status]
+            agent_stats[agent_id][asset]["weighted_hits"] += hit_credit
+            agent_stats[agent_id][asset]["weighted_total"] += vote_weight
+
         weights = {}
         for agent, assets in agent_stats.items():
             weights[agent] = {}
             for asset, counts in assets.items():
-                hits = counts["hits"]
-                total = counts["total"]
-                
-                # Bayesian Smoothing
                 pseudo_wins = 2.5
                 pseudo_trades = 5.0
-                
-                smoothed_win_rate = (hits + pseudo_wins) / (total + pseudo_trades)
-                
-                # Z-Score Mapping [-1.0 to 1.0]
-                weight = (smoothed_win_rate - 0.5) * 2.0
-                weights[agent][asset] = weight
-                
+                smoothed_win_rate = (counts["weighted_hits"] + pseudo_wins) / (counts["weighted_total"] + pseudo_trades)
+                weights[agent][asset] = (smoothed_win_rate - 0.5) * 2.0
+
         return weights
 
 reputation_graph = AgentReputationGraph()
