@@ -318,11 +318,10 @@ class MeetingEngine:
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
                         debate_text = text.split("[DEBATE]:")[-1]
-                        match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE)
-                        if match:
+                        for match in re.finditer(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE):
                             direction = match.group(1).upper()
                             asset = match.group(2).upper()
-                            asset_price = prices.get(asset.lower(), {}).get("price", 0.0)
+                            asset_price = prices.get(asset, {}).get("price", 0.0)
                             if asset_price > 0:
                                 reputation_graph.record_vote(a_id, direction, asset, asset_price)
             except Exception as e:
@@ -553,6 +552,7 @@ class MeetingEngine:
             if agent_contributions:
                 weights = reputation_graph.get_agent_weights()
                 asset_scores = {}
+                asset_vote_counts = {}  # asset -> {BUY: n, SELL: n, HOLD: n}
                 breakdown_lines = []
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
@@ -561,36 +561,55 @@ class MeetingEngine:
                         for match in matches:
                             direction = match.group(1).upper()
                             asset = match.group(2).upper() if match.group(2) else "MARKET"
-                            
+
                             w = weights.get(a_id, {}).get(asset, 0.0)
-                            
+
                             if asset not in asset_scores:
                                 asset_scores[asset] = 0.0
-                                
+                            if asset not in asset_vote_counts:
+                                asset_vote_counts[asset] = {"BUY": 0, "SELL": 0, "HOLD": 0}
+
+                            asset_vote_counts[asset][direction if direction in ("BUY", "SELL", "HOLD") else "HOLD"] += 1
+
                             if direction == "BUY":
                                 asset_scores[asset] += w
                             elif direction == "SELL":
                                 asset_scores[asset] -= w
-                                
+
                             agent_name = AGENTS[a_id].name.split()[0]
-                            breakdown_lines.append(f"- **{agent_name}**: {direction} {asset} *(Weight: {w:+.2f})*")
-                                
+                            breakdown_lines.append(f"- **{agent_name}**: {direction} {asset} *(rep: {w:+.2f})*")
+
                 if breakdown_lines:
                     closing_prompt += "### Algorithmic Weighted Consensus\n"
                     discord_msg += "```markdown\n# 🧮 Algorithmic Consensus Breakdown\n\n"
                     discord_msg += "## Individual Votes\n" + "\n".join(breakdown_lines) + "\n\n"
                     discord_msg += "## Net Asset Scores\n"
-                    
+
                     for asset, score in asset_scores.items():
+                        counts = asset_vote_counts.get(asset, {})
+                        buys = counts.get("BUY", 0)
+                        sells = counts.get("SELL", 0)
+                        holds = counts.get("HOLD", 0)
+                        tally = f"{buys}B/{sells}S/{holds}H"
+
                         if score > 0:
                             consensus_dir = "BUY"
                         elif score < 0:
                             consensus_dir = "SELL"
                         else:
-                            consensus_dir = "HOLD/NEUTRAL"
-                        closing_prompt += f"- **{asset}**: {consensus_dir} (Net Score: {score:+.2f})\n"
-                        discord_msg += f"- {asset}: {consensus_dir} (Net Score: {score:+.2f})\n"
-                    
+                            # Weighted score is 0 (e.g. agents have no history yet) —
+                            # fall back to raw vote majority so this doesn't contradict
+                            # Athena's own tally in the closing text.
+                            if buys > sells and buys >= holds:
+                                consensus_dir = "BUY"
+                            elif sells > buys and sells >= holds:
+                                consensus_dir = "SELL"
+                            else:
+                                consensus_dir = "HOLD/NEUTRAL"
+
+                        closing_prompt += f"- **{asset}**: {consensus_dir} ({tally}, Weighted: {score:+.2f})\n"
+                        discord_msg += f"- **{asset}**: {consensus_dir} — {tally} (Weighted: {score:+.2f})\n"
+
                     discord_msg += "```"
                     closing_prompt += "\n*(Note: As the Chair, you MUST heavily consider this mathematical consensus when making your final decision.)*\n\n"
                     
