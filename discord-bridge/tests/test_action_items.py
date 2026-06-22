@@ -171,9 +171,12 @@ class TestSolExposureCap:
         """Stub portfolio total value and SOL holdings."""
         mocker.patch("bot.tools.portfolio.get_total_value", return_value=total_value)
         import bot.tools as tools_mod
-        tools_mod.portfolio._state["holdings"]["SOL"] = {
-            "quantity": sol_quantity, "avg_cost": 0.0
-        }
+        # Use patch.dict so mocker reverts the mutation after each test —
+        # direct dict assignment is NOT auto-reverted and can corrupt the live file.
+        mocker.patch.dict(
+            tools_mod.portfolio._state["holdings"],
+            {"SOL": {"quantity": sol_quantity, "avg_cost": 0.0}},
+        )
 
     @pytest.mark.asyncio
     async def test_sol_buy_blocked_over_cap(self, mocker):
