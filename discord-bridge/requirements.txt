@@ -4,8 +4,10 @@ httpx>=0.25.0
 apscheduler>=3.10.0
 pyyaml>=6.0
 python-dotenv>=1.0.0
-scikit-learn
-tzdata
-pandas
-pandas-ta
-networkx
+# Ceilings guard against breaking major bumps; floors match the CI-tested versions.
+# pandas-ta 0.4.x requires Python >=3.12 (see CLAUDE.md).
+scikit-learn>=1.9,<2
+tzdata>=2026.1
+pandas>=3.0,<4
+pandas-ta>=0.4.71b0,<0.5
+networkx>=3.6,<4

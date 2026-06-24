@@ -17,7 +17,7 @@ jobs:
 
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"   # project uses 3.12 features; f-string fix also lets it run on 3.10/3.11
+          python-version: "3.12"   # required: pandas-ta 0.4.x needs >=3.12, and the code uses 3.12 f-string features
 
       - name: Install dependencies
         run: |

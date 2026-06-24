@@ -164,25 +164,28 @@ class AgentReputationGraph:
                 "STRONG_MISS": "strong_misses", "WEAK_MISS": "weak_misses",
             }[status]] += 1
 
+        # Render win-rate first so the floor can read it at a glance. A "win" is
+        # any correct call (strong or weak hit); the strong/weak nuance still
+        # drives get_agent_weights() but is noise in a human-facing summary.
         lines = []
         for agent, assets in agent_stats.items():
             if not assets:
                 continue
             asset_strs = []
             for asset, c in assets.items():
-                total = c["strong_hits"] + c["weak_hits"] + c["strong_misses"] + c["weak_misses"]
+                wins = c["strong_hits"] + c["weak_hits"]
+                total = wins + c["strong_misses"] + c["weak_misses"]
                 if total == 0:
                     continue
-                asset_strs.append(
-                    f"{asset}: {c['strong_hits']}⚡/{c['weak_hits']}~/{c['strong_misses']}✗/{c['weak_misses']}≈"
-                    f" ({total} votes)"
-                )
+                win_rate = round(100 * wins / total)
+                asset_strs.append(f"{asset} {win_rate}% ({wins}/{total})")
             if asset_strs:
-                lines.append(f"- **{agent}**: " + ", ".join(asset_strs))
+                lines.append(f"- **{agent}** — " + " · ".join(asset_strs))
 
         if not lines:
             return "No historical predictions recorded yet."
-        return "\n".join(lines)
+        header = "_Win rate = correct calls / total calls._\n"
+        return header + "\n".join(lines)
 
     def get_agent_weights(self) -> dict:
         """
