@@ -111,13 +111,19 @@ class MeetingScheduler:
             from bot.knowledge_graph import reputation_graph
             from bot.price_feed import price_feed
             prices = await price_feed.get_prices()
-            
+
             # Format to { "SOL": 140.5 }
             standardized_prices = {
-                data.get("symbol", k).upper(): data.get("price", 0.0) 
+                data.get("symbol", k).upper(): data.get("price", 0.0)
                 for k, data in prices.items()
             }
-            reputation_graph.evaluate_pending_votes(standardized_prices)
+            # Annualized volatility per asset vol-scales the vote scores; best-effort.
+            volatility = None
+            try:
+                volatility = await price_feed.get_volatility()
+            except Exception:
+                logger.debug("Volatility unavailable for vote grading; using default sigma")
+            reputation_graph.evaluate_pending_votes(standardized_prices, volatility)
             logger.debug("Evaluated agent predictions successfully.")
         except Exception as e:
             logger.error(f"Failed to evaluate agent predictions: {e}")

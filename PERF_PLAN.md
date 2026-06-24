@@ -14,7 +14,7 @@ help. See the four-dimension research writeup for the full findings.
 suite (`python run_evals.py` + `pytest -k "not live"`) so a measurement change
 can't silently break trade execution. Add a test for every behavior change.
 
-**Status:** M0 + M1 complete (bridge + gateway suites green; frontend data-layer unit-tested). M2-M3 todo.
+**Status:** M0, M1, M3 complete (bridge + gateway suites green; frontend data-layer unit-tested). M2 (backtest harness) todo.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -108,11 +108,11 @@ Concrete targets:
 - `discord-bridge/bot/meetings.py` — vote recording path (to thread self-reported confidence through).
 
 Tasks:
-- [ ] **Magnitude-aware, vol-scaled grading** — replace binary HIT/MISS with a continuous score: forward return in the vote's direction over the horizon, normalized by the asset's realized volatility (a 2% move in a calm asset ≠ 2% in a wild one). BUY scores `+ret`, SELL `-ret`, HOLD by closeness to zero within a vol-scaled band — so a genuinely flat tape *rewards* HOLD instead of the current guaranteed loss.
-- [ ] **Horizon-correct resolution** — grade at the 4h/24h marks using the price at/near the horizon, not "whatever the 15-min cron last saw" (today's grade is path-dependent on cron timing). Sample/store the price at the horizon.
-- [ ] **Sample-size guard** — apply Bayesian shrink (already used in `get_agent_weights`, priors at 232-235) to the *displayed* win-rate too, or annotate `(n=1, low confidence)`, so tiny samples can't masquerade as skill.
-- [ ] **Calibration (stretch)** — capture each agent's self-reported confidence (already emitted by personas, consumed by nothing) at `record_vote` time, threaded from `meetings.py` vote parsing; track a per-agent Brier score (are 0.9 calls right 90%?).
-- [ ] **Tests** — update `tests/test_knowledge_graph.py`: assert HOLD wins on a flat tape, a large correct call outweighs a marginal one, and the summary never shows an un-shrunk `100%` on tiny samples.
+- [x] **Magnitude-aware, vol-scaled grading** — `_score_vote` returns a continuous score in [-1,1]: BUY `+ret/σ`, SELL `-ret/σ`, HOLD `1-|ret|/σ`, where σ is the asset's expected move over the horizon (annualized vol → per-horizon, default 2% when vol unknown). A flat tape now *rewards* HOLD; a big correct call outscores a marginal one. Scheduler passes `price_feed.get_volatility()` through.
+- [x] **Horizon-correct resolution** — votes resolve **once**, at `RESOLVE_HORIZON_HOURS` (4h, matching meeting cadence), using the price then — no early-stop at the first cron tick that crosses a threshold (the old path-dependent bias toward short-term noise is gone).
+- [x] **Sample-size guard** — `get_reputation_summary` flags `< _MIN_SAMPLES` (5) as `(n=1, low confidence)` instead of `100% (1/1)`; `get_agent_weights` shrinks the mean score toward 0 with `_PSEUDO_OBS` pseudo-observations, so a thin record can't swing consensus. Legacy HIT/MISS nodes still count via `_node_score`.
+- [~] **Calibration (deferred)** — `record_vote` only receives direction/asset/price from the brittle `Final Vote:` regex (no confidence), so threading self-reported confidence + a Brier score is left as a follow-up to avoid touching the vote-parsing path here.
+- [x] **Tests** — rewrote `tests/test_knowledge_graph.py` (15): HOLD wins on a flat tape, magnitude/vol scaling affect the score, no resolution before the horizon, low-n flagged (no un-shrunk `100%`), weights shrink with few samples, legacy nodes still count.
 
 **Exit:** flat tape → HOLD wins; big correct call > marginal correct call in
 weight; summary shows no un-shrunk small-sample rates; tests green.
