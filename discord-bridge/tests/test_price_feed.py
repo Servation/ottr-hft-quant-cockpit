@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch, MagicMock
 import httpx
 import time
 
-from bot.price_feed import PriceFeed, _GECKO_ID_MAP, COINCAP_URL
+from bot.price_feed import PriceFeed, _GECKO_ID_MAP, _KRAKEN_PAIR_MAP, COINCAP_URL
 
 @pytest.fixture
 def price_feed_instance():
@@ -183,3 +183,37 @@ async def test_fetch_derivatives(price_feed_instance, mocker):
     price_feed_instance._funding_timestamp = 0
     rates = await price_feed_instance.get_funding_rates()
     assert rates["BTC"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_technical_indicators_cover_all_mapped_assets(price_feed_instance, mocker):
+    """Indicators are computed for every Kraken-mapped asset (not just BTC/ETH);
+    SOL — held and voted but previously skipped — now gets EMA/RSI/MACD."""
+    mocker.patch("asyncio.sleep", new_callable=AsyncMock)
+
+    # 60 daily candles with mild variation so pandas-ta can compute EMA50/RSI/MACD.
+    rows = []
+    for i in range(60):
+        c = 100.0 + i * 0.5 + (i % 5)
+        rows.append([1000 + i, str(c), str(c + 1), str(c - 1), str(c), str(c), "10", 5])
+
+    def kraken_side_effect(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        if "kraken.com" in url and "OHLC" in url:
+            resp.json.return_value = {"error": [], "result": {"PAIR": rows, "last": 0}}
+        else:
+            resp.json.return_value = {}
+        return resp
+
+    mocker.patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=kraken_side_effect)
+
+    indicators = await price_feed_instance.get_technical_indicators()
+
+    # SOL is the asset that used to be structurally excluded.
+    assert "SOL" in indicators
+    assert set(indicators["SOL"]) >= {"EMA_20", "EMA_50", "RSI_14", "MACD"}
+    assert "BTC" in indicators
+    # BNB has no Kraken USD pair, so it's never fetched and never faked.
+    assert "BNB" not in _KRAKEN_PAIR_MAP
+    assert "BNB" not in indicators

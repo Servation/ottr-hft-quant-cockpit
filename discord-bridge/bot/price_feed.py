@@ -25,7 +25,7 @@ COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
 
 # Map CoinGecko ids to our ticker symbols
 _GECKO_ID_MAP = {
-    "bitcoin": "BTC", 
+    "bitcoin": "BTC",
     "ethereum": "ETH",
     "solana": "SOL",
     "binancecoin": "BNB",
@@ -34,6 +34,20 @@ _GECKO_ID_MAP = {
     "dogecoin": "DOGE",
     "chainlink": "LINK",
     "avalanche-2": "AVAX",
+}
+
+# Ticker -> Kraken USD pair, for daily-OHLC technical indicators. Kraken is used
+# to dodge US geoblocking; not every asset is listed (BNB has no Kraken USD pair),
+# so unmapped assets simply get no indicators rather than fabricated ones.
+_KRAKEN_PAIR_MAP = {
+    "BTC": "XBTUSD",
+    "ETH": "ETHUSD",
+    "SOL": "SOLUSD",
+    "XRP": "XRPUSD",
+    "ADA": "ADAUSD",
+    "DOGE": "XDGUSD",
+    "LINK": "LINKUSD",
+    "AVAX": "AVAXUSD",
 }
 
 
@@ -296,7 +310,7 @@ class PriceFeed:
 
     async def _fetch_klines(self, client: httpx.AsyncClient, symbol: str) -> Optional[pd.DataFrame]:
         """Fetch 100 daily klines from Kraken public API to avoid US geoblocking."""
-        kraken_pair = "XBTUSD" if symbol == "BTC" else "ETHUSD" if symbol == "ETH" else None
+        kraken_pair = _KRAKEN_PAIR_MAP.get(symbol)
         if not kraken_pair:
             return None
             
@@ -329,14 +343,19 @@ class PriceFeed:
             return None
 
     async def get_technical_indicators(self) -> Dict[str, Dict[str, float]]:
-        """Returns EMA, RSI, and MACD for BTC and ETH, utilizing a 1-hour cache."""
+        """Returns EMA, RSI, and MACD for every Kraken-listed traded asset (1h cache).
+
+        Assets without a Kraken USD pair (or with insufficient history) are simply
+        omitted — never faked — so an agent told to cite indicators can't be forced
+        to hallucinate them.
+        """
         now = time.time()
         if self._cached_tech and (now - self._tech_timestamp) < self._tech_cache_ttl:
             return self._cached_tech
-            
+
         indicators = {}
         async with httpx.AsyncClient() as client:
-            for symbol in ["BTC", "ETH"]:
+            for symbol in _KRAKEN_PAIR_MAP:
                 df = await self._fetch_klines(client, symbol)
                 if df is not None and len(df) >= 50:
                     try:
@@ -356,7 +375,10 @@ class PriceFeed:
                         }
                     except Exception as e:
                         logger.error("Failed to calculate indicators for %s: %s", symbol, e)
-                        
+                # Space out calls so eight sequential pairs don't trip Kraken's
+                # public rate limit.
+                await asyncio.sleep(0.3)
+
         if indicators:
             self._cached_tech = indicators
             self._tech_timestamp = now
