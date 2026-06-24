@@ -14,7 +14,7 @@ help. See the four-dimension research writeup for the full findings.
 suite (`python run_evals.py` + `pytest -k "not live"`) so a measurement change
 can't silently break trade execution. Add a test for every behavior change.
 
-**Status:** M0, M1, M3 complete (bridge + gateway suites green; frontend data-layer unit-tested). M2 (backtest harness) todo.
+**Status:** Tier 1 COMPLETE (M0-M3). Bridge + gateway suites green, frontend data-layer unit-tested, offline eval suite (incl. backtest) green in CI.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -79,11 +79,11 @@ Concrete targets:
 - New `discord-bridge/bot/backtest.py` + a cached candle fixture + a new eval.
 
 Tasks:
-- [ ] **`bot/backtest.py`** — a deterministic engine: inputs are an OHLC series + a `Strategy` (callable `(state, candle) -> list[order]`); it simulates fills reusing the portfolio slippage+fee model, produces an equity curve, and runs `metrics.py`. No LLM, no live network.
-- [ ] **Reference strategies** — `BuyAndHold` (the benchmark), `SmaCross(20/50)`, `RsiMeanReversion`. These are the deterministic baselines the LLM agents must beat.
-- [ ] **Data** — parameterize the kline fetch beyond 100 candles (Kraken daily OHLC returns up to ~720) for a longer window; cache a CSV under `tests/fixtures/` so the backtest eval is deterministic and offline.
-- [ ] **Output** — a comparison table: each strategy vs buy-and-hold (CAGR, Sharpe, max-drawdown).
-- [ ] **CI** — `eval_backtest.py` registered in `run_evals.py` `EVALS` with `needs_llm=False`, deterministic against the fixture.
+- [x] **`bot/backtest.py`** — deterministic engine: an OHLC series + a `Strategy` (returns a target weight 0..1 per bar, no look-ahead) → rebalances using the same slippage+fee model as the live portfolio (rates read from `settings`, no disk-backed singleton) → equity curve scored by `metrics.py`. _(Target-weight proved cleaner/safer than the sketched `-> list[order]`.)_ No LLM, no live network on the hot path.
+- [x] **Reference strategies** — `BuyAndHold` (benchmark), `SmaCross(20/50)`, `RsiMeanReversion(14,30/70)`. On 2y of real BTC daily: SMA 20/50 beat HODL by +18.9% (Sharpe 0.56 vs 0.31, MaxDD 30% vs 51%); RSI underperformed — a real bar for the agents to clear.
+- [x] **Data** — `fetch_kraken_daily` pulls up to ~720 daily candles (used only to build the fixture); `tests/fixtures/btc_daily.csv` is the cached, committed series so the eval is offline + deterministic. `synth_candles` is a reproducible fallback.
+- [x] **Output** — `format_table` prints each strategy vs buy-and-hold (Return, CAGR, Sharpe, MaxDD, alpha-vs-HODL), ASCII-only so it's console-encoding safe.
+- [x] **CI** — `eval_backtest.py` registered in `run_evals.py` (`needs_llm=False`); asserts buy&hold tracks the asset minus costs, every strategy yields finite metrics, and re-runs are identical. Plus `tests/test_backtest.py` (6) under the pytest gate.
 
 **Exit:** `python run_evals.py eval_backtest.py` prints a baseline-vs-HODL table
 from the cached fixture, deterministically, green in CI.
