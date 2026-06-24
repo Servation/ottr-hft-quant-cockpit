@@ -30,11 +30,8 @@ import OverviewPanel from './components/OverviewPanel';
 import AssetAllocation from './components/AssetAllocation';
 import AgentRoomConsole from './components/AgentRoomConsole';
 import ExecutionLogsTable from './components/ExecutionLogsTable';
-import ControlSidebar from './components/ControlSidebar';
-import MarketNewsFeed from './components/MarketNewsFeed';
-import { OptimizerAuditTable } from './components/OptimizerAuditTable';
 
-import { 
+import {
   TrendingUp, 
   ShieldAlert, 
   Activity, 
