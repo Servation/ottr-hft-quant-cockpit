@@ -26,6 +26,10 @@ _SECONDS_PER_YEAR = 365.0 * 24.0 * 3600.0
 _DAILY_PERIODS_PER_YEAR = 365.0
 # Standard deviations at or below this are floating-point noise on a flat curve.
 _EPS = 1e-12
+# CAGR annualizes the span; over a span this short, normal volatility annualizes
+# to absurd (even overflowing) figures, so CAGR is undefined until enough time
+# passes. Two weeks is the floor below which an annualized growth rate is noise.
+_MIN_CAGR_YEARS = 14.0 / 365.0
 
 
 def _stdev(xs: Sequence[float]) -> Optional[float]:
@@ -128,9 +132,13 @@ def cagr(points: Sequence[Point]) -> Optional[float]:
     if v0 <= 0 or v1 <= 0:
         return None
     years = (t1 - t0) / _SECONDS_PER_YEAR
-    if years <= 0:
+    if years < _MIN_CAGR_YEARS:
+        # Span too short to annualize meaningfully (would explode/overflow).
         return None
-    return (v1 / v0) ** (1.0 / years) - 1.0
+    try:
+        return (v1 / v0) ** (1.0 / years) - 1.0
+    except OverflowError:
+        return None
 
 
 def calmar_ratio(cagr_value: Optional[float], mdd: Optional[float]) -> Optional[float]:

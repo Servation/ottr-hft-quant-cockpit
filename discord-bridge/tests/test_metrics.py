@@ -50,6 +50,24 @@ def test_cagr_doubling_in_one_year():
     assert c is not None and abs(c - 1.0) < 1e-9
 
 
+def test_cagr_none_for_tiny_span_no_overflow():
+    # A 2% move over 2 seconds would annualize to an overflowing/absurd number;
+    # it must come back None, not raise or return inf.
+    points = [(1_000_000.0, 100.0), (1_000_002.0, 102.0)]
+    assert metrics.cagr(points) is None
+
+
+def test_summarize_short_span_is_safe():
+    # Several points within an hour with a big swing: total_return / max_drawdown
+    # are still computable, but CAGR is suppressed and nothing explodes.
+    base = 1_000_000.0
+    points = [(base, 100.0), (base + 600, 80.0), (base + 1800, 130.0)]
+    out = metrics.summarize(points)
+    assert out["cagr"] is None
+    assert out["total_return"] == metrics.total_return([100.0, 80.0, 130.0])
+    assert out["max_drawdown"] == 0.2  # 100 -> 80
+
+
 def test_calmar_ratio():
     assert metrics.calmar_ratio(0.5, 0.25) == 2.0
     assert metrics.calmar_ratio(0.5, 0.0) is None  # no drawdown -> undefined
