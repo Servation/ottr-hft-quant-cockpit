@@ -22,6 +22,10 @@ thresholds:
 portfolio:
   starting_balance: 10000
   slippage_pct: 0.1
+  # Per-side trading fee (% of notional), charged to cash on every buy and sell so
+  # measured P&L / equity curve isn't structurally optimistic. Approximates a
+  # taker fee; keep separate from slippage.
+  fee_pct: 0.1
   min_trade_usd: 100.0
   assets:
     - BTC

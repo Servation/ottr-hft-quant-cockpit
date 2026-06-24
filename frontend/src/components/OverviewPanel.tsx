@@ -4,16 +4,17 @@
  */
 
 import React, { useState, useRef } from 'react';
-import { ChartDataPoint } from '../types';
-import { TrendingUp, Coins, DollarSign, Activity } from 'lucide-react';
+import { ChartDataPoint, PerformanceMetrics } from '../types';
+import { TrendingUp, Coins, DollarSign, Activity, Scale, TrendingDown } from 'lucide-react';
 
 interface OverviewPanelProps {
   data: ChartDataPoint[];
   lang: 'en' | 'ru';
   t: any;
+  performance?: PerformanceMetrics | null;
 }
 
-export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
+export default function OverviewPanel({ data, lang, t, performance }: OverviewPanelProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [timeframe, setTimeframe] = useState<'SEC' | 'MIN' | 'HOUR' | 'DAY' | 'WEEK'>('SEC');
   const containerRef = useRef<HTMLDivElement>(null);
@@ -181,6 +182,17 @@ export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
     }).format(val);
   };
 
+  // Performance metric formatting. Values are fractions; null means not enough
+  // history yet, rendered as an em dash rather than a misleading 0.
+  const fmtPct = (v: number | null | undefined) =>
+    v === null || v === undefined ? '—' : `${v >= 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+  const fmtRatio = (v: number | null | undefined) =>
+    v === null || v === undefined ? '—' : v.toFixed(2);
+  const hasPerf = !!(performance && performance.num_points >= 2);
+  const alpha = performance?.alpha ?? null;
+  const alphaPositive = (alpha ?? 0) >= 0;
+  const maxDd = performance?.max_drawdown;
+
   return (
     <div id="overview-panel" className="bg-neutral-900/30 border border-neutral-800 rounded p-6 shadow-2xl space-y-6 relative overflow-hidden transition-all duration-300">
       
@@ -237,6 +249,63 @@ export default function OverviewPanel({ data, lang, t }: OverviewPanelProps) {
         </div>
 
       </div>
+
+      {/* Risk-adjusted performance vs buy-and-hold BTC (M1). Hidden until the
+          bridge equity curve has at least two samples. */}
+      {hasPerf && (
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 relative z-10">
+
+          {/* Return vs BTC HODL (with alpha) */}
+          <div className="bg-black/40 p-4 rounded border border-neutral-800 hover:border-emerald-500/40 transition-all duration-300">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold flex items-center gap-1.5">
+                <TrendingUp className="w-3.5 h-3.5 text-emerald-500" />
+                {lang === 'en' ? 'Return vs BTC HODL' : 'Доходность к BTC HODL'}
+              </span>
+              <span className={`text-[10px] font-mono font-medium px-2 py-0.5 rounded ${alphaPositive ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-rose-500/10 text-rose-400 border border-rose-500/20'}`}>
+                {fmtPct(alpha)} α
+              </span>
+            </div>
+            <span className="text-xl font-light text-white tracking-tight">{fmtPct(performance?.total_return)}</span>
+            <div className="mt-1 text-[10px] font-mono text-neutral-500">
+              {lang === 'en' ? 'BTC HODL: ' : 'BTC HODL: '}
+              <span className="text-amber-400">{fmtPct(performance?.benchmark_return)}</span>
+            </div>
+          </div>
+
+          {/* Sharpe (with Sortino subtext) */}
+          <div className="bg-black/40 p-4 rounded border border-neutral-800 hover:border-blue-500/40 transition-all duration-300">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold flex items-center gap-1.5">
+                <Scale className="w-3.5 h-3.5 text-blue-500" />
+                {lang === 'en' ? 'Sharpe Ratio' : 'Коэф. Шарпа'}
+              </span>
+            </div>
+            <span className="text-xl font-light text-white tracking-tight">{fmtRatio(performance?.sharpe)}</span>
+            <div className="mt-1 text-[10px] font-mono text-neutral-500">
+              {lang === 'en' ? 'Sortino: ' : 'Сортино: '}
+              <span className="text-neutral-400">{fmtRatio(performance?.sortino)}</span>
+            </div>
+          </div>
+
+          {/* Max Drawdown */}
+          <div className="bg-black/40 p-4 rounded border border-neutral-800 hover:border-rose-500/40 transition-all duration-300">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[10px] uppercase tracking-wider text-neutral-500 font-semibold flex items-center gap-1.5">
+                <TrendingDown className="w-3.5 h-3.5 text-rose-500" />
+                {lang === 'en' ? 'Max Drawdown' : 'Макс. Просадка'}
+              </span>
+            </div>
+            <span className="text-xl font-light text-white tracking-tight">
+              {maxDd === null || maxDd === undefined ? '—' : `-${(maxDd * 100).toFixed(2)}%`}
+            </span>
+            <div className="mt-1 text-[10px] font-mono text-neutral-500">
+              {(performance?.num_points ?? 0)} {lang === 'en' ? 'samples' : 'точек'}
+            </div>
+          </div>
+
+        </div>
+      )}
 
       {/* SVG Multi-Layer Chart Block */}
       <div className="relative mt-4 bg-black/40 p-4 rounded border border-neutral-800" ref={containerRef}>

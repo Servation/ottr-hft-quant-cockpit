@@ -76,6 +76,28 @@ def _portfolio_state_path() -> str:
         _os.path.join(_os.path.dirname(__file__), "../../../discord-bridge/data/portfolio_state.json")
     )
 
+
+def _bridge_base_url() -> str:
+    """Base URL of the discord-bridge API (same host the directive call uses)."""
+    return os.getenv("DISCORD_BRIDGE_URL", "http://discord-bridge:8001")
+
+
+async def _fetch_performance() -> Optional[dict]:
+    """Best-effort fetch of computed performance metrics from the bridge.
+
+    Returns None if the bridge is unreachable so /portfolio/snapshot still
+    renders (the portfolio is read from the shared file independently). The
+    metric *logic* lives on the bridge to avoid a second source of truth.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(_bridge_base_url() + "/api/performance", timeout=3.0)
+            if resp.status_code == 200:
+                return resp.json()
+    except Exception as e:
+        logger.warning(f"Performance metrics unavailable from bridge: {e}")
+    return None
+
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -158,9 +180,26 @@ async def get_portfolio_snapshot():
 
     total_value = portfolio_data.get("cash", 0) + total_holdings_value
 
+    # Real performance metrics from the bridge (best-effort; None if it's down).
+    perf = await _fetch_performance()
+    metrics_data = (perf or {}).get("metrics") or {}
+    max_dd = metrics_data.get("max_drawdown")
+
     return {
         "total_value": total_value,
-        "drawdown": 0.0,
+        # Real peak-to-trough drawdown (fraction). Falls back to 0.0 only when the
+        # bridge has no curve yet, so the cash-fallback math downstream still works.
+        "drawdown": max_dd if max_dd is not None else 0.0,
+        "performance": {
+            "total_return": metrics_data.get("total_return"),
+            "cagr": metrics_data.get("cagr"),
+            "sharpe": metrics_data.get("sharpe"),
+            "sortino": metrics_data.get("sortino"),
+            "max_drawdown": max_dd,
+            "benchmark_return": metrics_data.get("benchmark_return"),
+            "alpha": metrics_data.get("alpha"),
+            "num_points": (perf or {}).get("num_points", 0),
+        },
         "portfolio_cap": trading_config.portfolio_cap,
         "drawdown_limit": trading_config.drawdown_limit,
         "slippage_limit": trading_config.slippage_limit,

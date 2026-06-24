@@ -79,6 +79,19 @@ export interface LocalLlmConfig {
   fallbackActive?: boolean;
 }
 
+// Risk-adjusted performance metrics computed by the bridge over its equity
+// curve. Fields are null until enough history accumulates (never a fake 0).
+export interface PerformanceMetrics {
+  total_return: number | null;
+  cagr: number | null;
+  sharpe: number | null;
+  sortino: number | null;
+  max_drawdown: number | null;   // positive fraction (0.25 = -25%)
+  benchmark_return: number | null; // BTC buy-and-hold return over the window
+  alpha: number | null;            // strategy return minus benchmark
+  num_points: number;
+}
+
 export interface PortfolioSnapshot {
   equity: number;
   cash: number;
@@ -87,6 +100,7 @@ export interface PortfolioSnapshot {
   holdings?: Record<string, number>;
   purchasePrices?: Record<string, number>;
   currentPrices?: Record<string, number>;
+  performance?: PerformanceMetrics | null;
 }
 
 export interface NewsItem {

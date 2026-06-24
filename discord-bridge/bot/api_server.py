@@ -71,10 +71,50 @@ async def handle_directive(request):
         return web.json_response({"status": "error", "reason": "Internal server error"}, status=500)
 
 
+async def handle_performance(request):
+    """Read-only: performance metrics computed over the equity curve.
+
+    Portfolio-derived data only (no secrets), so it follows the same posture as
+    the other read endpoints (unauthenticated; the bridge isn't publicly exposed
+    and CORS/localhost binding mitigate). The gateway proxies this into
+    /portfolio/snapshot so the dashboard can show return-vs-HODL / Sharpe /
+    drawdown. The metric *logic* lives here (single source of truth), not in the
+    gateway.
+    """
+    try:
+        from bot.equity import load_curve
+        from bot import metrics
+
+        rows = load_curve()
+        points = [
+            (r["ts"], r["total_value"])
+            for r in rows
+            if isinstance(r.get("ts"), (int, float))
+            and isinstance(r.get("total_value"), (int, float))
+        ]
+        btc = [
+            r.get("btc_price")
+            for r in rows
+            if isinstance(r.get("ts"), (int, float))
+            and isinstance(r.get("total_value"), (int, float))
+        ]
+        summary = metrics.summarize(
+            points, btc_prices=btc if any(b for b in btc) else None
+        )
+        return web.json_response({"metrics": summary, "num_points": len(points)})
+    except Exception as e:
+        # Don't leak internals; the snapshot degrades gracefully without metrics.
+        logger.error(f"Error computing performance: {e}")
+        return web.json_response(
+            {"status": "error", "reason": "Internal server error"}, status=500
+        )
+
+
 async def start_api_server(bot, port=8001):
     app = web.Application()
     app["bot"] = bot
     app.router.add_post("/api/directive", handle_directive)
+    app.router.add_get("/api/performance", handle_performance)
 
     runner = web.AppRunner(app)
     await runner.setup()

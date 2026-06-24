@@ -1,8 +1,10 @@
-"""Auth tests for the discord-bridge /api/directive endpoint."""
+"""Auth tests for the discord-bridge /api/directive endpoint, plus the
+read-only /api/performance metrics endpoint."""
+import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from bot import api_server
+from bot import api_server, equity
 
 
 class FakeRequest:
@@ -66,6 +68,40 @@ async def test_directive_errors_are_not_leaked(monkeypatch):
     resp = await api_server.handle_directive(FakeRequest({"X-API-Key": "secret"}, {"message": "x"}, bot))
     assert resp.status == 500
     # The raw exception text must not be returned to the caller.
-    import json
     body = json.loads(resp.body.decode())
     assert body["reason"] == "Internal server error"
+
+
+# --- /api/performance (read-only metrics) ---------------------------------
+# The equity log is isolated to a tmp file by the autouse conftest fixture, so
+# these tests neither read nor write the live data/equity_curve.jsonl.
+
+
+@pytest.mark.asyncio
+async def test_performance_empty_curve_reports_insufficient():
+    resp = await api_server.handle_performance(None)
+    assert resp.status == 200
+    body = json.loads(resp.body.decode())
+    assert body["num_points"] == 0
+    assert body["metrics"]["insufficient_data"] is True
+
+
+@pytest.mark.asyncio
+async def test_performance_computes_metrics_and_benchmark():
+    rows = [
+        {"ts": 0.0, "total_value": 100.0, "btc_price": 20000.0},
+        {"ts": 86400.0, "total_value": 110.0, "btc_price": 21000.0},  # strat +10%, BTC +5%
+    ]
+    equity._EQUITY_FILE.write_text(
+        "\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8"
+    )
+
+    resp = await api_server.handle_performance(None)
+    assert resp.status == 200
+    body = json.loads(resp.body.decode())
+    assert body["num_points"] == 2
+    m = body["metrics"]
+    assert m["insufficient_data"] is False
+    assert abs(m["total_return"] - 0.10) < 1e-9
+    assert abs(m["benchmark_return"] - 0.05) < 1e-9
+    assert abs(m["alpha"] - 0.05) < 1e-9

@@ -30,11 +30,8 @@ import OverviewPanel from './components/OverviewPanel';
 import AssetAllocation from './components/AssetAllocation';
 import AgentRoomConsole from './components/AgentRoomConsole';
 import ExecutionLogsTable from './components/ExecutionLogsTable';
-import ControlSidebar from './components/ControlSidebar';
-import MarketNewsFeed from './components/MarketNewsFeed';
-import { OptimizerAuditTable } from './components/OptimizerAuditTable';
 
-import { 
+import {
   TrendingUp, 
   ShieldAlert, 
   Activity, 
@@ -946,10 +943,11 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
         
         {/* Overview equity curve and key metrics cards */}
-        <OverviewPanel 
-          data={chartData} 
-          lang={lang} 
-          t={activeTranslations} 
+        <OverviewPanel
+          data={chartData}
+          lang={lang}
+          t={activeTranslations}
+          performance={portfolioSnapshot?.performance}
         />
 
         {/* Allocation & Discord Agents Board */}

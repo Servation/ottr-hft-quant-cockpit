@@ -47,16 +47,18 @@ def test_portfolio_logic():
         
     # 4. Test Successful Buy with Slippage
     logger.info("Testing Successful Buy with Slippage...")
-    # Slippage is configured in portfolio settings, defaulting to 0.1%
-    from bot.portfolio import _SLIPPAGE_PCT
+    # Slippage and the per-side fee are configured in portfolio settings.
+    from bot.portfolio import _SLIPPAGE_PCT, _FEE_PCT
     trade = p.buy("BTC", usd_amount=6000.0, price=60000.0) # $6000 value
     fill_price = 60000.0 * (1.0 + _SLIPPAGE_PCT / 100.0)
     expected_quantity = 6000.0 / fill_price
-    
+    buy_fee = 6000.0 * (_FEE_PCT / 100.0)  # fee is charged to cash on top of notional
+
     assert trade["action"] == "BUY"
     assert trade["asset"] == "BTC"
     assert abs(trade["fill_price"] - fill_price) < 1e-5
-    assert abs(p._state["cash"] - (10000.0 - 6000.0)) < 1e-5
+    assert abs(trade["fee_usd"] - buy_fee) < 1e-5
+    assert abs(p._state["cash"] - (10000.0 - 6000.0 - buy_fee)) < 1e-5
     assert abs(p._state["holdings"]["BTC"]["quantity"] - expected_quantity) < 1e-5
     logger.info("✅ Successful buy with slippage passed.")
     
@@ -75,15 +77,17 @@ def test_portfolio_logic():
     sell_fill_price = sell_price * (1.0 - _SLIPPAGE_PCT / 100.0)
     sell_qty = expected_quantity / 2.0
     expected_proceeds = sell_qty * sell_fill_price
-    expected_pnl = (sell_fill_price - fill_price) * sell_qty
-    
+    sell_fee = expected_proceeds * (_FEE_PCT / 100.0)
+    expected_pnl = (sell_fill_price - fill_price) * sell_qty - sell_fee
+
     cash_before = p._state["cash"]
     pnl_before = p._state["total_pnl"]
-    
+
     trade2 = p.sell("BTC", quantity=sell_qty, price=sell_price)
-    
+
     assert trade2["action"] == "SELL"
-    assert abs(p._state["cash"] - (cash_before + expected_proceeds)) < 1e-5
+    assert abs(trade2["fee_usd"] - sell_fee) < 1e-5
+    assert abs(p._state["cash"] - (cash_before + expected_proceeds - sell_fee)) < 1e-5
     assert abs(p._state["total_pnl"] - (pnl_before + expected_pnl)) < 1e-5
     assert abs(p._state["holdings"]["BTC"]["quantity"] - (expected_quantity - sell_qty)) < 1e-5
     logger.info("✅ Successful sell and Realized P&L passed.")
