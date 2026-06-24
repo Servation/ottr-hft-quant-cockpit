@@ -125,8 +125,8 @@ def test_reputation_summary(fresh_graph):
     fresh_graph.evaluate_pending_votes({"ETH": 1900.0}) # STRONG_HIT
 
     summary = fresh_graph.get_reputation_summary()
-    assert "SOL: 1⚡/0~/1✗/0≈" in summary
-    assert "ETH: 1⚡/0~/0✗/0≈" in summary
+    assert "SOL 50% (1/2)" in summary
+    assert "ETH 100% (1/1)" in summary
 
 def test_regex_extraction():
     import re
