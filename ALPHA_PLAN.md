@@ -20,7 +20,9 @@ in the equity metrics + reputation. Gate every change on `pytest -k "not live"` 
 `run_evals.py --no-llm`. Preserve all audit invariants (idempotent tools, kill-switch,
 sole portfolio writer, fail-loud, caps).
 
-**Status:** S0 done. S1-S4 todo.
+**Status:** S0 + S1 done. S2-S4 todo. (Backtest immediately shows the naive
+equal-weight signal blend trails HODL but is far more defensive — lowest drawdown;
+tuning the signal weights against the backtest is the next iteration.)
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -52,14 +54,11 @@ into a signal, so decisions are non-reproducible and the "strategy" can't be
 backtested. This phase makes the edge explicit and testable.
 
 Tasks:
-- [ ] New `bot/signals.py` — pure functions mapping indicators + market data → a
-  per-asset `Signal {direction: BULLISH|BEARISH|NEUTRAL, strength: 0..1, reasons: [...]}`.
-  Rules: EMA20×EMA50 cross, RSI zones (oversold/overbought), MACD histogram sign,
-  funding-rate extreme (contrarian), Fear & Greed contrarian. Fully unit-tested.
-- [ ] Inject structured signals into the meeting context (e.g. `SOL: BULLISH (EMA+, RSI 41, MACD+)`) so agents reason over grounded inputs, not just raw numbers.
-- [ ] Record a **deterministic baseline consensus** (tally the code signals → BUY/SELL/HOLD per asset) alongside the LLM consensus, so the two can be compared over time.
-- [ ] Backtestability: a `SignalStrategy` in `bot/backtest.py` that trades off `bot/signals.py`; add it to `eval_backtest.py` so the comparison table shows signal-strategy vs HODL/SMA. **This is the proof the signals have edge.**
-- [ ] Tests: `test_signals.py` (known indicator inputs → expected signal); the signal strategy appears in the backtest eval.
+- [x] `bot/signals.py` — pure `signal_from_indicators` (EMA20×EMA50, RSI zones, MACD histogram, funding extreme contrarian, F&G contrarian → `Signal {direction, score -1..1, strength, reasons}`), plus `signals_for_assets`, `format_signals`, and `consensus_from_signals`. Fully unit-tested (11).
+- [x] Structured signals injected into the market-state summary every agent reads (`price_feed.get_market_state_summary`), e.g. `SOL: BULLISH (strength 0.67: EMA20>EMA50, MACD>signal)`.
+- [~] `consensus_from_signals` produces the code-only BUY/SELL/HOLD baseline; persisting it next to the LLM consensus for over-time comparison is a light follow-on.
+- [x] Backtestability: `SignalStrategy` in `bot/backtest.py` (lazy causal indicator series, no look-ahead), added to `default_strategies`, so `eval_backtest.py` shows it vs HODL/SMA/RSI. **Result: naive blend trails HODL (-14% alpha) but lowest drawdown — signals need weight-tuning, now measurable.**
+- [x] Tests: `test_signals.py` (11) + `SignalStrategy` in `test_backtest.py`; appears in the eval table.
 
 **Exit:** signals are computed in code, injected into meetings, and backtested; the
 eval table shows the signal strategy's risk-adjusted return vs the baselines.

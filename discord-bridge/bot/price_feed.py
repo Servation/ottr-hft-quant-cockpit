@@ -459,7 +459,21 @@ class PriceFeed:
         
         if fng:
             lines.append(f"- **Fear & Greed Index**: {fng['value']} ({fng['classification']})")
-        
+
+        # Deterministic signals derived from the indicators above (code, not LLM),
+        # so agents reason over an explicit read rather than just raw numbers.
+        try:
+            from bot import signals as _signals
+            sig_map = _signals.signals_for_assets(
+                tech_indicators, funding_rates, fng.get("value") if fng else None
+            )
+            if sig_map:
+                lines.append("")
+                lines.append("**Deterministic Signals (computed, not LLM):**")
+                lines.append(_signals.format_signals(sig_map))
+        except Exception:
+            logger.exception("Failed to compute deterministic signals")
+
         return "\n".join(lines)
 
 

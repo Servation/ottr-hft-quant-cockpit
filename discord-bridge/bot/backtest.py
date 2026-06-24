@@ -21,6 +21,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from bot import settings
 from bot import metrics
+from bot import signals
 
 # Reuse the same cost model as the live portfolio (single source of truth for the
 # rates) without importing the disk-backed Portfolio singleton.
@@ -116,6 +117,25 @@ class RsiMeanReversion(Strategy):
         elif rsi > self.high:
             self._held = 0.0
         return self._held
+
+
+class SignalStrategy(Strategy):
+    """Trades the deterministic signal layer (bot/signals). Long-only: the target
+    weight is the signal's bullishness (its positive score), flat otherwise — so
+    the backtest measures whether the same signals the agents now see have edge."""
+
+    name = "Signals (EMA/RSI/MACD)"
+
+    def __init__(self):
+        self._series = None  # per-bar indicator dicts, computed once (causal)
+
+    def target_weight(self, i: int, closes: Sequence[float]) -> float:
+        if self._series is None:
+            self._series = signals.indicator_series_from_closes(closes)
+        ind = self._series[i] if i < len(self._series) else None
+        if not ind:
+            return 0.0
+        return max(0.0, signals.signal_from_indicators(ind).score)
 
 
 # --- engine ----------------------------------------------------------------
@@ -220,7 +240,7 @@ def format_table(rows: Sequence[dict]) -> str:
 
 
 def default_strategies() -> List[Strategy]:
-    return [BuyAndHold(), SmaCross(20, 50), RsiMeanReversion(14, 30, 70)]
+    return [BuyAndHold(), SmaCross(20, 50), RsiMeanReversion(14, 30, 70), SignalStrategy()]
 
 
 # --- data: CSV fixture I/O + sources --------------------------------------
