@@ -6,11 +6,9 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { translations } from './translations';
 import { ChartDataPoint, ExecutionLogEntry, MarketAsset, TradingAgentState, LocalLlmConfig, BackendAgentState, PortfolioSnapshot, OptimizationLogEntry } from './types';
-import { 
-  generateHistoricalPoints, 
-  generateInitialLogs, 
-  createNewLogEntry, 
-  getFormattedTime 
+import {
+  createNewLogEntry,
+  getFormattedTime
 } from './utils/simulator';
 import {
   checkGatewayHealth,
@@ -224,52 +222,19 @@ export default function App() {
 
   const [startingBalance, setStartingBalance] = useState<number>(() => {
     const saved = localStorage.getItem('ottr_starting_balance');
-    return saved ? Number(saved) : 100000;
+    return saved ? Number(saved) : 10000;
   });
 
   const [portfolioSnapshot, setPortfolioSnapshot] = useState<PortfolioSnapshot | null>(null);
 
-  // Pre-seed live asset market conditions (strictly crypto tickers)
-  const [marketPrices, setMarketPrices] = useState<Record<string, MarketAsset>>({
-    BTC: { symbol: 'BTC', name: 'Bitcoin', price: 88240, change24h: 1.45, volume: 16320 },
-    ETH: { symbol: 'ETH', name: 'Ethereum', price: 3450, change24h: -0.38, volume: 145000 },
-  });
+  // Live-only state: market prices, the equity chart, and execution logs are
+  // populated entirely from the backend feeds — no fabricated demo seed (which
+  // previously flashed a fake ~$100k history before real data loaded).
+  const [marketPrices, setMarketPrices] = useState<Record<string, MarketAsset>>({});
 
-  // Pre-seed mock values for the charts & logs
-  const [chartData, setChartData] = useState<ChartDataPoint[]>(() => {
-    const savedChart = localStorage.getItem('ottr_chart_data');
-    if (savedChart) {
-      try {
-        const parsed = JSON.parse(savedChart);
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          return parsed;
-        }
-      } catch (e) {}
-    }
-    const savedBalance = localStorage.getItem('ottr_starting_balance');
-    return generateHistoricalPoints(savedBalance ? Number(savedBalance) : 100000);
-  });
+  const [chartData, setChartData] = useState<ChartDataPoint[]>([]);
 
-  const [logs, setLogs] = useState<ExecutionLogEntry[]>(() => {
-    const savedLogs = localStorage.getItem('ottr_execution_logs');
-    if (savedLogs) {
-      try {
-        const parsed = JSON.parse(savedLogs);
-        if (Array.isArray(parsed)) {
-          return parsed;
-        }
-      } catch (e) {}
-    }
-    return generateInitialLogs();
-  });
-
-  useEffect(() => {
-    localStorage.setItem('ottr_chart_data', JSON.stringify(chartData));
-  }, [chartData]);
-
-  useEffect(() => {
-    localStorage.setItem('ottr_execution_logs', JSON.stringify(logs));
-  }, [logs]);
+  const [logs, setLogs] = useState<ExecutionLogEntry[]>([]);
 
   // Keep track of parameter tuning history logs from the Optimizer
   const [optimizationHistory, setOptimizationHistory] = useState<OptimizationLogEntry[]>([]);
@@ -290,9 +255,12 @@ export default function App() {
     ];
   });
 
-  // Remove old stale cache
+  // Remove old stale cache (incl. the retired mock chart/log seeds so a
+  // returning user doesn't reload fabricated history from localStorage).
   useEffect(() => {
     localStorage.removeItem('ottr_agents');
+    localStorage.removeItem('ottr_chart_data');
+    localStorage.removeItem('ottr_execution_logs');
   }, []);
 
   const activeTranslations = translations[lang];
@@ -484,10 +452,6 @@ export default function App() {
             const now = new Date();
             const timeLabel = now.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', hour12: true });
             const pt = { timeLabel, equity: portfolio.equity, cash: portfolio.cash, timestamp: Date.now() };
-            // Initialize chart properly with real data rather than massive jump from mock 250k
-            if (prev.length === 1 && prev[0].equity === 250000) {
-              return [pt];
-            }
             const updated = [...prev, pt];
             if (updated.length > 2000) updated.shift();
             return updated;
@@ -956,7 +920,7 @@ export default function App() {
             <AssetAllocation 
               strategy={strategy} 
               marketPrices={marketPrices} 
-              paperEquity={chartData[chartData.length - 1]?.equity || 2500000} 
+              paperEquity={chartData[chartData.length - 1]?.equity || 0}
               portfolioSnapshot={portfolioSnapshot}
               lang={lang} 
               t={activeTranslations} 
