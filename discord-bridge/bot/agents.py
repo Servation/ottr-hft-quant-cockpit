@@ -103,6 +103,21 @@ AGENTS: Dict[str, AgentPersona] = {
 }
 
 
+# Shared desk rules prepended to every agent's system prompt at inference time.
+# Kept here (not in the persona files) so it sits ABOVE the strippable OUTPUT FORMAT
+# section and applies uniformly. The regime rule converts the backtested edge —
+# trend signals only pay in a trending regime — into the agents' live behavior; an
+# A/B probe showed it flips a choppy-regime call from "SELL @0.75" to "ABSTAIN @0.35".
+_DESK_RULES = (
+    "TRADING DESK RULES (apply before any call):\n"
+    "- REGIME: each asset shows Regime: TRENDING or CHOPPY (efficiency ratio). Trend/"
+    "momentum indicators (EMA, MACD) and the deterministic signals are reliable ONLY in a "
+    "TRENDING regime. In a CHOPPY regime they are noise — do NOT issue a high-conviction "
+    "BUY/SELL off them; prefer HOLD/ABSTAIN or a low confidence score. Act decisively only "
+    "when the regime is TRENDING and the signals agree."
+)
+
+
 # ---------------------------------------------------------------------------
 # LLM client with inference serialization
 # ---------------------------------------------------------------------------
@@ -202,7 +217,11 @@ class AgentLLM:
         if strip_output_format:
             import re
             system_prompt = re.sub(r"OUTPUT FORMAT.*", "", system_prompt, flags=re.IGNORECASE | re.DOTALL).strip()
-            
+
+        # Prepend shared desk rules (regime awareness) above the persona — applied
+        # uniformly, and ahead of the strippable OUTPUT FORMAT section so it survives.
+        system_prompt = _DESK_RULES + "\n\n" + system_prompt
+
         messages = list(context_messages)  # shallow copy
         if not messages or messages[0].get("role") != "system":
             messages.insert(0, {"role": "system", "content": system_prompt})

@@ -9,6 +9,7 @@ caller-supplied async callback.
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Awaitable, Dict, List, Optional
@@ -23,6 +24,18 @@ logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ROTATION_STATE_PATH = PROJECT_ROOT / "data" / "rotation_state.json"
+
+# Floor for a vote's credibility weight in the consensus tally, so even an
+# unproven/low-reputation agent's vote still counts a little (and never flips sign).
+_MIN_VOTE_CREDIBILITY = 0.1
+
+# Parses "Final Vote: <DIR> <ASSET>", tolerant of the brackets/markdown the model
+# sometimes copies from the prompt: "Final Vote: [HOLD] BTC", "**SELL** SOL", etc.
+# (asset optional so a bare direction still resolves; callers default it).
+_VOTE_RE = re.compile(
+    r"Final Vote:\s*[\[\*]*(BUY|SELL|HOLD|ABSTAIN)[\]\*]*(?:\s*[\[\*]*([A-Za-z0-9_]+)[\]\*]*)?",
+    re.IGNORECASE,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -314,11 +327,12 @@ class MeetingEngine:
             # Record agent votes to knowledge graph
             try:
                 from bot.knowledge_graph import reputation_graph
-                import re
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
                         debate_text = text.split("[DEBATE]:")[-1]
-                        for match in re.finditer(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", debate_text, re.IGNORECASE):
+                        for match in _VOTE_RE.finditer(debate_text):
+                            if not match.group(2):
+                                continue  # need a concrete asset to record a vote
                             direction = match.group(1).upper()
                             asset = match.group(2).upper()
                             asset_price = prices.get(asset, {}).get("price", 0.0)
@@ -493,9 +507,10 @@ class MeetingEngine:
                 "You must critically evaluate the proposals. You MUST:\n"
                 "1. Direct confrontation is expected. If you disagree with a colleague, quote or name them specifically and tear down their logic.\n"
                 "2. If you agree with a trade, use your turn to refine the sizing or timing.\n"
-                "3. End your response strictly with your final standardized vote format for EACH asset discussed or held:\n"
-                "   - Final Vote: [BUY / SELL / HOLD / ABSTAIN] [ASSET 1]\n"
-                "   - Final Vote: [BUY / SELL / HOLD / ABSTAIN] [ASSET 2]\n\n"
+                "3. End your response with one standardized vote line PER asset, formatted EXACTLY as:\n"
+                "   Final Vote: <DIRECTION> <ASSET>\n"
+                "   where <DIRECTION> is one of BUY SELL HOLD ABSTAIN and <ASSET> is a ticker.\n"
+                "   Write the literal value with NO brackets, e.g.  Final Vote: SELL SOL\n\n"
                 "Do NOT just summarize your own point again. Do NOT use your initial bullet-point format. Engage directly with what others have said.\n"
                 "Keep it under 150 words."
             )
@@ -557,12 +572,17 @@ class MeetingEngine:
                 for a_id, text in agent_contributions.items():
                     if "[DEBATE]:" in text:
                         debate_text = text.split("[DEBATE]:")[-1]
-                        matches = re.finditer(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)(?:\s+([A-Za-z0-9_]+))?", debate_text, re.IGNORECASE)
+                        matches = _VOTE_RE.finditer(debate_text)
                         for match in matches:
                             direction = match.group(1).upper()
                             asset = match.group(2).upper() if match.group(2) else "MARKET"
 
                             w = weights.get(a_id, {}).get(asset, 0.0)
+                            # A vote's influence is its CREDIBILITY (never negative): a poor
+                            # track record makes a vote count LESS, not flip its direction.
+                            # Mapping reputation [-1,1] -> [0,1] (floored) stops a unanimous
+                            # BUY by below-average agents from tallying as SELL.
+                            credibility = max(_MIN_VOTE_CREDIBILITY, (w + 1.0) / 2.0)
 
                             if asset not in asset_scores:
                                 asset_scores[asset] = 0.0
@@ -572,12 +592,12 @@ class MeetingEngine:
                             asset_vote_counts[asset][direction if direction in ("BUY", "SELL", "HOLD") else "HOLD"] += 1
 
                             if direction == "BUY":
-                                asset_scores[asset] += w
+                                asset_scores[asset] += credibility
                             elif direction == "SELL":
-                                asset_scores[asset] -= w
+                                asset_scores[asset] -= credibility
 
                             agent_name = AGENTS[a_id].name.split()[0]
-                            breakdown_lines.append(f"- **{agent_name}**: {direction} {asset} *(rep: {w:+.2f})*")
+                            breakdown_lines.append(f"- **{agent_name}**: {direction} {asset} *(rep {w:+.2f}, wt {credibility:.2f})*")
 
                 if breakdown_lines:
                     closing_prompt += "### Algorithmic Weighted Consensus\n"

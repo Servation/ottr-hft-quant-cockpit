@@ -33,6 +33,19 @@ the live agent context shows each asset's **regime** (`TRENDING`/`CHOPPY` + ER),
 explicit "in a CHOPPY regime trend signals are unreliable — favor defense" note. This is
 the first robustly positive-alpha result of the whole exercise.
 
+**LLM tuning (directly evaluated `gemma-4-12b-it`):** the model follows the persona
+format and cites real data (9/9 in probes) and, once told to, acts on the regime.
+Adjustments from the findings: (1) a shared **desk rule** prepended to every agent's
+system prompt — an A/B flip from "SELL @0.75" to "ABSTAIN @0.35" on choppy SOL, and a
+live eval where **all** agents went from the baseline's 6× unanimous `BUY SOL` to
+unanimous `ABSTAIN` with explicit "CHOPPY regime → trend signals are noise" reasoning;
+(2) the debate prompt no longer uses `[BRACKET]` placeholders the model copied
+literally, and the vote parser (`_VOTE_RE`) tolerates `[HOLD]`/`**SELL**` so votes
+aren't silently dropped; (3) consensus weights a vote by **credibility** (non-negative)
+so a unanimous BUY by below-average agents can't tally as SELL. Also noted: the local
+model **degrades under sustained sequential load** (fresh = perfect; many back-to-back
+calls = malformed) — a real operational characteristic for long 7-agent meetings.
+
 **Signal-tuning finding (cross-asset: BTC/ETH/SOL, real daily):** signal weights are
 now configurable (`DEFAULT`/`TREND`/`TREND_TILT`) and validated across three assets
 (not curve-fit to one). Result: the **balanced default is a risk-reducer, not an alpha
