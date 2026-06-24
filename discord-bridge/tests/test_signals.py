@@ -48,6 +48,16 @@ def test_no_inputs_is_neutral_zero():
     assert s.reasons == []
 
 
+def test_weights_select_rules():
+    # EMA up (+1), RSI overbought (-1 under balanced), MACD up (+1).
+    ind = _ind(110, 100, 80, 1.0, 0.5)
+    balanced = signal_from_indicators(ind)                                # 1/3 -> NEUTRAL
+    trend = signal_from_indicators(ind, weights=signals.TREND_WEIGHTS)    # RSI dropped -> BULLISH
+    assert balanced.direction == "NEUTRAL"
+    assert trend.direction == "BULLISH"
+    assert trend.score == 1.0
+
+
 def test_signals_for_assets_maps_each():
     inds = {
         "BTC": _ind(110, 100, 25, 1.0, 0.5),   # bullish

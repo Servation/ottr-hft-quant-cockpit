@@ -31,6 +31,14 @@ _DIRECTION_THRESHOLD = 0.34        # |net score| above this => directional, else
 
 _REQUIRED_KEYS = ("EMA_20", "EMA_50", "RSI_14", "MACD", "MACD_signal")
 
+# How much each rule counts toward the net score. The default is balanced; the
+# trend preset drops the counter-trend / contrarian rules (EMA+MACD only), which
+# the backtest shows is far more robust on trending crypto than the naive blend.
+DEFAULT_WEIGHTS = {"ema": 1.0, "rsi": 1.0, "macd": 1.0, "funding": 1.0, "fng": 1.0}
+TREND_WEIGHTS = {"ema": 1.0, "macd": 1.0, "rsi": 0.0, "funding": 0.0, "fng": 0.0}
+# Trend-led but still nudged by extremes (light contrarian overlay).
+TREND_TILT_WEIGHTS = {"ema": 1.0, "macd": 1.0, "rsi": 0.0, "funding": 0.4, "fng": 0.4}
+
 
 @dataclass
 class Signal:
@@ -48,59 +56,69 @@ def signal_from_indicators(
     ind: Dict[str, float],
     funding: Optional[float] = None,
     fng: Optional[int] = None,
+    weights: Optional[Dict[str, float]] = None,
 ) -> Signal:
     """Score one asset from its indicators + optional market context.
 
     `ind` should carry EMA_20, EMA_50, RSI_14, MACD, MACD_signal. Each rule votes
-    -1/0/+1; the net is their mean (so missing inputs simply don't dilute). `funding`
-    (perp funding rate) and `fng` (Fear & Greed 0..100) add contrarian votes.
+    -1/0/+1; the net is the weighted mean over the rules that are present and have a
+    non-zero weight (so a 0-weight rule is dropped entirely, and missing inputs don't
+    dilute). `funding` (perp funding) and `fng` (Fear & Greed 0..100) vote only at
+    extremes. `weights` selects/sizes the rules (see DEFAULT_WEIGHTS / TREND_WEIGHTS).
     """
-    subs: List[float] = []
+    w = weights or DEFAULT_WEIGHTS
+    contribs: List[tuple] = []   # (weight, vote)
     reasons: List[str] = []
 
+    we = w.get("ema", 0.0)
     ema20, ema50 = ind.get("EMA_20"), ind.get("EMA_50")
-    if ema20 is not None and ema50 is not None:
+    if we > 0 and ema20 is not None and ema50 is not None:
         if ema20 > ema50:
-            subs.append(1.0); reasons.append("EMA20>EMA50 (uptrend)")
+            contribs.append((we, 1.0)); reasons.append("EMA20>EMA50 (uptrend)")
         elif ema20 < ema50:
-            subs.append(-1.0); reasons.append("EMA20<EMA50 (downtrend)")
+            contribs.append((we, -1.0)); reasons.append("EMA20<EMA50 (downtrend)")
         else:
-            subs.append(0.0)
+            contribs.append((we, 0.0))
 
+    wr = w.get("rsi", 0.0)
     rsi = ind.get("RSI_14")
-    if rsi is not None:
+    if wr > 0 and rsi is not None:
         if rsi < _RSI_OVERSOLD:
-            subs.append(1.0); reasons.append(f"RSI {rsi:.0f} oversold")
+            contribs.append((wr, 1.0)); reasons.append(f"RSI {rsi:.0f} oversold")
         elif rsi > _RSI_OVERBOUGHT:
-            subs.append(-1.0); reasons.append(f"RSI {rsi:.0f} overbought")
+            contribs.append((wr, -1.0)); reasons.append(f"RSI {rsi:.0f} overbought")
         else:
-            subs.append(0.0)
+            contribs.append((wr, 0.0))
 
+    wm = w.get("macd", 0.0)
     macd, macd_sig = ind.get("MACD"), ind.get("MACD_signal")
-    if macd is not None and macd_sig is not None:
+    if wm > 0 and macd is not None and macd_sig is not None:
         if macd > macd_sig:
-            subs.append(1.0); reasons.append("MACD>signal (bullish momentum)")
+            contribs.append((wm, 1.0)); reasons.append("MACD>signal (bullish momentum)")
         elif macd < macd_sig:
-            subs.append(-1.0); reasons.append("MACD<signal (bearish momentum)")
+            contribs.append((wm, -1.0)); reasons.append("MACD<signal (bearish momentum)")
         else:
-            subs.append(0.0)
+            contribs.append((wm, 0.0))
 
-    if funding is not None:
+    wf = w.get("funding", 0.0)
+    if wf > 0 and funding is not None:
         if funding > _FUNDING_EXTREME:
-            subs.append(-1.0); reasons.append("funding crowded long (contrarian-)")
+            contribs.append((wf, -1.0)); reasons.append("funding crowded long (contrarian-)")
         elif funding < -_FUNDING_EXTREME:
-            subs.append(1.0); reasons.append("funding crowded short (contrarian+)")
+            contribs.append((wf, 1.0)); reasons.append("funding crowded short (contrarian+)")
 
-    if fng is not None:
+    wg = w.get("fng", 0.0)
+    if wg > 0 and fng is not None:
         if fng <= _FNG_FEAR:
-            subs.append(1.0); reasons.append(f"F&G {fng} extreme fear (contrarian+)")
+            contribs.append((wg, 1.0)); reasons.append(f"F&G {fng} extreme fear (contrarian+)")
         elif fng >= _FNG_GREED:
-            subs.append(-1.0); reasons.append(f"F&G {fng} extreme greed (contrarian-)")
+            contribs.append((wg, -1.0)); reasons.append(f"F&G {fng} extreme greed (contrarian-)")
 
-    if not subs:
+    if not contribs:
         return Signal("NEUTRAL", 0.0, 0.0, [])
 
-    score = sum(subs) / len(subs)
+    total_w = sum(c[0] for c in contribs)
+    score = sum(c[0] * c[1] for c in contribs) / total_w
     if score >= _DIRECTION_THRESHOLD:
         direction = "BULLISH"
     elif score <= -_DIRECTION_THRESHOLD:
@@ -114,12 +132,13 @@ def signals_for_assets(
     indicators: Optional[Dict[str, Dict[str, float]]],
     funding_rates: Optional[Dict[str, float]] = None,
     fng: Optional[int] = None,
+    weights: Optional[Dict[str, float]] = None,
 ) -> Dict[str, Signal]:
     """Map asset -> Signal for every asset that has indicators."""
     funding_rates = funding_rates or {}
     out: Dict[str, Signal] = {}
     for asset, ind in (indicators or {}).items():
-        out[asset] = signal_from_indicators(ind, funding_rates.get(asset), fng)
+        out[asset] = signal_from_indicators(ind, funding_rates.get(asset), fng, weights)
     return out
 
 

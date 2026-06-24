@@ -77,7 +77,7 @@ def test_compare_includes_signals_and_alpha_vs_hold():
     rows = compare(synth_candles(150), default_strategies())
     names = {r["strategy"] for r in rows}
     assert "Buy & Hold" in names
-    assert "Signals (EMA/RSI/MACD)" in names
+    assert "Signals (default)" in names
     # Buy & Hold's alpha vs itself is ~0; every row has an alpha figure.
     for r in rows:
         assert r["alpha_vs_hold"] is not None

@@ -122,12 +122,15 @@ class RsiMeanReversion(Strategy):
 class SignalStrategy(Strategy):
     """Trades the deterministic signal layer (bot/signals). Long-only: the target
     weight is the signal's bullishness (its positive score), flat otherwise — so
-    the backtest measures whether the same signals the agents now see have edge."""
+    the backtest measures whether the same signals the agents now see have edge.
 
-    name = "Signals (EMA/RSI/MACD)"
+    `weights` selects the signal config (balanced vs trend); None = the live default.
+    """
 
-    def __init__(self):
+    def __init__(self, weights=None, name=None):
         self._series = None  # per-bar indicator dicts, computed once (causal)
+        self._weights = weights
+        self.name = name or "Signals (default)"
 
     def target_weight(self, i: int, closes: Sequence[float]) -> float:
         if self._series is None:
@@ -135,7 +138,7 @@ class SignalStrategy(Strategy):
         ind = self._series[i] if i < len(self._series) else None
         if not ind:
             return 0.0
-        return max(0.0, signals.signal_from_indicators(ind).score)
+        return max(0.0, signals.signal_from_indicators(ind, weights=self._weights).score)
 
 
 # --- engine ----------------------------------------------------------------

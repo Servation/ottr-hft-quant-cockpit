@@ -20,9 +20,19 @@ in the equity metrics + reputation. Gate every change on `pytest -k "not live"` 
 `run_evals.py --no-llm`. Preserve all audit invariants (idempotent tools, kill-switch,
 sole portfolio writer, fail-loud, caps).
 
-**Status:** S0 + S1 done. S2-S4 todo. (Backtest immediately shows the naive
-equal-weight signal blend trails HODL but is far more defensive — lowest drawdown;
-tuning the signal weights against the backtest is the next iteration.)
+**Status:** S0 + S1 done (incl. a signal-tuning pass). S2-S4 todo.
+
+**Signal-tuning finding (cross-asset: BTC/ETH/SOL, real daily):** signal weights are
+now configurable (`DEFAULT`/`TREND`/`TREND_TILT`) and validated across three assets
+(not curve-fit to one). Result: the **balanced default is a risk-reducer, not an alpha
+source** — it trails HODL in the BTC bull (-14%) but beats HODL by **+28%** in the
+ETH and SOL bears with **~half the drawdown** (15-32% vs 51-76%). The trend-only
+variant was *worse* on ETH/SOL (hypothesis disproven by the cross-asset test — the
+point of validating broadly). **SMA 20/50 is the real trend offense** (+18.9% BTC,
++92.5% ETH alpha) but collapses on choppy SOL (-43%). No static config beats HODL
+everywhere → the next real edge is **regime-aware** (trend-follow when trending,
+signal-defensive otherwise) or an SMA-offense + signal-defense combine. The backtest
+eval now runs across all fixtures, so this stays measured.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
