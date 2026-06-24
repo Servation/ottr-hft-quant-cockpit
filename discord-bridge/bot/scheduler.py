@@ -64,6 +64,18 @@ class MeetingScheduler:
             coalesce=True,
         )
 
+        # Sample the portfolio's equity hourly so we have a value time series to
+        # compute return / Sharpe / drawdown / benchmark from (idle drift between
+        # trades; meetings also snapshot post-trade).
+        self._scheduler.add_job(
+            self._log_equity_snapshot,
+            trigger=IntervalTrigger(hours=1, timezone=_TIMEZONE),
+            id="log_equity_snapshot",
+            name="Log portfolio equity snapshot",
+            replace_existing=True,
+            coalesce=True,
+        )
+
         self._scheduler.start()
         next_type, next_time = self.get_next_meeting_info()
         logger.info(
@@ -109,6 +121,17 @@ class MeetingScheduler:
             logger.debug("Evaluated agent predictions successfully.")
         except Exception as e:
             logger.error(f"Failed to evaluate agent predictions: {e}")
+
+    async def _log_equity_snapshot(self) -> None:
+        """Background job: append one portfolio equity snapshot to the curve."""
+        try:
+            from bot.equity import log_snapshot
+            from bot.portfolio import portfolio
+            from bot.price_feed import price_feed
+            prices = await price_feed.get_prices()
+            log_snapshot(portfolio, prices, source="scheduled")
+        except Exception as e:
+            logger.error(f"Failed to log equity snapshot: {e}")
 
     # ------------------------------------------------------------------
     # Emergency meeting
@@ -256,6 +279,14 @@ class MeetingScheduler:
                 audit_log_fn=self._bot.post_audit_log,
                 next_meeting_info=self.get_next_meeting_info(),
             )
+
+            # Capture post-trade equity while prices are already in hand.
+            if prices:
+                try:
+                    from bot.equity import log_snapshot
+                    log_snapshot(portfolio, prices, source="post_meeting")
+                except Exception:
+                    logger.exception("Failed to log post-meeting equity snapshot")
 
             next_type, next_time = self.get_next_meeting_info()
             await self._bot.post_system_status(

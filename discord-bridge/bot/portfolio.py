@@ -18,6 +18,10 @@ _PORTFOLIO_FILE = _DATA_DIR / "portfolio_state.json"
 _portfolio_cfg = settings.get("portfolio", {})
 _STARTING_BALANCE = float(_portfolio_cfg.get("starting_balance", 10000))
 _SLIPPAGE_PCT = float(_portfolio_cfg.get("slippage_pct", 0.1))
+# Per-side trading fee (% of notional). Charged to cash, kept out of the cost
+# basis so avg_cost stays the fill price; the fee still shows up in total
+# portfolio value (and thus the equity curve), keeping measured return honest.
+_FEE_PCT = float(_portfolio_cfg.get("fee_pct", 0.0))
 _DEFAULT_MIN_TRADE_USD = float(_portfolio_cfg.get("min_trade_usd", 100.0))
 _ASSETS: List[str] = _portfolio_cfg.get("assets", ["BTC", "ETH"])
 _MAX_TRADE_HISTORY = 50
@@ -126,9 +130,10 @@ class Portfolio:
                 f"Trade size (${usd_amount:.2f}) is below the minimum trade limit (${self.min_trade_usd:.2f})"
             )
 
-        if usd_amount > self._state["cash"]:
+        fee = usd_amount * (_FEE_PCT / 100.0)
+        if usd_amount + fee > self._state["cash"]:
             raise ValueError(
-                f"Insufficient cash: have ${self._state['cash']:.2f}, need ${usd_amount:.2f}"
+                f"Insufficient cash: have ${self._state['cash']:.2f}, need ${usd_amount + fee:.2f}"
             )
 
         fill_price = price * (1.0 + _SLIPPAGE_PCT / 100.0)
@@ -150,7 +155,7 @@ class Portfolio:
             ) / total_qty
         holding["quantity"] = total_qty
 
-        self._state["cash"] -= cost
+        self._state["cash"] -= cost + fee
 
         trade = {
             "timestamp": time.time(),
@@ -160,6 +165,8 @@ class Portfolio:
             "fill_price": fill_price,
             "usd_amount": cost,
             "slippage_pct": _SLIPPAGE_PCT,
+            "fee_usd": fee,
+            "fee_pct": _FEE_PCT,
         }
         self._append_trade(trade)
         self.save()
@@ -187,6 +194,7 @@ class Portfolio:
 
         fill_price = price * (1.0 - _SLIPPAGE_PCT / 100.0)
         proceeds = quantity * fill_price
+        fee = proceeds * (_FEE_PCT / 100.0)
 
         # Check minimum trade threshold unless we are liquidating the full position
         is_full_liquidation = abs(quantity - holding["quantity"]) < 1e-9
@@ -195,16 +203,16 @@ class Portfolio:
                 f"Sell trade value (${proceeds:.2f}) is below the minimum trade limit (${self.min_trade_usd:.2f})"
             )
 
-        # Realised P&L for this trade
+        # Realised P&L for this trade, net of the sell-side fee.
         avg_cost = holding["avg_cost"]
-        realised_pnl = (fill_price - avg_cost) * quantity
+        realised_pnl = (fill_price - avg_cost) * quantity - fee
 
         holding["quantity"] -= quantity
         if holding["quantity"] < 1e-12:
             holding["quantity"] = 0.0
             holding["avg_cost"] = 0.0
 
-        self._state["cash"] += proceeds
+        self._state["cash"] += proceeds - fee
         self._state["total_pnl"] += realised_pnl
 
         trade = {
@@ -216,6 +224,8 @@ class Portfolio:
             "usd_amount": proceeds,
             "realised_pnl": realised_pnl,
             "slippage_pct": _SLIPPAGE_PCT,
+            "fee_usd": fee,
+            "fee_pct": _FEE_PCT,
         }
         self._append_trade(trade)
         self.save()
