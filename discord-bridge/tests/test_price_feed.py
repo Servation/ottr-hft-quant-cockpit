@@ -213,6 +213,8 @@ async def test_technical_indicators_cover_all_mapped_assets(price_feed_instance,
     # SOL is the asset that used to be structurally excluded.
     assert "SOL" in indicators
     assert set(indicators["SOL"]) >= {"EMA_20", "EMA_50", "RSI_14", "MACD"}
+    # Regime (efficiency ratio) is attached for the live agent context.
+    assert "regime" in indicators["SOL"] and "ER" in indicators["SOL"]
     assert "BTC" in indicators
     # BNB has no Kraken USD pair, so it's never fetched and never faked.
     assert "BNB" not in _KRAKEN_PAIR_MAP

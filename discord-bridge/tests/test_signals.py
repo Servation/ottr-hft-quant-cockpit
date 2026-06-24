@@ -92,3 +92,22 @@ def test_indicator_series_is_causal_and_filled():
 
 def test_indicator_series_short_input():
     assert all(x is None for x in signals.indicator_series_from_closes([1.0, 2.0, 3.0]))
+
+
+def test_efficiency_ratio_trend_vs_chop():
+    trend = list(range(100, 130))                       # clean uptrend
+    er_t = signals.efficiency_ratio(trend, window=20)
+    assert er_t is not None and er_t > 0.95
+    chop = [100 + (5 if i % 2 else -5) for i in range(30)]  # oscillating
+    er_c = signals.efficiency_ratio(chop, window=20)
+    assert er_c is not None and er_c < 0.2
+
+
+def test_efficiency_ratio_short_input_is_none():
+    assert signals.efficiency_ratio([1.0, 2.0], window=20) is None
+
+
+def test_regime_label():
+    assert signals.regime_label(0.5) == "TRENDING"
+    assert signals.regime_label(0.1) == "CHOPPY"
+    assert signals.regime_label(None) == "UNKNOWN"

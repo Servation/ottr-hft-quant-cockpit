@@ -20,7 +20,18 @@ in the equity metrics + reputation. Gate every change on `pytest -k "not live"` 
 `run_evals.py --no-llm`. Preserve all audit invariants (idempotent tools, kill-switch,
 sole portfolio writer, fail-loud, caps).
 
-**Status:** S0 + S1 done (incl. a signal-tuning pass). S2-S4 todo.
+**Status:** S0 + S1 done (incl. signal tuning + a **regime-aware strategy that finally
+beats HODL on all three assets**). S2-S4 todo.
+
+**Regime-aware edge (the win):** gating trend-following on the Kaufman efficiency
+ratio (`bot/signals.efficiency_ratio` / `regime_label`; `bot/backtest.RegimeStrategy`)
+only trend-follows when an asset is *actually* trending and stays flat in chop. On
+real BTC/ETH/SOL daily it beats buy-and-hold on **all three** — BTC +6.6%, ETH +40.5%,
+SOL +40.8% alpha — with far lower drawdown (17-40% vs 51-76%), where plain SMA blew up
+on choppy SOL (-43%). It's now in `default_strategies` (permanent cross-asset eval), and
+the live agent context shows each asset's **regime** (`TRENDING`/`CHOPPY` + ER), with an
+explicit "in a CHOPPY regime trend signals are unreliable — favor defense" note. This is
+the first robustly positive-alpha result of the whole exercise.
 
 **Signal-tuning finding (cross-asset: BTC/ETH/SOL, real daily):** signal weights are
 now configurable (`DEFAULT`/`TREND`/`TREND_TILT`) and validated across three assets

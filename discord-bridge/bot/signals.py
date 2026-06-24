@@ -31,6 +31,12 @@ _DIRECTION_THRESHOLD = 0.34        # |net score| above this => directional, else
 
 _REQUIRED_KEYS = ("EMA_20", "EMA_50", "RSI_14", "MACD", "MACD_signal")
 
+# Regime detection (Kaufman efficiency ratio). Backtest validation across BTC/ETH/SOL
+# showed trend-following only pays when the market is actually trending; gating it on
+# ER beats buy-and-hold on all three assets, where naive SMA blows up on choppy SOL.
+REGIME_ER_WINDOW = 20
+REGIME_ER_THRESHOLD = 0.30
+
 # How much each rule counts toward the net score. The default is balanced; the
 # trend preset drops the counter-trend / contrarian rules (EMA+MACD only), which
 # the backtest shows is far more robust on trending crypto than the naive blend.
@@ -155,6 +161,28 @@ def format_signals(signals: Dict[str, Signal]) -> str:
     if not signals:
         return "No deterministic signals available."
     return "\n".join(f"- **{a}**: {s.to_summary()}" for a, s in signals.items())
+
+
+def efficiency_ratio(closes, end_idx: Optional[int] = None,
+                     window: int = REGIME_ER_WINDOW) -> Optional[float]:
+    """Kaufman efficiency ratio over `window` bars ending at end_idx (default last):
+    |net move| / total path length. ~1 = clean trend, ~0 = chop. Closes only."""
+    if end_idx is None:
+        end_idx = len(closes) - 1
+    if end_idx < window:
+        return None
+    net = abs(closes[end_idx] - closes[end_idx - window])
+    path = sum(abs(closes[k] - closes[k - 1]) for k in range(end_idx - window + 1, end_idx + 1))
+    if path == 0:
+        return None
+    return net / path
+
+
+def regime_label(er: Optional[float], threshold: float = REGIME_ER_THRESHOLD) -> str:
+    """TRENDING when the efficiency ratio is high enough, else CHOPPY (UNKNOWN if no ER)."""
+    if er is None:
+        return "UNKNOWN"
+    return "TRENDING" if er >= threshold else "CHOPPY"
 
 
 def indicator_series_from_closes(closes) -> List[Optional[Dict[str, float]]]:

@@ -10,6 +10,7 @@ import pandas_ta as ta
 import httpx
 
 from bot import settings
+from bot import signals
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +374,12 @@ class PriceFeed:
                             "MACD": macd_val,
                             "MACD_signal": macd_signal,
                         }
+                        # Regime (trending vs choppy) tells agents when trend signals
+                        # are reliable — the edge the backtest found.
+                        er = signals.efficiency_ratio(df["close"].tolist())
+                        if er is not None:
+                            indicators[symbol]["ER"] = er
+                            indicators[symbol]["regime"] = signals.regime_label(er)
                     except Exception as e:
                         logger.error("Failed to calculate indicators for %s: %s", symbol, e)
                 # Space out calls so eight sequential pairs don't trip Kraken's
@@ -447,7 +454,9 @@ class PriceFeed:
             
             tech = tech_indicators.get(symbol)
             if tech:
-                tech_str = f" | EMA(20/50): {tech['EMA_20']:.0f}/{tech['EMA_50']:.0f} | RSI: {tech['RSI_14']:.1f} | MACD: {tech['MACD']:.1f}"
+                regime = tech.get("regime")
+                regime_str = f" | Regime: {regime} (ER {tech.get('ER', 0):.2f})" if regime else ""
+                tech_str = f" | EMA(20/50): {tech['EMA_20']:.0f}/{tech['EMA_50']:.0f} | RSI: {tech['RSI_14']:.1f} | MACD: {tech['MACD']:.1f}{regime_str}"
                 lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str}{tech_str})")
             else:
                 lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str})")
@@ -463,14 +472,13 @@ class PriceFeed:
         # Deterministic signals derived from the indicators above (code, not LLM),
         # so agents reason over an explicit read rather than just raw numbers.
         try:
-            from bot import signals as _signals
-            sig_map = _signals.signals_for_assets(
+            sig_map = signals.signals_for_assets(
                 tech_indicators, funding_rates, fng.get("value") if fng else None
             )
             if sig_map:
                 lines.append("")
-                lines.append("**Deterministic Signals (computed, not LLM):**")
-                lines.append(_signals.format_signals(sig_map))
+                lines.append("**Deterministic Signals (computed, not LLM). In a CHOPPY regime, trend signals are unreliable — favor defense:**")
+                lines.append(signals.format_signals(sig_map))
         except Exception:
             logger.exception("Failed to compute deterministic signals")
 

@@ -141,6 +141,33 @@ class SignalStrategy(Strategy):
         return max(0.0, signals.signal_from_indicators(ind, weights=self._weights).score)
 
 
+class RegimeStrategy(Strategy):
+    """Regime-aware: trend-follow when the market is actually trending, flat in chop.
+
+    The data motivation: SMA trend-following has strong edge in trends (BTC/ETH) but
+    gets chopped to pieces on ranging assets (SOL). The Kaufman efficiency ratio gates
+    it — only trend-follow (long while fast SMA > slow SMA) when ER >= threshold;
+    otherwise stay flat and avoid the chop. Long-only.
+    """
+
+    def __init__(self, fast=20, slow=50, er_window=20, er_threshold=0.30):
+        self.fast = fast
+        self.slow = slow
+        self.er_window = er_window
+        self.er_threshold = er_threshold
+        self.name = f"Regime (ER>{er_threshold:g} trend-follow)"
+
+    def target_weight(self, i: int, closes: Sequence[float]) -> float:
+        er = signals.efficiency_ratio(closes, i, self.er_window)
+        if er is None or er < self.er_threshold:
+            return 0.0  # choppy / insufficient history -> defensive, stay flat
+        fast_ma = _sma(closes, i, self.fast)
+        slow_ma = _sma(closes, i, self.slow)
+        if fast_ma is None or slow_ma is None:
+            return 0.0
+        return 1.0 if fast_ma > slow_ma else 0.0
+
+
 # --- engine ----------------------------------------------------------------
 
 def run_backtest(candles: Sequence[dict], strategy: Strategy,
@@ -243,7 +270,8 @@ def format_table(rows: Sequence[dict]) -> str:
 
 
 def default_strategies() -> List[Strategy]:
-    return [BuyAndHold(), SmaCross(20, 50), RsiMeanReversion(14, 30, 70), SignalStrategy()]
+    return [BuyAndHold(), SmaCross(20, 50), RsiMeanReversion(14, 30, 70),
+            SignalStrategy(), RegimeStrategy()]
 
 
 # --- data: CSV fixture I/O + sources --------------------------------------
