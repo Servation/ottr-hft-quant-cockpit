@@ -97,10 +97,23 @@ export async function fetchPortfolioSnapshot(): Promise<PortfolioSnapshot> {
   const equity = data.total_value ?? 250000;
   const drawdown = data.drawdown ?? 0.012;
   const cash = data.usd_cash !== undefined ? Math.round(data.usd_cash) : Math.round(equity * (1.0 - drawdown));
-  const allocations = (data.symbols || ['BTC', 'ETH']).map((symbol: string, idx: number) => ({
-    symbol: symbol.replace('USDT', ''),
-    percentage: idx === 0 ? 60 : 30
-  })).concat([{ symbol: 'Cash', percentage: 10 }]);
+
+  // Real allocation weights from live holdings valued at current prices (plus
+  // cash), replacing the old hardcoded 60/30/10 placeholder.
+  const holdings = (data.holdings || {}) as Record<string, any>;
+  const currentPrices = (data.current_prices || {}) as Record<string, number>;
+  const cashValue = data.usd_cash ?? 0;
+  const holdingEntries = Object.entries(holdings).map(([sym, h]) => {
+    const qty = typeof h === 'object' && h !== null ? (h.quantity ?? 0) : Number(h || 0);
+    const price = currentPrices[sym] ?? (typeof h === 'object' && h !== null ? (h.avg_cost ?? 0) : 0);
+    return { symbol: sym.replace('USDT', ''), value: qty * price };
+  });
+  const allocTotal = cashValue + holdingEntries.reduce((s, e) => s + e.value, 0);
+  const pct = (v: number) => Math.round((v / allocTotal) * 1000) / 10;
+  const allocations = allocTotal > 0
+    ? [...holdingEntries.map(e => ({ symbol: e.symbol, percentage: pct(e.value) })),
+       { symbol: 'Cash', percentage: pct(cashValue) }]
+    : [];
 
   return {
     equity,
@@ -110,6 +123,7 @@ export async function fetchPortfolioSnapshot(): Promise<PortfolioSnapshot> {
     holdings: data.holdings,
     purchasePrices: data.purchase_prices,
     currentPrices: data.current_prices,
+    performance: data.performance ?? null,
   };
 }
 

@@ -946,10 +946,11 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
         
         {/* Overview equity curve and key metrics cards */}
-        <OverviewPanel 
-          data={chartData} 
-          lang={lang} 
-          t={activeTranslations} 
+        <OverviewPanel
+          data={chartData}
+          lang={lang}
+          t={activeTranslations}
+          performance={portfolioSnapshot?.performance}
         />
 
         {/* Allocation & Discord Agents Board */}

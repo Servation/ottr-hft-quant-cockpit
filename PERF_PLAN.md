@@ -14,7 +14,7 @@ help. See the four-dimension research writeup for the full findings.
 suite (`python run_evals.py` + `pytest -k "not live"`) so a measurement change
 can't silently break trade execution. Add a test for every behavior change.
 
-**Status:** M0 complete (suite green: 173 unit + offline evals). M1-M3 todo.
+**Status:** M0 + M1 complete (bridge + gateway suites green; frontend data-layer unit-tested). M2-M3 todo.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -57,10 +57,10 @@ Concrete targets:
 - `frontend/src/services/apiClient.ts` + the dashboard metric widgets.
 
 Tasks:
-- [ ] **Bridge `/performance` endpoint** (`api_server.py`) — returns metrics computed by `metrics.py` over `equity_curve.jsonl` (drawdown, Sharpe, total/annualized return, benchmark return, alpha). Keeping the *logic* on the bridge avoids a second source of truth and nudges toward the Tier-4 "serve portfolio truth over an API" fix without doing all of it.
-- [ ] **Gateway** — proxy `/performance`; replace the hardcoded `drawdown: 0.0` and inject `sharpe`, `total_return`, `benchmark_return`, `alpha` into `/portfolio/snapshot`.
-- [ ] **Frontend** — a "vs BTC HODL" return line, Sharpe, and Max Drawdown; replace the hardcoded 60/30/10 allocation with real holdings weights from the snapshot.
-- [ ] **Tests** — gateway test asserting the snapshot carries real metrics (not the `0.0` literal); a frontend `apiClient` test for the new fields.
+- [x] **Bridge `/api/performance` endpoint** (`api_server.py`) — read-only; computes the metric set via `metrics.py` over `equity_curve.jsonl`. Logic lives on the bridge (single source of truth); degrades to a generic 500 without leaking internals.
+- [x] **Gateway** — `_fetch_performance()` best-effort-proxies the bridge into `/portfolio/snapshot`: the hardcoded `drawdown: 0.0` is replaced by real max drawdown and a `performance` block (return/CAGR/Sharpe/Sortino/benchmark/alpha) is added. Bridge-down → metrics null, snapshot still renders.
+- [x] **Frontend** — `OverviewPanel` shows Return-vs-BTC-HODL (+alpha), Sharpe (+Sortino), and Max Drawdown, hidden until ≥2 samples and rendering `—` (not a fake 0) for null. `apiClient` now derives real allocation weights from holdings/prices (the old 60/30/10 array was dead data; the donut already used live holdings) and passes `performance` through. _Note: this checkout's frontend is missing 3 unrelated, never-tracked components (`ControlSidebar`/`MarketNewsFeed`/`OptimizerAuditTable`), so a full `tsc`/`vite build` can't pass here; my files typecheck clean and the data layer is vitest-green._
+- [x] **Tests** — bridge `test_api_server.py` (2: empty curve → insufficient; populated → metrics + benchmark); gateway `test_snapshot.py` (2: real metrics when bridge up, graceful null when down) + a `conftest` pinning the bridge URL; frontend `apiClient.test.ts` (allocations + performance mapping). Bridge 9-test + gateway 19-test suites green.
 
 **Exit:** the dashboard shows real max-drawdown, Sharpe, and return-vs-HODL; no
 hardcoded performance values remain in the snapshot path.

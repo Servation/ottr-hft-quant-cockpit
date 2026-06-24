@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { postTradingStart, postAgentChat } from './apiClient';
+import { postTradingStart, postAgentChat, fetchPortfolioSnapshot } from './apiClient';
 
 // Smoke test: state-changing calls must attach the configured X-API-Key.
 // Vite statically inlines VITE_-prefixed env vars at transform time, so we
@@ -29,5 +29,44 @@ describe('apiClient auth headers', () => {
     const [, init] = (fetch as any).mock.calls[0];
     expect(init.headers['X-API-Key']).toBe(EXPECTED_KEY);
     expect(init.headers['Content-Type']).toBe('application/json');
+  });
+});
+
+describe('fetchPortfolioSnapshot mapping', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('derives real allocations and passes through performance metrics', async () => {
+    const snapshot = {
+      total_value: 13000,
+      usd_cash: 2000,
+      holdings: {
+        BTC: { quantity: 0.1, avg_cost: 50000 }, // 0.1 * 60000 = 6000
+        ETH: { quantity: 2, avg_cost: 2000 },     // 2 * 2500   = 5000
+      },
+      current_prices: { BTC: 60000, ETH: 2500 },
+      drawdown: 0.1,
+      performance: {
+        total_return: 0.1, cagr: null, sharpe: 1.2, sortino: 0.9,
+        max_drawdown: 0.1, benchmark_return: 0.2, alpha: -0.1, num_points: 10,
+      },
+      trading_active: true,
+    };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => snapshot })));
+
+    const result = await fetchPortfolioSnapshot();
+
+    // total = 6000 + 5000 + 2000 = 13000 -> BTC 46.2%, ETH 38.5%, Cash 15.4%.
+    expect(result.allocations.find(a => a.symbol === 'BTC')?.percentage).toBeCloseTo(46.2, 1);
+    expect(result.allocations.find(a => a.symbol === 'ETH')?.percentage).toBeCloseTo(38.5, 1);
+    expect(result.allocations.find(a => a.symbol === 'Cash')?.percentage).toBeCloseTo(15.4, 1);
+    // No more hardcoded 60/30/10.
+    expect(result.allocations.find(a => a.symbol === 'BTC')?.percentage).not.toBe(60);
+
+    // Performance metrics flow through untouched.
+    expect(result.performance?.sharpe).toBe(1.2);
+    expect(result.performance?.alpha).toBe(-0.1);
+    expect(result.performance?.num_points).toBe(10);
   });
 });
