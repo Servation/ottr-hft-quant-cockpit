@@ -91,7 +91,14 @@ class AlertMonitor:
                     executed_orders = portfolio.check_orders(current_prices)
                     if executed_orders:
                         await self._notify_executed_orders(executed_orders, self._bot)
-                
+
+                # 1b. Autonomous risk-limit enforcement (Tier 3). No-op unless
+                #     risk_limits.enabled; enforce() swallows its own errors so a
+                #     bad pass can never stall this loop.
+                if current_prices:
+                    from bot.risk_enforcer import enforce as enforce_risk_limits
+                    await enforce_risk_limits(self._bot, current_prices)
+
                 # 2. Check thresholds
                 alerts = await self.check_thresholds()
 

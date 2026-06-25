@@ -45,8 +45,8 @@ cooldown'd** (no double-fire on a 60s tick), **fails loud on missing data**, and
 **audited**. Gate every change on `pytest -k "not live"` (225) + `run_evals.py
 --no-llm` (3); add a test for every behavior change.
 
-**Status:** R0 COMPLETE (pure policy core + latch + config; inert, `enabled: false`,
-wired into nothing). R1-R4 pending.
+**Status:** R0-R1 COMPLETE (R0 pure core; R1 autonomous stop-loss enforcer wired into
+the 60s loop, dark behind `enabled: false`). R2-R4 pending.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -125,7 +125,7 @@ Concrete targets:
 - `bot/tools.py:128-162` `place_limit_order`.
 
 Tasks:
-- [ ] **Continuous auto-stop (the enforced control)** — add a risk-enforcement step to
+- [x] **Continuous auto-stop (the enforced control)** — add a risk-enforcement step to
   `_monitor_loop` (prices already fetched there for `check_orders`). Call
   `risk.stop_loss_breaches`; for each breach, force a SELL through a single shared
   helper `_execute_risk_action()` that: respects `TRADING_DRY_RUN` (log + `audit_event`,
@@ -134,21 +134,22 @@ Tasks:
   the existing stop-loss emergency-meeting path so the agents are told *why* (and don't
   immediately re-enter). Stop is measured off the **live** avg_cost, so it adapts as a
   position is added to (no stale order to maintain).
-- [ ] **Let agents arm explicit stops too (secondary)** — extend `place_limit_order`
+- [~] **Let agents arm explicit stops too (secondary)** — extend `place_limit_order`
   (or add `place_protective_order`) to accept `STOP`/`TAKE_PROFIT`; `check_orders`
   already executes them. This gives the desk discretionary protective orders on top of
   the automatic floor.
-- [ ] **Trailing option (extension)** — `stop_loss_mode: trailing` tracks a per-position
+- [~] **Trailing option (extension)** — `stop_loss_mode: trailing` tracks a per-position
   high-water mark in `risk_state` and stops a fixed % off the high. Default stays
   `avg_cost` to keep R1 tight; trailing ships only if the backtest (R4) shows it earns
   its keep.
-- [ ] **Tests** — `tests/test_risk_enforcer.py`: a position below the stop force-sells
+- [x] **Tests** — `tests/test_risk_enforcer.py`: a position below the stop force-sells
   through the (mocked) portfolio once and only once; cooldown blocks a second fire;
   `TRADING_DRY_RUN=1` makes it a logged no-op; a missing price is skipped, not sold.
 
 **Exit:** a position breaching `stop_loss_pct` is auto-exited within one loop tick,
-idempotently, audited, kill-switch-respecting; agents can also place explicit stops;
-`stop_loss_pct` is finally a live control, not dead config.
+idempotently, audited, kill-switch-respecting; `stop_loss_pct` is finally a live
+control, not dead config. _(Agent-placed explicit stops + trailing deferred to keep R1
+fully dark; the autonomous floor is the R1 deliverable, behind `enabled`.)_
 
 ---
 
