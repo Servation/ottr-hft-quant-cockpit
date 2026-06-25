@@ -78,6 +78,41 @@ async def test_schedule_dynamic_meeting(scheduler, mock_bot):
     await scheduler.stop()
 
 @pytest.mark.asyncio
+async def test_next_meeting_info_ignores_background_jobs(scheduler, mocker):
+    """get_next_meeting_info must report the next MEETING, not the sooner background jobs
+    (prediction grading every 15m, equity snapshot hourly). Otherwise the dashboard/health
+    shows a meeting '~15 min away' (the eval job's time) that never actually fires."""
+    from datetime import datetime, timezone, timedelta
+    from zoneinfo import ZoneInfo
+
+    now = datetime.now(timezone.utc)
+
+    def _job(jid, mins):
+        j = MagicMock()
+        j.id = jid
+        j.next_run_time = now + timedelta(minutes=mins)
+        return j
+
+    # The 15-min prediction job is soonest, but the real next meeting is 4h out.
+    jobs = [
+        _job("evaluate_predictions", 5),
+        _job("log_equity_snapshot", 30),
+        _job("meeting_16", 240),
+    ]
+    fake_sched = MagicMock()
+    fake_sched.running = True
+    fake_sched.get_jobs.return_value = jobs
+    scheduler._scheduler = fake_sched
+    mocker.patch("bot.meetings.meeting_rotation.peek_next_meeting_type", return_value="risk_review")
+
+    mtype, mtime = scheduler.get_next_meeting_info()
+
+    expected = (now + timedelta(minutes=240)).astimezone(ZoneInfo("US/Pacific")).strftime("%Y-%m-%d %H:%M %Z")
+    assert mtype == "risk_review"
+    assert mtime == expected  # the meeting's time, not the 5-min prediction job's
+
+
+@pytest.mark.asyncio
 async def test_execute_meeting(scheduler, mock_bot, mocker):
     """Test full orchestration logic without exceptions."""
     # Setup mocks for dependencies
