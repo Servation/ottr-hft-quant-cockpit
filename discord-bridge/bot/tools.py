@@ -130,10 +130,12 @@ ACTION_TOOLS = [
         "function": {
             "name": "place_limit_order",
             "description": (
-                "Place a persistent limit order at a key price level. "
-                "A BUY triggers when price falls to or below the target; "
-                "a SELL triggers when price rises to or above the target. "
-                "Orders are checked every 60 seconds and survive between meetings."
+                "Place a persistent resting order at a key price level, checked every 60 "
+                "seconds and surviving between meetings. order_type LIMIT (default): a BUY "
+                "triggers when price falls to/below target, a SELL when price rises to/above "
+                "target. order_type STOP: a protective SELL (stop-loss) that triggers when "
+                "price falls to/below target. order_type TAKE_PROFIT: a SELL that triggers "
+                "when price rises to/above target. STOP and TAKE_PROFIT are SELL-side only."
             ),
             "parameters": {
                 "type": "object",
@@ -154,6 +156,11 @@ ACTION_TOOLS = [
                     "target_price": {
                         "type": "number",
                         "description": "Price level that triggers the order."
+                    },
+                    "order_type": {
+                        "type": "string",
+                        "enum": ["LIMIT", "STOP", "TAKE_PROFIT"],
+                        "description": "Defaults to LIMIT. STOP/TAKE_PROFIT are SELL-side protective exits."
                     }
                 },
                 "required": ["action", "asset", "amount", "target_price"]
@@ -407,15 +414,27 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             asset = arguments.get("asset", "").upper()
             amount = float(arguments.get("amount", 0))
             target_price = float(arguments.get("target_price", 0))
+            order_type = str(arguments.get("order_type", "LIMIT")).upper()
+            if order_type not in ("LIMIT", "STOP", "TAKE_PROFIT"):
+                return f"Error: invalid order_type '{order_type}' (LIMIT, STOP, or TAKE_PROFIT)."
+            # STOP/TAKE_PROFIT are protective exits, SELL-side only: check_orders has no
+            # BUY-side handler for them, so a BUY stop would just never trigger.
+            if order_type in ("STOP", "TAKE_PROFIT") and action != "SELL":
+                return f"Error: {order_type} orders are SELL-side only (protective exits)."
 
-            order_id = portfolio.place_order("LIMIT", action, asset, amount, target_price)
+            order_id = portfolio.place_order(order_type, action, asset, amount, target_price)
             audit_event(
-                "order_placed", order_type="LIMIT", action=action,
+                "order_placed", order_type=order_type, action=action,
                 asset=asset, amount=amount, target_price=target_price, order_id=order_id,
             )
-            direction_sym = "≤" if action == "BUY" else "≥"
+            # ≤ triggers: LIMIT BUY (buy the dip) and STOP SELL (stop-loss).
+            # ≥ triggers: LIMIT SELL (sell the rip) and TAKE_PROFIT SELL.
+            triggers_below = (order_type == "LIMIT" and action == "BUY") or order_type == "STOP"
+            direction_sym = "≤" if triggers_below else "≥"
+            label = {"LIMIT": "Limit Order", "STOP": "Stop-Loss Order",
+                     "TAKE_PROFIT": "Take-Profit Order"}[order_type]
             msg = (
-                f"📝 **Limit Order Placed:** **{action}** {asset} triggers when price "
+                f"📝 **{label} Placed:** **{action}** {asset} triggers when price "
                 f"{direction_sym} **${target_price:,.2f}** | Amount: {amount} | ID: `{order_id}`"
             )
             if post_message_fn:
