@@ -4,17 +4,18 @@
  */
 
 import React, { useState, useRef } from 'react';
-import { ChartDataPoint, PerformanceMetrics } from '../types';
-import { TrendingUp, Coins, DollarSign, Activity, Scale, TrendingDown } from 'lucide-react';
+import { ChartDataPoint, PerformanceMetrics, RiskState } from '../types';
+import { TrendingUp, Coins, DollarSign, Activity, Scale, TrendingDown, Shield, ShieldAlert } from 'lucide-react';
 
 interface OverviewPanelProps {
   data: ChartDataPoint[];
   lang: 'en' | 'ru';
   t: any;
   performance?: PerformanceMetrics | null;
+  risk?: RiskState | null;
 }
 
-export default function OverviewPanel({ data, lang, t, performance }: OverviewPanelProps) {
+export default function OverviewPanel({ data, lang, t, performance, risk }: OverviewPanelProps) {
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const [timeframe, setTimeframe] = useState<'SEC' | 'MIN' | 'HOUR' | 'DAY' | 'WEEK'>('SEC');
   const containerRef = useRef<HTMLDivElement>(null);
@@ -304,6 +305,43 @@ export default function OverviewPanel({ data, lang, t, performance }: OverviewPa
             </div>
           </div>
 
+        </div>
+      )}
+
+      {/* Tier 3 risk-enforcement status strip (read-only; shown when the bridge
+          reports risk state). */}
+      {risk && (
+        <div className="flex flex-wrap items-center gap-3 relative z-10 bg-black/40 p-3 rounded border border-neutral-800 text-[11px] font-mono">
+          <span className="uppercase tracking-wider text-neutral-500 font-semibold flex items-center gap-1.5">
+            <Shield className="w-3.5 h-3.5 text-emerald-500" />
+            {lang === 'en' ? 'Risk Enforcement' : 'Контроль рисков'}
+          </span>
+          <span className={`px-2 py-0.5 rounded border ${risk.enabled ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-neutral-700/20 text-neutral-400 border-neutral-700/30'}`}>
+            {risk.enabled ? (lang === 'en' ? 'ACTIVE' : 'ВКЛ') : (lang === 'en' ? 'OFF' : 'ВЫКЛ')}
+          </span>
+          {risk.enabled && risk.halted && (
+            <span className="px-2 py-0.5 rounded border bg-rose-500/10 text-rose-400 border-rose-500/20 flex items-center gap-1">
+              <ShieldAlert className="w-3 h-3" />
+              {lang === 'en' ? 'HALTED (NEW BUYS BLOCKED)' : 'ОСТАНОВ (ПОКУПКИ ЗАБЛОКИРОВАНЫ)'}
+            </span>
+          )}
+          {risk.enabled && risk.current_drawdown != null && (
+            <span className="text-neutral-500">
+              {lang === 'en' ? 'Drawdown' : 'Просадка'}{' '}
+              <span className={risk.max_drawdown_halt_pct != null && risk.current_drawdown * 100 >= risk.max_drawdown_halt_pct ? 'text-rose-400' : 'text-neutral-300'}>
+                {(risk.current_drawdown * 100).toFixed(1)}%
+              </span>
+              {risk.max_drawdown_halt_pct != null && (
+                <span className="text-neutral-600"> / {risk.max_drawdown_halt_pct.toFixed(0)}% {lang === 'en' ? 'limit' : 'лимит'}</span>
+              )}
+            </span>
+          )}
+          {risk.enabled && risk.stop_loss_pct != null && (
+            <span className="text-neutral-500">
+              {lang === 'en' ? 'Stop' : 'Стоп'}{' '}
+              <span className="text-neutral-300">{risk.stop_loss_pct.toFixed(0)}%</span>
+            </span>
+          )}
         </div>
       )}
 

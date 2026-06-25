@@ -200,6 +200,9 @@ async def get_portfolio_snapshot():
             "alpha": metrics_data.get("alpha"),
             "num_points": (perf or {}).get("num_points", 0),
         },
+        # Tier 3 risk-enforcement state (read-only passthrough from the bridge; None if
+        # the bridge is down). No secrets — just enabled/halted/drawdown + thresholds.
+        "risk": (perf or {}).get("risk"),
         "portfolio_cap": trading_config.portfolio_cap,
         "drawdown_limit": trading_config.drawdown_limit,
         "slippage_limit": trading_config.slippage_limit,

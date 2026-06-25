@@ -51,6 +51,8 @@ describe('fetchPortfolioSnapshot mapping', () => {
         total_return: 0.1, cagr: null, sharpe: 1.2, sortino: 0.9,
         max_drawdown: 0.1, benchmark_return: 0.2, alpha: -0.1, num_points: 10,
       },
+      risk: { enabled: true, halted: false, halted_since: null,
+              current_drawdown: 0.05, stop_loss_pct: 10, max_drawdown_halt_pct: 15 },
       trading_active: true,
     };
     vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => snapshot })));
@@ -68,5 +70,9 @@ describe('fetchPortfolioSnapshot mapping', () => {
     expect(result.performance?.sharpe).toBe(1.2);
     expect(result.performance?.alpha).toBe(-0.1);
     expect(result.performance?.num_points).toBe(10);
+
+    // Tier 3 risk-enforcement state passes through read-only.
+    expect(result.risk?.enabled).toBe(true);
+    expect(result.risk?.current_drawdown).toBe(0.05);
   });
 });
