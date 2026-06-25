@@ -25,7 +25,8 @@ _STATE_FILE = _DATA_DIR / "risk_state.json"
 
 
 def _default_state() -> Dict[str, Any]:
-    return {"halted": False, "halted_since": None, "last_action_ts": {}}
+    # `highs`: per-asset trailing high-water marks (for stop_loss_mode=trailing).
+    return {"halted": False, "halted_since": None, "last_action_ts": {}, "highs": {}}
 
 
 def load() -> Dict[str, Any]:
@@ -40,6 +41,8 @@ def load() -> Dict[str, Any]:
                 state.setdefault(key, value)
             if not isinstance(state.get("last_action_ts"), dict):
                 state["last_action_ts"] = {}
+            if not isinstance(state.get("highs"), dict):
+                state["highs"] = {}
             return state
         except (json.JSONDecodeError, OSError):
             return _default_state()

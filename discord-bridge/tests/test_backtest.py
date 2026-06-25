@@ -112,3 +112,12 @@ def test_risk_overlay_no_risk_matches_base():
     candles = synth_candles(120)
     assert (run_backtest(candles, RegimeStrategy())["final_value"]
             == run_backtest(candles, RegimeStrategy(), risk=None)["final_value"])
+
+
+def test_risk_overlay_trailing_stop_locks_gains():
+    # Rise 100 -> 150 then fall. A 10% trailing stop (off the 150 high) exits at 135; the
+    # fixed (off the 100 entry) stop only fires at 90, riding the drop most of the way down.
+    closes = [100, 120, 150, 140, 135, 130, 90]
+    fixed = run_backtest(_candles(closes), BuyAndHold(), risk={"stop_loss_pct": 10.0, "stop_mode": "fixed"})
+    trail = run_backtest(_candles(closes), BuyAndHold(), risk={"stop_loss_pct": 10.0, "stop_mode": "trailing"})
+    assert trail["final_value"] > fixed["final_value"]

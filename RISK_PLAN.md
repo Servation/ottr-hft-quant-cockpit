@@ -139,10 +139,12 @@ Tasks:
   (or add `place_protective_order`) to accept `STOP`/`TAKE_PROFIT`; `check_orders`
   already executes them. This gives the desk discretionary protective orders on top of
   the automatic floor.
-- [~] **Trailing option (extension)** — `stop_loss_mode: trailing` tracks a per-position
-  high-water mark in `risk_state` and stops a fixed % off the high. Default stays
-  `avg_cost` to keep R1 tight; trailing ships only if the backtest (R4) shows it earns
-  its keep.
+- [x] **Trailing option (extension)** — `stop_loss_mode: trailing` tracks a per-position
+  high-water mark in `risk_state` and stops a fixed % off the high. _(F3: the backtest
+  shows trailing crushes drawdown on passive holds (BTC HODL 51%->10%, SOL HODL 55%->18%)
+  and lifts ETH/SOL HODL return from negative to positive, ~neutral on the defensive
+  Regime strategy. Wired live behind `stop_loss_mode: trailing`; default stays `avg_cost`
+  until flipped.)_
 - [x] **Tests** — `tests/test_risk_enforcer.py`: a position below the stop force-sells
   through the (mocked) portfolio once and only once; cooldown blocks a second fire;
   `TRADING_DRY_RUN=1` makes it a logged no-op; a missing price is skipped, not sold.

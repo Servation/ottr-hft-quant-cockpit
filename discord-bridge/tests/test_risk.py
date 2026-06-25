@@ -50,6 +50,26 @@ def test_stop_loss_skips_missing_or_bad_inputs():
     assert actions == []
 
 
+def test_stop_loss_trailing_from_high():
+    holdings = {"BTC": {"quantity": 1.0, "avg_cost": 100.0}}
+    # Price 135, high 150: +35% vs the 100 avg cost (avg_cost stop does NOT fire), but 10%
+    # below the 150 high -> the trailing stop fires.
+    prices = _prices(BTC=135.0)
+    assert risk.stop_loss_breaches(holdings, prices, stop_pct=10.0, mode="avg_cost") == []
+    actions = risk.stop_loss_breaches(holdings, prices, stop_pct=10.0, mode="trailing",
+                                      highs={"BTC": 150.0})
+    assert len(actions) == 1 and actions[0].sell_qty == 1.0
+    assert actions[0].detail["mode"] == "trailing"
+
+
+def test_stop_loss_trailing_falls_back_to_avg_cost():
+    holdings = {"ETH": {"quantity": 2.0, "avg_cost": 100.0}}
+    # No high recorded yet -> trailing uses the avg cost; 88 is -12% -> stop.
+    actions = risk.stop_loss_breaches(holdings, _prices(ETH=88.0), stop_pct=10.0,
+                                      mode="trailing", highs={})
+    assert len(actions) == 1
+
+
 # ── drawdown_state (hysteresis breaker) ───────────────────────────────
 
 def test_drawdown_trips_at_halt_threshold():
@@ -142,7 +162,7 @@ def test_concentration_skips_zero_total_and_bad_price():
 # ── risk_state latch (persisted) ──────────────────────────────────────
 
 def test_risk_state_defaults_when_absent():
-    assert risk_state.load() == {"halted": False, "halted_since": None, "last_action_ts": {}}
+    assert risk_state.load() == {"halted": False, "halted_since": None, "last_action_ts": {}, "highs": {}}
 
 
 def test_risk_state_roundtrip():
@@ -161,7 +181,7 @@ def test_risk_state_roundtrip():
 def test_risk_state_corrupt_file_heals():
     # A garbage latch file loads as the default rather than raising (fail safe).
     risk_state._STATE_FILE.write_text("{ not json", encoding="utf-8")
-    assert risk_state.load() == {"halted": False, "halted_since": None, "last_action_ts": {}}
+    assert risk_state.load() == {"halted": False, "halted_since": None, "last_action_ts": {}, "highs": {}}
 
 
 def test_cooldown_active_window():

@@ -163,3 +163,19 @@ async def test_concentration_within_band_not_trimmed(fake_bot, patched, monkeypa
                         {"holdings": _holdings(BTC=(38.0, 90.0))})
     await risk_enforcer.enforce(fake_bot, _prices(BTC=100.0))
     patched.assert_not_called()
+
+
+# ── F3: trailing high-water mark tracking ─────────────────────────────
+
+def test_update_highs_ratchets_and_resets():
+    state = {}
+    holdings = {"BTC": {"quantity": 1.0, "avg_cost": 100.0}}
+    risk_enforcer._update_highs(state, holdings, _prices(BTC=120.0))
+    assert state["highs"]["BTC"] == 120.0
+    risk_enforcer._update_highs(state, holdings, _prices(BTC=110.0))   # pullback -> high holds
+    assert state["highs"]["BTC"] == 120.0
+    risk_enforcer._update_highs(state, holdings, _prices(BTC=150.0))   # new high ratchets up
+    assert state["highs"]["BTC"] == 150.0
+    # Position closed -> the trail resets so the next entry starts fresh.
+    risk_enforcer._update_highs(state, {"BTC": {"quantity": 0.0, "avg_cost": 0.0}}, _prices(BTC=150.0))
+    assert "BTC" not in state["highs"]

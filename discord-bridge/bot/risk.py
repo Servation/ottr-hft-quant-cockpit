@@ -68,18 +68,21 @@ def stop_loss_breaches(
     prices: Dict[str, Any],
     stop_pct: float,
     mode: str = "avg_cost",
+    highs: Optional[Dict[str, float]] = None,
 ) -> List[RiskAction]:
-    """Positions trading at or below `stop_pct`% under their average cost.
+    """Positions trading at or below `stop_pct`% under their stop reference.
 
     Emits a full-liquidation SELL per breached position. `stop_pct` is a positive percent
-    (10.0 == a 10% loss). `mode` is "avg_cost" (loss measured from the cost basis);
-    "trailing" (loss from the position's high-water mark) needs per-position high tracking
-    and is reserved for an R1 extension, so it is treated as avg_cost here. A position with
-    no quantity, no cost basis, or no live price is skipped — a missing price must never be
-    read as a 100% loss.
+    (10.0 == a 10% loss). Mode "avg_cost" measures the loss from the cost basis; mode
+    "trailing" measures it from the position's running high-water mark (`highs[asset]`,
+    maintained by the caller), which ratchets up to lock in gains — falling back to
+    avg_cost until a high is recorded, and never trailing below the cost basis. A position
+    with no quantity, no cost basis, or no live price is skipped — a missing price must
+    never be read as a 100% loss.
     """
     if stop_pct <= 0:
         return []
+    highs = highs or {}
     threshold = -abs(stop_pct) / 100.0
     actions: List[RiskAction] = []
     for asset, h in holdings.items():
@@ -88,7 +91,13 @@ def stop_loss_breaches(
         price = _price_of(prices, asset)
         if qty <= 0 or avg_cost <= 0 or price <= 0:
             continue
-        change = (price - avg_cost) / avg_cost
+        if mode == "trailing":
+            ref = max(float(highs.get(asset, 0.0) or 0.0), avg_cost)  # never below entry
+            ref_label = "trailing high"
+        else:
+            ref = avg_cost
+            ref_label = "avg cost"
+        change = (price - ref) / ref
         if change <= threshold:
             actions.append(
                 RiskAction(
@@ -96,11 +105,13 @@ def stop_loss_breaches(
                     asset=asset,
                     sell_qty=qty,
                     reason=(
-                        f"{asset} at ${price:,.2f} is {change * 100:.1f}% vs avg cost "
-                        f"${avg_cost:,.2f}, at/under the -{abs(stop_pct):.0f}% stop"
+                        f"{asset} at ${price:,.2f} is {change * 100:.1f}% vs {ref_label} "
+                        f"${ref:,.2f}, at/under the -{abs(stop_pct):.0f}% stop"
                     ),
                     detail={
                         "price": price,
+                        "ref": ref,
+                        "mode": mode,
                         "avg_cost": avg_cost,
                         "loss_pct": round(change * 100, 2),
                         "stop_pct": stop_pct,
