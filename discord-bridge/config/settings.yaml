@@ -14,12 +14,18 @@ meeting_rotation:
 thresholds:
   emergency_price_drop_pct: 5.0
   emergency_price_spike_pct: 8.0
-  # Midas/Zephyr: hard cap on SOL as a % of total portfolio value.
-  # Any BUY that would push SOL above this is blocked at the execution gate.
-  max_sol_exposure_pct: 20.0
-  # General per-asset concentration cap (% of total) for assets without a
-  # stricter per-asset override above. Applies to BTC/ETH/etc.
+  # General per-asset concentration cap (% of total) for any asset without a stricter
+  # per-asset override below. BTC/ETH ride this default (35%). The buy gate and the
+  # Tier 3 concentration trim read the SAME keys, so block and trim never disagree.
   max_asset_exposure_pct: 35.0
+  # Per-asset overrides, tighter than the default. SOL is a long-standing 20% cap; the
+  # five smaller-cap alts are held to 15% each given thinner liquidity / higher vol.
+  max_sol_exposure_pct: 20.0
+  max_xrp_exposure_pct: 15.0
+  max_ada_exposure_pct: 15.0
+  max_doge_exposure_pct: 15.0
+  max_link_exposure_pct: 15.0
+  max_avax_exposure_pct: 15.0
 
 # Regime/volatility position sizing (bot/sizing.py). A BUY is resized to a
 # vol-targeted, regime-scaled amount; in a CHOPPY regime it shrinks hard.
@@ -52,6 +58,20 @@ risk_limits:
   action_cooldown_seconds: 900
   min_curve_points: 24
 
+# The tradeable universe (the WATCHLIST): the fixed set the desk analyzes, scores, and
+# may open/close positions in. This is NOT "what we hold" — holdings are derived from
+# executed trades (qty > 0). Every member must have a Kraken USD pair (so it gets
+# technical indicators); see bot/universe.py and price_feed._KRAKEN_PAIR_MAP.
+universe:
+  - BTC
+  - ETH
+  - SOL
+  - XRP
+  - ADA
+  - DOGE
+  - LINK
+  - AVAX
+
 portfolio:
   starting_balance: 10000
   slippage_pct: 0.1
@@ -60,6 +80,8 @@ portfolio:
   # taker fee; keep separate from slippage.
   fee_pct: 0.1
   min_trade_usd: 100.0
+  # NOTE: legacy seed list for a fresh portfolio's holdings. Superseded by `universe`
+  # above; removed in the holdings/watchlist split (holdings derive from trades).
   assets:
     - BTC
     - ETH
