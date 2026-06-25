@@ -35,8 +35,8 @@ trade). The bridge stays the **sole writer**; the gateway relays/aggregates, nev
 **No secrets to clients** (same posture as the snapshot-leak fix). Gate every change on
 `pytest -k "not live"` + `run_evals.py`; add a test per change.
 
-**Status:** O0-O1 COMPLETE (O0 live execution + portfolio events; O1 trade rationale flows
-to the record + audit + live feed). O2-O3 pending.
+**Status:** O0-O2 COMPLETE (O0 live events; O1 trade rationale; O2 health aggregation across
+bridge + gateway + frontend). O3 (polish) pending.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -122,19 +122,19 @@ Concrete targets:
 - New `frontend` `SystemHealthPanel.tsx`.
 
 Tasks:
-- [ ] **Bridge component-health endpoint** — `/api/health` reports, read-only and secret-free:
+- [x] **Bridge component-health endpoint** — `/api/health` reports, read-only and secret-free:
   LLM reachable (`agents.check_health` + latency), price-feed freshness (last-quote age),
   scheduler running + next-meeting time, portfolio-state readable + age. Degrades gracefully
   (a failed sub-check reports DOWN, never 500s the whole endpoint).
-- [ ] **Gateway aggregation** — `/api/v1/health/detailed` best-effort-proxies the bridge health,
+- [x] **Gateway aggregation** — `/api/v1/health/detailed` best-effort-proxies the bridge health,
   adds bridge-reachability + latency, and rolls a top-line `OK | DEGRADED | DOWN`. Bridge down →
   the gateway still answers with `bridge: DOWN` (never hangs the dashboard).
-- [ ] **Frontend `SystemHealthPanel`** — polls `/health/detailed` (~30s), renders a compact
-  component grid (green/amber/red + last-checked), placed in the dashboard chrome. Hidden/raw
-  values only; no secrets.
-- [ ] **Tests** — bridge health endpoint reports per-component status and degrades on a failed
-  sub-check; gateway aggregation rolls the top-line status and tolerates a down bridge; frontend
-  health mapping (vitest).
+- [x] **Frontend `SystemHealthPanel`** — polls `/health/detailed` (~30s), renders a compact
+  component grid (green/amber/red status dots), placed above the overview panel. No secrets.
+  _(JSX review-verified; the vitest-green data layer covers the mapping, per the F1 precedent.)_
+- [x] **Tests** — bridge health endpoint reports per-component status (`test_api_server.py`);
+  gateway aggregation rolls the top-line status + tolerates a down bridge (`test_health.py`, 2);
+  frontend health mapping (`apiClient.test.ts` vitest).
 
 **Exit:** `/health/detailed` returns a per-component status that rolls up to one verdict; the
 dashboard shows live component health; a single component failing is visible, not silent.

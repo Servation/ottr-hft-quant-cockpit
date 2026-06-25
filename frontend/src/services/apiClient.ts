@@ -9,7 +9,8 @@ import {
   LLMTestResult,
   TradingConfig,
   ChatMessage,
-  OptimizationLogEntry
+  OptimizationLogEntry,
+  SystemHealth
 } from '../types';
 
 const API_BASE = '/api/v1';
@@ -126,6 +127,15 @@ export async function fetchPortfolioSnapshot(): Promise<PortfolioSnapshot> {
     performance: data.performance ?? null,
     risk: data.risk ?? null,
   };
+}
+
+// Fetch aggregated component health (gateway /health/detailed). Read-only.
+export async function fetchSystemHealth(): Promise<SystemHealth> {
+  const response = await fetch(`${API_BASE}/health/detailed`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch system health: ${response.statusText}`);
+  }
+  return response.json();
 }
 
 // Fetch execution logs

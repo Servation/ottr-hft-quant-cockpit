@@ -132,11 +132,75 @@ async def handle_performance(request):
         )
 
 
+async def handle_health(request):
+    """Read-only component health for the operator dashboard (Tier 4 / O2). No secrets;
+    each sub-check degrades to its own status and the endpoint never 500s on one failure."""
+    import time as _t
+    components = {}
+
+    # LLM backend (LM Studio): reachable + ping latency.
+    try:
+        from bot.agents import agent_llm
+        t0 = _t.monotonic()
+        ok = await agent_llm.check_health()
+        components["llm"] = {"status": "OK" if ok else "DOWN",
+                             "latency_ms": round((_t.monotonic() - t0) * 1000)}
+    except Exception:
+        components["llm"] = {"status": "DOWN"}
+
+    # Price feed: age of the last successful quote vs the cache TTL.
+    try:
+        from bot.price_feed import price_feed
+        ts = getattr(price_feed, "_cache_timestamp", 0.0) or 0.0
+        ttl = getattr(price_feed, "_cache_ttl", 60)
+        if ts <= 0:
+            components["price_feed"] = {"status": "UNKNOWN", "last_quote_age_sec": None}
+        else:
+            age = _t.time() - ts
+            components["price_feed"] = {"status": "OK" if age < ttl * 5 else "STALE",
+                                        "last_quote_age_sec": round(age)}
+    except Exception:
+        components["price_feed"] = {"status": "DOWN"}
+
+    # Scheduler: running + the next meeting.
+    try:
+        from bot.scheduler import meeting_scheduler
+        sched = getattr(meeting_scheduler, "_scheduler", None)
+        running = bool(sched and getattr(sched, "running", False))
+        next_type, next_time = meeting_scheduler.get_next_meeting_info()
+        components["scheduler"] = {"status": "OK" if running else "DOWN",
+                                   "next_meeting": next_time, "next_type": next_type}
+    except Exception:
+        components["scheduler"] = {"status": "DOWN"}
+
+    # Portfolio: the in-memory state is readable.
+    try:
+        from bot.portfolio import portfolio
+        holdings = portfolio._state.get("holdings", {})
+        components["portfolio"] = {
+            "status": "OK",
+            "positions": sum(1 for h in holdings.values() if h.get("quantity", 0) > 0),
+        }
+    except Exception:
+        components["portfolio"] = {"status": "DOWN"}
+
+    statuses = [c.get("status") for c in components.values()]
+    bad = [s for s in statuses if s in ("DOWN", "STALE")]
+    if not bad:
+        overall = "OK"
+    elif all(s == "DOWN" for s in statuses):
+        overall = "DOWN"
+    else:
+        overall = "DEGRADED"
+    return web.json_response({"status": overall, "components": components})
+
+
 async def start_api_server(bot, port=8001):
     app = web.Application()
     app["bot"] = bot
     app.router.add_post("/api/directive", handle_directive)
     app.router.add_get("/api/performance", handle_performance)
+    app.router.add_get("/api/health", handle_health)
 
     runner = web.AppRunner(app)
     await runner.setup()

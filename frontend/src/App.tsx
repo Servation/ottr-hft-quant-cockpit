@@ -25,6 +25,7 @@ import {
 
 // Import subcomponents
 import OverviewPanel from './components/OverviewPanel';
+import SystemHealthPanel from './components/SystemHealthPanel';
 import AssetAllocation from './components/AssetAllocation';
 import AgentRoomConsole from './components/AgentRoomConsole';
 import ExecutionLogsTable from './components/ExecutionLogsTable';
@@ -907,6 +908,8 @@ export default function App() {
       <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 lg:p-8 space-y-6">
         
         {/* Overview equity curve and key metrics cards */}
+        <SystemHealthPanel lang={lang} />
+
         <OverviewPanel
           data={chartData}
           lang={lang}
