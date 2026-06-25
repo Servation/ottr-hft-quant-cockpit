@@ -22,7 +22,8 @@ sole portfolio writer, fail-loud, caps).
 
 **Status:** S0-S2 done (incl. signal tuning, a **regime-aware strategy that beats HODL
 on all three assets**, LLM behavior tuning, and **regime-driven position sizing**).
-S3 done (belief-revision round). S4 (embeddings memory) is the remaining stretch.
+S3 done (belief-revision round). **S4 done** (embeddings memory — TF-IDF/vesper
+replaced with local embeddings). **All of Tier 2 (S0-S4) complete.**
 
 **Regime-aware edge (the win):** gating trend-following on the Kaufman efficiency
 ratio (`bot/signals.efficiency_ratio` / `regime_label`; `bot/backtest.RegimeStrategy`)
@@ -158,10 +159,15 @@ meetings rarely surface (`vesper_engine.py`). There's already a TF-IDF-vs-embedd
 benchmark POC to validate against.
 
 Tasks:
-- [ ] Swap TF-IDF for local sentence embeddings (LM Studio can serve an embeddings
-  model) over the same Markdown vault; query with a short LLM-written topic sentence
-  instead of the raw price string.
-- [ ] A/B retrieval quality vs TF-IDF using the existing benchmark.
+- [x] `bot/embeddings.py` (embed via the local `/v1/embeddings` model + cosine);
+  `SemanticMeetingMemory` now keeps a persisted embedding index (`data/embeddings_index.json`)
+  and ranks past meetings by cosine similarity. **Removed the external `d:\vesper-text`
+  TF-IDF dependency entirely** and dropped the LLM query-expansion hack (embeddings
+  capture meaning directly). Fails soft → "no context" if the embedder is down.
+- [x] Live-validated on paraphrased queries (where TF-IDF fails): "shield the portfolio
+  when prices fall" correctly retrieved the "protect capital in a downturn" meeting with
+  zero keyword overlap; 2/3 tricky paraphrases hit the right precedent. (`test_memory.py`
+  rewritten for embeddings + a cosine unit test.)
 
 **Exit:** memory retrieval returns semantically relevant precedents; measured better
 than TF-IDF on the benchmark. _(Stretch — larger and depends on an embeddings endpoint;

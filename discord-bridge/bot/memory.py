@@ -196,19 +196,15 @@ class MeetingMemory:
         }
 
 
-# --------------------------------------------------------------------# ---------------------------------------------------------------------------
-# Vesper Text TF-IDF Semantic Memory Extension
 # ---------------------------------------------------------------------------
-import sys
-
-# Add Vesper to path so we can import its engine
-VESPER_PATH = r"d:\vesper-text"
-if VESPER_PATH not in sys.path:
-    sys.path.append(VESPER_PATH)
-
-import vesper_engine
+# Embedding-based semantic memory (S4) — replaces the TF-IDF/vesper keyword
+# retrieval (and its external d:\vesper-text dependency) with cosine similarity
+# over local embeddings, so relevant past meetings surface by meaning.
+# ---------------------------------------------------------------------------
+from bot import embeddings as _embeddings
 
 VAULT_DIR = DATA_DIR / "vesper_vault"
+INDEX_PATH = DATA_DIR / "embeddings_index.json"
 
 class SemanticMeetingMemory(MeetingMemory):
     """
@@ -219,11 +215,13 @@ class SemanticMeetingMemory(MeetingMemory):
     def __init__(self) -> None:
         super().__init__()
         self._lock: Optional[asyncio.Lock] = None
-        
-        # Ensure vault exists
+        self._index: Dict[str, dict] = {}  # meeting_id -> {"text","embedding","ts"}
+
         VAULT_DIR.mkdir(parents=True, exist_ok=True)
-        
-        # Migrate existing meetings to vault if they don't exist
+        self._load_index()
+
+        # Migrate existing meetings to vault if they don't exist (embeddings are
+        # built lazily on first query so __init__ stays synchronous + network-free).
         for m in self._meetings:
             self._write_meeting_to_vault(m)
 
@@ -232,7 +230,52 @@ class SemanticMeetingMemory(MeetingMemory):
         if self._lock is None:
             self._lock = asyncio.Lock()
         return self._lock
-        
+
+    # -- embedding index ----------------------------------------------------
+
+    def _load_index(self) -> None:
+        if INDEX_PATH.exists():
+            try:
+                self._index = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+            except Exception as exc:
+                logger.warning("Failed to load embeddings index, rebuilding: %s", exc)
+                self._index = {}
+
+    def _save_index(self) -> None:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            INDEX_PATH.write_text(json.dumps(self._index), encoding="utf-8")
+        except Exception as exc:
+            logger.error("Failed to save embeddings index: %s", exc)
+
+    @staticmethod
+    def _meeting_text(record: dict) -> str:
+        """Retrieval-relevant text to embed: summary + decisions + actions + type."""
+        parts = [record.get("summary", "")]
+        if record.get("decisions"):
+            parts.append("Decisions: " + "; ".join(record["decisions"]))
+        if record.get("actions"):
+            parts.append("Actions: " + "; ".join(record["actions"]))
+        parts.append(f"Type: {record.get('type', '')}")
+        return "\n".join(p for p in parts if p)
+
+    async def _index_meeting(self, record: dict) -> None:
+        """Embed a meeting and add to the index (idempotent; skips on embed failure)."""
+        mid = record.get("id")
+        if not mid or mid in self._index:
+            return
+        text = self._meeting_text(record)
+        vec = await _embeddings.embed(text)
+        if vec is not None:
+            self._index[mid] = {"text": text, "embedding": vec, "ts": record.get("timestamp", "")}
+            self._save_index()
+
+    async def _ensure_indexed(self) -> None:
+        for m in self._meetings:
+            mid = m.get("id")
+            if mid and mid not in self._index:
+                await self._index_meeting(m)
+
     def _write_meeting_to_vault(self, meeting_record: dict) -> None:
         """Writes a meeting record to a Markdown file in the Vesper vault."""
         meeting_id = meeting_record.get("id", "unknown")
@@ -267,52 +310,36 @@ class SemanticMeetingMemory(MeetingMemory):
             logger.error("Failed to write meeting %s to Vesper vault: %s", meeting_id, exc)
 
     async def get_semantic_context(self, query_text: str, limit: int = 3) -> str:
-        """
-        Uses Vesper TF-IDF engine to extract relevant context packets from the vault.
-        First expands the query using an LLM to include synonyms.
+        """Return the most semantically relevant past meetings to query_text.
+
+        Embeds the query and ranks indexed meetings by cosine similarity. No keyword
+        TF-IDF and no LLM query-expansion hack — the embedding captures meaning
+        directly. Degrades to "no context" if the embedding model is unavailable.
         """
         if not query_text:
             return "No query text provided."
 
-        # Expand query using LLM
-        from bot.agents import agent_llm
-        expanded_query = query_text
-        try:
-            prompt = (
-                f"Given the query: '{query_text}', expand it with a few key synonyms "
-                f"(e.g., SOL -> Solana, ETH -> Ethereum, position -> allocation) to improve exact keyword matching. "
-            )
-            expanded_query, _ = await agent_llm.generate_response(
-                agent_id="meeting_chair",  # Reuse meeting_chair's persona lightly
-                context_messages=[
-                    {"role": "system", "content": "You are a query expansion tool for a crypto TF-IDF engine. Respond ONLY with the expanded query string, no other text."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=50
-            )
-            # if it errored out, it will start with [error], so we fallback
-            if expanded_query.startswith("[error]"):
-                expanded_query = query_text
-        except Exception as e:
-            logger.error("Failed to expand query: %s", e)
-            pass
-
-        logger.info("Vesper query expanded to: %s", expanded_query)
-        packet, metadata, err = vesper_engine.generate_context_packet(str(VAULT_DIR), expanded_query, top_k=limit)
-        
-        if err:
-            logger.warning("Vesper search error or no matches: %s", err)
+        await self._ensure_indexed()
+        qvec = await _embeddings.embed(query_text)
+        if qvec is None or not self._index:
             return "No matching meeting context found."
-            
-        return packet
+
+        scored = sorted(
+            ((_embeddings.cosine(qvec, e.get("embedding", [])), e) for e in self._index.values()),
+            key=lambda x: x[0],
+            reverse=True,
+        )
+        top = [e["text"] for sim, e in scored[:limit] if sim > 0.0]
+        if not top:
+            return "No matching meeting context found."
+        return "\n\n---\n\n".join(top)
 
     async def save_meeting(self, meeting_record: dict) -> None:
-        """
-        Saves the meeting to JSON via parent class, and indexes it via Vesper vault.
-        """
+        """Persist the meeting (JSON + markdown vault) and add it to the embedding index."""
         async with self.lock:
             super().save_meeting(meeting_record)
             self._write_meeting_to_vault(meeting_record)
+            await self._index_meeting(meeting_record)
 
 # ---------------------------------------------------------------------------
 # Module-level singleton
