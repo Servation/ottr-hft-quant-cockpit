@@ -100,6 +100,29 @@ def test_order_execution(temp_portfolio):
     assert len(p._state["orders"]) == 0
     assert p._state["holdings"]["SOL"]["quantity"] == 0.0
 
+def test_default_state_has_empty_holdings(temp_portfolio):
+    """A fresh portfolio owns nothing — holdings are derived from trades, never seeded
+    from config. (The old behavior pre-seeded BTC/ETH at qty 0, which read as phantom
+    'holdings'.)"""
+    p = temp_portfolio
+    assert p._state["holdings"] == {}
+    assert p.get_summary({})["holdings"] == {}
+
+
+def test_get_summary_excludes_fully_sold_positions(temp_portfolio):
+    """A fully-sold position lingers in the internal dict at qty 0 (sell keeps the key),
+    but get_summary() must not report it as a holding."""
+    p = temp_portfolio
+    trade = p.buy("ETH", 1000.0, 2000.0)
+    p.sell("ETH", trade["quantity"], 2100.0)  # liquidate the whole position
+
+    # Internal dict still has the key (filter-on-display, not pruned)…
+    assert "ETH" in p._state["holdings"]
+    assert p._state["holdings"]["ETH"]["quantity"] == 0.0
+    # …but it is NOT reported as a holding.
+    assert "ETH" not in p.get_summary({"ETH": {"price": 2100.0}})["holdings"]
+
+
 def test_state_persistence(temp_portfolio, tmp_path):
     """Test state saving and loading."""
     p = temp_portfolio
