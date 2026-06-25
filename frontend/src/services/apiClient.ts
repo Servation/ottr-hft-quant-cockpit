@@ -10,7 +10,8 @@ import {
   TradingConfig,
   ChatMessage,
   OptimizationLogEntry,
-  SystemHealth
+  SystemHealth,
+  MeetingOutcome
 } from '../types';
 
 const API_BASE = '/api/v1';
@@ -187,7 +188,8 @@ export function subscribeToAgentEvents(
   onExecution: (log: ExecutionLogEntry) => void,
   onPortfolio: (portfolio: PortfolioSnapshot) => void,
   onError: () => void,
-  onOptimizationHistory?: (history: OptimizationLogEntry[]) => void
+  onOptimizationHistory?: (history: OptimizationLogEntry[]) => void,
+  onMeetingOutcome?: (outcome: MeetingOutcome) => void
 ): EventSource {
   const eventSource = new EventSource(`${API_BASE}/events/stream`);
 
@@ -238,6 +240,15 @@ export function subscribeToAgentEvents(
       }
     } catch (err) {
       console.error('Error parsing optimization_history SSE event:', err);
+    }
+  });
+
+  eventSource.addEventListener('meeting_outcome', (event: any) => {
+    try {
+      const data = JSON.parse(event.data);
+      if (onMeetingOutcome) onMeetingOutcome(data);
+    } catch (err) {
+      console.error('Error parsing meeting_outcome SSE event:', err);
     }
   });
 

@@ -167,3 +167,12 @@ export interface SystemHealth {
   components: Record<string, ComponentHealth>;
 }
 
+// Tier 4 (O3): a meeting's outcome, pushed live to the dashboard at meeting close.
+export interface MeetingOutcome {
+  id?: string;
+  meeting_type?: string;
+  name?: string;
+  summary?: string;
+  decisions?: string[];
+}
+

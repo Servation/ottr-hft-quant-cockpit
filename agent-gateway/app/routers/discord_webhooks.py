@@ -18,8 +18,8 @@ async def discord_sync(request: Request):
         if not event_type or data is None:
             raise HTTPException(status_code=400, detail="Missing 'event' or 'data' in payload")
 
-        # Valid events expected by the frontend: agent_state, execution, portfolio
-        if event_type in ["agent_state", "execution", "portfolio"]:
+        # Valid events expected by the frontend: agent_state, execution, portfolio, meeting_outcome
+        if event_type in ["agent_state", "execution", "portfolio", "meeting_outcome"]:
             await sse_manager.broadcast(event_type, data)
             logger.info(f"Broadcasted Discord event: {event_type}")
         else:
