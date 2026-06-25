@@ -43,6 +43,11 @@ agent-gateway/portfolio_state.json
 agent-gateway/trade_journal.json
 discord-bridge/data/*
 !discord-bridge/data/.gitkeep
+# Stray repo-root data dir: the canonical data dir is discord-bridge/data, but a
+# CWD-relative write in bot/main.py drops last_startup_meeting.txt into ./data when
+# the bot/tests run from the repo root. Leading slash anchors this to the root so it
+# never matches discord-bridge/data.
+/data/
 
 # Scratch Scripts
 test_funding.py
