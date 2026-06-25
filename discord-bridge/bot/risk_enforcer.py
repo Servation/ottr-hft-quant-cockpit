@@ -19,7 +19,7 @@ import os
 import time
 from typing import Dict, List
 
-from bot import settings, risk, risk_state
+from bot import equity, risk, risk_state, settings
 from bot.audit import audit_event
 from bot.portfolio import portfolio
 
@@ -46,7 +46,7 @@ async def enforce(bot, prices: Dict[str, dict]) -> None:
         now = time.time()
         cooldown = float(cfg.get("action_cooldown_seconds", 900))
         dirty = False
-        stopped: List[str] = []
+        emergencies: List[dict] = []
 
         # R1 — stop-loss: exit any position trading past stop_loss_pct below avg cost.
         holdings = portfolio._state.get("holdings", {})
@@ -61,12 +61,19 @@ async def enforce(bot, prices: Dict[str, dict]) -> None:
             if result in ("sold", "dry_run"):
                 dirty = True
             if result == "sold":
-                stopped.append(action.asset)
+                emergencies.append(
+                    {"asset": action.asset, "direction": "STOP_LOSS", "pct_change": 0.0}
+                )
+
+        # R2 — drawdown circuit breaker: latch a halt on a deep portfolio drawdown.
+        dd_changed, dd_emergencies = await _eval_drawdown(state, prices, cfg, now, bot)
+        dirty = dirty or dd_changed
+        emergencies.extend(dd_emergencies)
 
         if dirty:
             risk_state.save(state)
-        if stopped:
-            await _convene_emergency(bot, stopped)
+        if emergencies:
+            await _convene_emergency(bot, emergencies)
     except Exception:
         # Enforcement must never take down the monitor loop.
         logger.exception("Risk enforcement pass failed")
@@ -129,14 +136,63 @@ async def _post_floor(bot, msg: str) -> None:
         logger.exception("Failed to post risk-control message to audit log")
 
 
-async def _convene_emergency(bot, assets: List[str]) -> None:
-    """Convene one emergency meeting after forced exits, so the desk learns *why* and
+async def _eval_drawdown(state, prices, cfg, now, bot):
+    """Evaluate the portfolio drawdown breaker; mutate the halt latch in `state`.
+
+    Returns (changed, emergencies): whether the latch toggled, and any emergency-meeting
+    alerts to raise. Skips entirely until the equity curve has >= min_curve_points (a thin
+    series must never trip the breaker). The peak is the curve high-water mark vs the live
+    value, so it's responsive at 60s even though the curve only samples hourly.
+    """
+    min_points = int(cfg.get("min_curve_points", 24))
+    values = [
+        float(r["total_value"])
+        for r in equity.load_curve()
+        if isinstance(r, dict) and r.get("total_value") is not None
+    ]
+    if len(values) < min_points:
+        return False, []
+    try:
+        live_value = portfolio.get_total_value(prices)
+    except Exception:
+        logger.exception("Drawdown breaker: failed to value the portfolio")
+        return False, []
+
+    halt_pct = float(cfg.get("max_drawdown_halt_pct", 15.0))
+    resume_pct = float(cfg.get("drawdown_resume_pct", 10.0))
+    peak = max(max(values), live_value)
+    ds = risk.drawdown_state(peak, live_value, halt_pct, resume_pct,
+                             was_halted=bool(state.get("halted", False)))
+
+    if ds.tripped:
+        state["halted"] = True
+        state["halted_since"] = now
+        audit_event("risk_halt", drawdown=round(ds.drawdown, 4), peak=peak,
+                    value=live_value, halt_pct=halt_pct)
+        await _post_floor(bot, (
+            f"🚦 **Trading halted — drawdown breaker:** the book is "
+            f"{ds.drawdown * 100:.1f}% off its peak (limit {halt_pct:.0f}%). New BUYs are "
+            f"blocked until it recovers below {resume_pct:.0f}%; SELLs/de-risking stay open."
+        ))
+        return True, [{"asset": "PORTFOLIO", "direction": "DRAWDOWN_HALT",
+                       "pct_change": round(-ds.drawdown * 100, 2)}]
+    if ds.recovered:
+        state["halted"] = False
+        state["halted_since"] = None
+        audit_event("risk_resume", drawdown=round(ds.drawdown, 4))
+        await _post_floor(bot, (
+            f"✅ **Trading resumed:** drawdown recovered to {ds.drawdown * 100:.1f}% "
+            f"(below the {resume_pct:.0f}% resume line). New BUYs re-enabled."
+        ))
+        return True, []
+    return False, []
+
+
+async def _convene_emergency(bot, alert_data: List[dict]) -> None:
+    """Convene one emergency meeting after forced actions, so the desk learns *why* and
     doesn't immediately re-enter what the controls just unwound."""
     try:
         from bot.scheduler import meeting_scheduler
-        alert_data = [
-            {"asset": a, "direction": "STOP_LOSS", "pct_change": 0.0} for a in assets
-        ]
         await meeting_scheduler.schedule_emergency(alert_data)
     except Exception:
-        logger.exception("Failed to convene emergency meeting after risk exits")
+        logger.exception("Failed to convene emergency meeting after risk action")

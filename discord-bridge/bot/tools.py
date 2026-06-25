@@ -79,7 +79,7 @@ ACTION_TOOLS = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "name": {"type": "string", "enum": ["min_trade_usd"], "description": "The parameter to update"},
+                    "name": {"type": "string", "enum": ["min_trade_usd", "risk_halt"], "description": "The parameter to update"},
                     "value": {"type": "number", "description": "The new value"}
                 },
                 "required": ["name", "value"]
@@ -201,6 +201,23 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             if asset not in prices:
                 return f"Error: Price for {asset} not found."
             price = prices[asset]["price"]
+
+            # Drawdown circuit breaker (Tier 3 R2): while the breaker is latched, block
+            # new BUYs (SELLs stay allowed so the desk can de-risk). Dark unless
+            # risk_limits.enabled, so this is a no-op until enforcement is activated.
+            if action == "BUY" and settings.get("risk_limits", {}).get("enabled", False):
+                from bot import risk_state
+                if risk_state.load().get("halted"):
+                    msg = (
+                        "🚦 **Trading halted:** the portfolio drawdown breaker is active, so "
+                        "new BUYs are blocked until it resumes. De-risking SELLs are still allowed."
+                    )
+                    logger.warning("Drawdown halt blocked BUY %s $%.2f", asset, amount)
+                    audit_event("trade_blocked", reason="drawdown_halt", action=action,
+                                asset=asset, notional=amount)
+                    if audit_log_fn:
+                        await audit_log_fn(msg)
+                    return msg
 
             # Authorization gate: cap the notional size of any single trade so a
             # runaway or prompt-injected order cannot exceed a safe limit. BUY
@@ -326,6 +343,23 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                 portfolio.min_trade_usd = value
                 audit_event("param_change", name="min_trade_usd", old=old_value, new=value)
                 msg = f"⚙️ **Parameter Updated:** `min_trade_usd` set to **${value:.2f}**"
+                if post_message_fn:
+                    await post_message_fn("portfolio_manager", msg)
+                if audit_log_fn:
+                    await audit_log_fn(msg)
+                return msg
+            if name == "risk_halt":
+                # Manual operator override of the Tier 3 drawdown breaker: value 0 clears
+                # the halt (resume), any nonzero value latches it. Audited either way.
+                from bot import risk_state
+                state = risk_state.load()
+                old_halt = bool(state.get("halted", False))
+                state["halted"] = bool(value)
+                if not state["halted"]:
+                    state["halted_since"] = None
+                risk_state.save(state)
+                audit_event("param_change", name="risk_halt", old=old_halt, new=state["halted"])
+                msg = f"🚦 **Risk halt {'SET' if state['halted'] else 'CLEARED'}** (drawdown breaker)."
                 if post_message_fn:
                     await post_message_fn("portfolio_manager", msg)
                 if audit_log_fn:
