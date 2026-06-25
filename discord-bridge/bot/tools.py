@@ -66,7 +66,8 @@ ACTION_TOOLS = [
                 "properties": {
                     "action": {"type": "string", "enum": ["BUY", "SELL"], "description": "The action to perform"},
                     "asset": {"type": "string", "description": "The ticker symbol (e.g. BTC)"},
-                    "amount": {"type": "number", "description": "The amount in USD for BUY, or quantity for SELL."}
+                    "amount": {"type": "number", "description": "The amount in USD for BUY, or quantity for SELL."},
+                    "reasoning": {"type": "string", "description": "A brief one-sentence justification for the trade (the signal/consensus behind it). Recorded in the audit log and shown in the dashboard's decision feed."}
                 },
                 "required": ["action", "asset", "amount"]
             }
@@ -204,7 +205,8 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
             action = arguments.get("action", "").upper()
             asset = arguments.get("asset", "").upper()
             amount = float(arguments.get("amount", 0))
-            
+            reasoning = str(arguments.get("reasoning", "")).strip()[:500]
+
             prices = await price_feed.get_prices()
             if asset not in prices:
                 return f"Error: Price for {asset} not found."
@@ -322,9 +324,10 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                     amount = sized
 
             if action == "BUY":
-                trade = portfolio.buy(asset, amount, price)
+                trade = portfolio.buy(asset, amount, price, reasoning=reasoning)
                 audit_event("trade", action="BUY", asset=asset, usd_amount=amount,
-                            quantity=trade["quantity"], fill_price=trade["fill_price"])
+                            quantity=trade["quantity"], fill_price=trade["fill_price"],
+                            reasoning=reasoning)
                 webhooks.publish_trade(trade, portfolio, prices)  # live SSE feed (O0)
                 msg = f"💰 **Trade Executed:** **BUY** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}**"
                 if post_message_fn:
@@ -333,9 +336,9 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                     await audit_log_fn(msg)
                 return msg
             elif action == "SELL":
-                trade = portfolio.sell(asset, amount, price)
+                trade = portfolio.sell(asset, amount, price, reasoning=reasoning)
                 audit_event("trade", action="SELL", asset=asset, quantity=trade["quantity"],
-                            fill_price=trade["fill_price"])
+                            fill_price=trade["fill_price"], reasoning=reasoning)
                 webhooks.publish_trade(trade, portfolio, prices)  # live SSE feed (O0)
                 msg = f"💰 **Trade Executed:** **SELL** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}**"
                 if post_message_fn:
