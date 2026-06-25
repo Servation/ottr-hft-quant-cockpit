@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 # Load environment before any bot-internal imports
 load_dotenv()
 
-from bot import settings
+from bot import settings, PROJECT_ROOT
 from bot.agents import AGENTS
 from bot.scheduler import meeting_scheduler
 from bot.ceo_handler import ceo_handler
@@ -141,7 +141,10 @@ class TradingFloorBot(discord.Client):
         await asyncio.sleep(10)  # let everything settle
         
         import os, time
-        last_meeting_file = "data/last_startup_meeting.txt"
+        # Absolute path (via PROJECT_ROOT) so the marker always lands in
+        # discord-bridge/data regardless of the process CWD; a relative "data/..."
+        # path strands a stray data/ dir at the repo root when launched from there.
+        last_meeting_file = PROJECT_ROOT / "data" / "last_startup_meeting.txt"
         try:
             if os.path.exists(last_meeting_file):
                 with open(last_meeting_file, "r") as f:
@@ -161,7 +164,7 @@ class TradingFloorBot(discord.Client):
             await meeting_scheduler._execute_meeting(emergency_data=None)
             
             try:
-                os.makedirs("data", exist_ok=True)
+                os.makedirs(last_meeting_file.parent, exist_ok=True)
                 with open(last_meeting_file, "w") as f:
                     f.write(str(time.time()))
             except Exception:

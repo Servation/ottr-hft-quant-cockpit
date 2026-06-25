@@ -66,22 +66,21 @@ async def test_startup_meeting_logic(bot, tmp_path, mocker):
     mocker.patch("asyncio.sleep", new_callable=AsyncMock)
     mocker.patch("bot.scheduler.meeting_scheduler._execute_meeting", new_callable=AsyncMock)
     
+    # The marker lives under PROJECT_ROOT/data; point it at a temp dir so the test is
+    # CWD-independent and never pollutes the real data dir.
+    mocker.patch("bot.main.PROJECT_ROOT", tmp_path)
+
     bot._trading_floor_channel = MagicMock()
     bot._trading_floor_channel.send = AsyncMock()
-    
-    original_cwd = os.getcwd()
-    os.chdir(tmp_path)
-    try:
-        os.makedirs("data", exist_ok=True)
-        # Test meeting execution
-        await bot._startup_meeting()
-        assert os.path.exists("data/last_startup_meeting.txt")
-        
-        # Test skip
-        await bot._startup_meeting()
-        bot._trading_floor_channel.send.assert_awaited_once() # Only called once from the first time
-    finally:
-        os.chdir(original_cwd)
+
+    marker = tmp_path / "data" / "last_startup_meeting.txt"
+    # First call runs the meeting and writes the marker.
+    await bot._startup_meeting()
+    assert marker.exists()
+
+    # Second call sees the recent marker and skips (cooldown).
+    await bot._startup_meeting()
+    bot._trading_floor_channel.send.assert_awaited_once()  # only the first call sends
 
 @pytest.mark.asyncio
 async def test_post_as_agent_splitting(bot, mocker):
