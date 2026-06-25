@@ -19,7 +19,7 @@ import os
 import time
 from typing import Dict, List
 
-from bot import equity, risk, risk_state, settings
+from bot import equity, risk, risk_state, settings, webhooks
 from bot.audit import audit_event
 from bot.portfolio import portfolio
 
@@ -149,6 +149,7 @@ async def _execute_risk_action(action, prices, state, now, cooldown, bot) -> str
     audit_event("risk_action", action=action.kind, asset=asset,
                 quantity=trade["quantity"], fill_price=trade["fill_price"],
                 reason=action.reason, detail=action.detail)
+    webhooks.publish_trade(trade, portfolio, prices)  # live SSE feed (O0)
     msg = (
         f"🛑 **Risk control [{action.kind}]:** SELL {trade['quantity']:.8f} {asset} "
         f"@ ${trade['fill_price']:,.2f}\n{action.reason}"

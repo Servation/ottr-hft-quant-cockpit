@@ -6,6 +6,7 @@ from bot.scheduler import meeting_scheduler
 from bot.audit import audit_event
 from bot import settings
 from bot import sizing
+from bot import webhooks
 
 logger = logging.getLogger(__name__)
 
@@ -324,6 +325,7 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                 trade = portfolio.buy(asset, amount, price)
                 audit_event("trade", action="BUY", asset=asset, usd_amount=amount,
                             quantity=trade["quantity"], fill_price=trade["fill_price"])
+                webhooks.publish_trade(trade, portfolio, prices)  # live SSE feed (O0)
                 msg = f"💰 **Trade Executed:** **BUY** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}**"
                 if post_message_fn:
                     await post_message_fn("portfolio_manager", msg)
@@ -334,6 +336,7 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                 trade = portfolio.sell(asset, amount, price)
                 audit_event("trade", action="SELL", asset=asset, quantity=trade["quantity"],
                             fill_price=trade["fill_price"])
+                webhooks.publish_trade(trade, portfolio, prices)  # live SSE feed (O0)
                 msg = f"💰 **Trade Executed:** **SELL** {trade['quantity']:.8f} {asset} @ **${trade['fill_price']:,.2f}**"
                 if post_message_fn:
                     await post_message_fn("portfolio_manager", msg)
