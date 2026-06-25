@@ -103,6 +103,10 @@ AGENTS: Dict[str, AgentPersona] = {
 }
 
 
+# Backoff before retrying an empty (no-side-effect) LLM response. Brief, so it
+# doesn't slow a healthy meeting, but enough for a momentarily-busy backend to settle.
+_EMPTY_RETRY_BACKOFF_SEC = 0.8
+
 # Shared desk rules prepended to every agent's system prompt at inference time.
 # Kept here (not in the persona files) so it sits ABOVE the strippable OUTPUT FORMAT
 # section and applies uniformly. The regime rule converts the backtested edge —
@@ -186,6 +190,7 @@ class AgentLLM:
         tools: Optional[list[dict]] = None,
         tool_handler: Optional[Callable] = None,
         strip_output_format: bool = False,
+        _allow_retry: bool = True,
     ) -> Tuple[str, float]:
         """
         Generate a chat completion for the given agent.
@@ -356,6 +361,23 @@ class AgentLLM:
             final_content = re.sub(r"^\s*<\|?channel\|?>-?\s*", "", final_content, flags=re.IGNORECASE)
 
             final_content = final_content.strip()
+
+            # Retry once on an EMPTY response that had no side effects. Local LLMs
+            # occasionally return an empty completion (backend momentarily busy /
+            # loading); without this an agent's whole turn — and its vote — is lost.
+            # Guarded to no-tool turns so a retry can never re-execute a trade, and to
+            # one attempt so a persistently-empty model can't loop.
+            if _allow_retry and not final_content and not executed_tool_signatures:
+                logger.warning(
+                    "Empty LLM response for %s; retrying once after %.1fs backoff",
+                    agent_id, _EMPTY_RETRY_BACKOFF_SEC,
+                )
+                await asyncio.sleep(_EMPTY_RETRY_BACKOFF_SEC)
+                return await self.generate_response(
+                    agent_id, context_messages, max_tokens=max_tokens, tools=tools,
+                    tool_handler=tool_handler, strip_output_format=strip_output_format,
+                    _allow_retry=False,
+                )
 
             logger.info(
                 "LLM response for %s in %.2fs (%d chars)",

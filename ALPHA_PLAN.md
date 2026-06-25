@@ -42,9 +42,13 @@ unanimous `ABSTAIN` with explicit "CHOPPY regime → trend signals are noise" re
 (2) the debate prompt no longer uses `[BRACKET]` placeholders the model copied
 literally, and the vote parser (`_VOTE_RE`) tolerates `[HOLD]`/`**SELL**` so votes
 aren't silently dropped; (3) consensus weights a vote by **credibility** (non-negative)
-so a unanimous BUY by below-average agents can't tally as SELL. Also noted: the local
-model **degrades under sustained sequential load** (fresh = perfect; many back-to-back
-calls = malformed) — a real operational characteristic for long 7-agent meetings.
+so a unanimous BUY by below-average agents can't tally as SELL. (4) Resilience: a
+transient empty completion (a momentarily-busy local backend) used to drop an agent's
+whole turn/vote; `generate_response` now **retries once** on an empty, no-side-effect
+response — guarded so it can never re-execute a trade and can't loop. _(A 20-call
+stress run came back 20/20 clean, so the degradation is rare/transient, not systematic;
+the retry + its log line are cheap insurance plus the observability to learn the true
+frequency.)_
 
 **Signal-tuning finding (cross-asset: BTC/ETH/SOL, real daily):** signal weights are
 now configurable (`DEFAULT`/`TREND`/`TREND_TILT`) and validated across three assets
