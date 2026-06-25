@@ -18,10 +18,13 @@ The system relies on a dual-trigger scheduler (4-hour cron + agent-invoked dynam
 
 ### Short-Term & Semantic Long-Term Memory
 - **Short-Term Context**: Agents automatically fetch the recent messages in the Discord channel for fluid follow-up conversations.
-- **Long-Term Context**: Transcripts of every trading meeting and decision are saved as Markdown files in a local vault. During live responses or new meetings, the bot uses the **Vesper Text** engine (TF-IDF semantic search) to pull historical context packets that match current market conditions.
+- **Long-Term Context**: Transcripts of every trading meeting and decision are saved as Markdown files in a local vault. During live responses or new meetings, the bot embeds each meeting and uses **cosine similarity over local LLM embeddings** (served by the same LM Studio backend, cached in `data/embeddings_index.json`) to pull historical context packets that match current market conditions.
 
 ### Market Data Guardrails & Execution Autonomy
-Agents execute trades using native system tools. The `bot/price_feed.py` automatically falls back between multiple data APIs (CoinGecko -> CoinCap). If APIs fail, it injects highly-visible "Stale Data" warnings into the agent context, allowing the Risk Auditor to dynamically adapt to lagging data.
+Agents execute trades using native system tools. `bot/price_feed.py` pulls spot prices + 14-day volatility from CoinGecko (with a cached fallback) and daily OHLC from Kraken to compute the technical indicators that drive the deterministic signal layer. A price-outlier guard rejects glitch ticks (e.g. a bogus $100k BTC print), stale data injects highly-visible "Stale Data" warnings into the agent context, and the feed **fails loud** — it never fabricates a $0.00 price, serving the last-good cache or aborting the meeting rather than trading on missing data.
+
+### Tradeable Universe & Autonomous Risk Controls
+The desk trades a fixed **universe** of 8 liquid assets — BTC, ETH, SOL, XRP, ADA, DOGE, LINK, AVAX (every coin with Kraken-backed indicators) — defined once in `bot/universe.py`. This **watchlist** (what the agents analyze and may trade) is kept distinct from **holdings** (what's actually owned, derived from executed trades); every meeting takes a BUY/SELL/HOLD stance on each watchlist asset. On top of the agents' decisions, a deterministic risk layer runs autonomously every cycle: volatility-target position sizing, per-asset concentration caps, an autonomous stop-loss, a portfolio drawdown circuit-breaker, and a concentration trim. A `TRADING_DRY_RUN` kill-switch blocks all trade execution, and state-changing API endpoints require a shared `OTTR_API_KEY`.
 
 ---
 
@@ -30,16 +33,17 @@ Agents execute trades using native system tools. The `bot/price_feed.py` automat
 ```mermaid
 graph TD
     UI[React / Vite SPA • Port 3000] <-->|CEO Directives & SSE Stream| PY[FastAPI Agent Gateway • Port 8000]
-    PY <-->|Proxy Messaging| DB[Discord Bridge Bot]
-    DB <-->|API Calls / Market Data| CG[CoinGecko / Market API]
+    PY <-->|Proxy Messaging + Shared Portfolio State| DB[Discord Bridge Bot • Port 8001]
+    DB <-->|Spot + Daily OHLC| CG[CoinGecko / Kraken]
+    DB <-->|Chat + Embeddings| LM[LM Studio • Port 1234]
     DB <-->|Live Context & Routing| DIS[Discord #trading-floor]
 ```
 
 ### Microservices
 
 1. **Discord Bridge (`/discord-bridge`)**
-   - **Stack**: Python 3.12, Discord.py, Local JSON/Markdown state, Vesper TF-IDF Engine (scikit-learn).
-   - **Role**: **The single source of truth for the system.** Connects the 7 OTTR agents to a Discord channel (`#trading-floor`). Features a Live LLM Intent Router, semantic memory, portfolio state management, and a fully functional order book simulator.
+   - **Stack**: Python 3.12, Discord.py, aiohttp API (port 8001), local JSON/Markdown state, LLM-embedding semantic memory.
+   - **Role**: **The single source of truth for the system.** Connects the 7 OTTR agents to a Discord channel (`#trading-floor`), and is the sole writer of portfolio state. Features a Live LLM Intent Router, semantic memory, portfolio + risk-enforcement management, and a fully functional order book simulator. Talks to a local **LM Studio** backend (`:1234`) for all chat completions and embeddings.
 2. **Frontend (`/frontend`)**
    - **Stack**: React 19, Vite 6, Tailwind CSS v4, Lucide Icons.
    - **Role**: High-fidelity trading terminal. Features a clean, flat-design 7-agent status grid and a live directive input terminal.
@@ -64,6 +68,8 @@ d:\crypto-trading-bot/
 ---
 
 ## Quickstart: Run via Docker Compose
+
+> **Prerequisite — local LLM:** OTTR runs against a local OpenAI-compatible LLM. Start **[LM Studio](https://lmstudio.ai/)** (or an equivalent server) hosting a chat model **and** an embedding model at `http://localhost:1234/v1` before launching. In Docker the stack reaches it via `LLM_BASE_URL` (defaults to `http://host.docker.internal:1234/v1`).
 
 Make sure you have [Docker](https://www.docker.com/) and Docker Compose installed, then follow these steps:
 
@@ -90,7 +96,7 @@ Make sure you have [Docker](https://www.docker.com/) and Docker Compose installe
 If you prefer to run services individually without Docker:
 
 ### 1. Discord Bridge
-Ensure you have **Python 3.12+** installed and your `DISCORD_TOKEN` set in `.env`:
+Ensure you have **Python 3.12+** installed (required — `pandas-ta` needs 3.12), your `DISCORD_TOKEN` set in `.env`, and **LM Studio** running at `http://localhost:1234/v1` (override via `LLM_BASE_URL`):
 ```bash
 cd discord-bridge
 python -m venv .venv
