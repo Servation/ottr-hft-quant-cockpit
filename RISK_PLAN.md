@@ -180,9 +180,10 @@ Tasks:
 - [x] **Resume** — auto-unlatch when drawdown recovers below `drawdown_resume_pct`
   (hysteresis from R0); also expose a manual reset (a tool / CEO directive, audited).
   The latch persists, so a restart mid-drawdown does **not** silently resume buying.
-- [~] **Optional auto-de-risk** — `drawdown_auto_derisk` (default **false**): when true,
-  on trip also trim the most-concentrated / worst positions via the R3 path. Conservative
-  default is halt-only; forced liquidation is opt-in.
+- [x] **Optional auto-de-risk** — `drawdown_auto_derisk` (default **false**): when true,
+  a trip also sells `drawdown_derisk_pct` (25%) of every position to cut gross exposure,
+  not just block new buys. Conservative default is halt-only; forced liquidation is opt-in.
+  _(F4: shipped dark behind the flag.)_
 - [x] **Tests** — breaker trips at the halt threshold, holds through the hysteresis band,
   clears below resume; a halted state blocks a BUY in `execute_trade` but allows a SELL;
   the latch round-trips through `risk_state.json`; a thin curve never trips.

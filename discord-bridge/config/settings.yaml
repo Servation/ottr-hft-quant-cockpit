@@ -43,7 +43,8 @@ risk_limits:
   # halt_pct; only clear once it recovers below resume_pct (hysteresis stops flapping).
   max_drawdown_halt_pct: 15.0
   drawdown_resume_pct: 10.0
-  drawdown_auto_derisk: false  # halt-only by default; true also trims risk on a trip (R2 option)
+  drawdown_auto_derisk: false  # halt-only by default; true also de-risks the book on a trip
+  drawdown_derisk_pct: 25.0    # if auto-de-risk is on, sell this % of each position on a trip
   # Concentration trim (R3): trim a position once its weight exceeds its cap by this band.
   concentration_trim_band_pct: 5.0
   # Shared guards: min seconds between forced actions on the same asset, and the min

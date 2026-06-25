@@ -44,7 +44,9 @@ What runs once enabled:
   `max_drawdown_halt_pct` (15%), new BUYs are blocked (`trade_blocked
   reason=drawdown_halt`); SELLs/de-risking stay open. Auto-resumes once drawdown
   recovers below `drawdown_resume_pct` (10%). Latched + persisted in
-  `data/risk_state.json`, so a restart mid-drawdown does not silently resume buying.
+  `data/risk_state.json`, so a restart mid-drawdown does not silently resume buying. Set
+  `drawdown_auto_derisk: true` to also actively sell `drawdown_derisk_pct` (25%) of each
+  position on a trip (forced liquidation; off by default).
 - **Concentration trim** — a position over its cap
   (`thresholds.max_asset_exposure_pct` / per-asset overrides like
   `max_sol_exposure_pct`) by `concentration_trim_band_pct` (5%) is trimmed back to

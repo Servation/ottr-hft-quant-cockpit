@@ -209,6 +209,8 @@ async def _eval_drawdown(state, prices, cfg, now, bot):
             f"{ds.drawdown * 100:.1f}% off its peak (limit {halt_pct:.0f}%). New BUYs are "
             f"blocked until it recovers below {resume_pct:.0f}%; SELLs/de-risking stay open."
         ))
+        if cfg.get("drawdown_auto_derisk"):
+            await _derisk(state, prices, cfg, now, bot)
         return True, [{"asset": "PORTFOLIO", "direction": "DRAWDOWN_HALT",
                        "pct_change": round(-ds.drawdown * 100, 2)}]
     if ds.recovered:
@@ -221,6 +223,31 @@ async def _eval_drawdown(state, prices, cfg, now, bot):
         ))
         return True, []
     return False, []
+
+
+async def _derisk(state, prices, cfg, now, bot) -> None:
+    """Optional auto-de-risk on a drawdown trip (`drawdown_auto_derisk`, default off):
+    actively sell a fixed fraction of every position to cut gross exposure, beyond just
+    blocking new buys. The breaker trips once per latch cycle, so this runs once per trip.
+    Each forced sell still goes through the kill-switch / cooldown / audit path."""
+    pct = float(cfg.get("drawdown_derisk_pct", 25.0))
+    if pct <= 0:
+        return
+    cooldown = float(cfg.get("action_cooldown_seconds", 900))
+    holdings = portfolio._state.get("holdings", {})
+    for asset, h in list(holdings.items()):
+        qty = float(h.get("quantity", 0.0) or 0.0)
+        if qty <= 0:
+            continue
+        sell_qty = qty * pct / 100.0
+        if sell_qty <= 0:
+            continue
+        action = risk.RiskAction(
+            kind="DRAWDOWN_DERISK", asset=asset, sell_qty=sell_qty,
+            reason=f"drawdown de-risk: trimming {pct:.0f}% of {asset} to cut exposure",
+            detail={"derisk_pct": pct, "from_qty": qty},
+        )
+        await _execute_risk_action(action, prices, state, now, cooldown, bot)
 
 
 async def _eval_concentration(holdings, prices, state, now, cooldown, bot, cfg) -> bool:

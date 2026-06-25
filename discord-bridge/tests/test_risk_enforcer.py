@@ -179,3 +179,24 @@ def test_update_highs_ratchets_and_resets():
     # Position closed -> the trail resets so the next entry starts fresh.
     risk_enforcer._update_highs(state, {"BTC": {"quantity": 0.0, "avg_cost": 0.0}}, _prices(BTC=150.0))
     assert "BTC" not in state["highs"]
+
+
+# ── F4: drawdown auto-de-risk (opt-in) ────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_drawdown_auto_derisk_trims_on_trip(fake_bot, patched, monkeypatch):
+    # With drawdown_auto_derisk on, a tripping drawdown also sells a fraction of holdings.
+    monkeypatch.setitem(risk_enforcer.settings, "risk_limits", {
+        "max_drawdown_halt_pct": 15.0, "drawdown_resume_pct": 10.0, "min_curve_points": 24,
+        "drawdown_auto_derisk": True, "drawdown_derisk_pct": 25.0,
+    })
+    monkeypatch.setitem(risk_enforcer.settings, "thresholds", {})   # isolate from the trim path
+    monkeypatch.setattr(risk_enforcer.equity, "load_curve", lambda: [{"total_value": 100.0}] * 30)
+    monkeypatch.setattr(risk_enforcer.portfolio, "get_total_value", lambda p: 80.0)   # -20% -> trip
+    monkeypatch.setattr(risk_enforcer.portfolio, "_state",
+                        {"holdings": _holdings(BTC=(1.0, 100.0))})
+    # BTC at 95 (vs avg 100) is -5%: no stop-loss, so the only sell is the de-risk.
+    await risk_enforcer.enforce(fake_bot, _prices(BTC=95.0))
+    sold = [call.args for call in patched.call_args_list]
+    assert any(a[0] == "BTC" and abs(a[1] - 0.25) < 1e-9 for a in sold)   # sold 25% of 1.0 BTC
+    assert risk_state.load()["halted"] is True
