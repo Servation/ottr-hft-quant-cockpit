@@ -35,6 +35,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Startup-meeting throttle marker. Module-level (via PROJECT_ROOT) so it always lands in
+# discord-bridge/data regardless of CWD, and so tests can redirect it to a temp dir like
+# every other data/ writer (the conftest data-isolation fixture monkeypatches this).
+LAST_STARTUP_MEETING_FILE = PROJECT_ROOT / "data" / "last_startup_meeting.txt"
+
 # Discord.py internal noise reduction
 logging.getLogger("discord").setLevel(logging.WARNING)
 logging.getLogger("discord.http").setLevel(logging.WARNING)
@@ -141,10 +146,7 @@ class TradingFloorBot(discord.Client):
         await asyncio.sleep(10)  # let everything settle
         
         import os, time
-        # Absolute path (via PROJECT_ROOT) so the marker always lands in
-        # discord-bridge/data regardless of the process CWD; a relative "data/..."
-        # path strands a stray data/ dir at the repo root when launched from there.
-        last_meeting_file = PROJECT_ROOT / "data" / "last_startup_meeting.txt"
+        last_meeting_file = LAST_STARTUP_MEETING_FILE
         try:
             if os.path.exists(last_meeting_file):
                 with open(last_meeting_file, "r") as f:

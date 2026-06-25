@@ -33,22 +33,20 @@ def isolated_portfolio(initial_state: dict | None = None):
     from bot import portfolio as pf_mod
     from bot.portfolio import portfolio
 
+    orig_dir = pf_mod._DATA_DIR
     orig_file = pf_mod._PORTFOLIO_FILE
     orig_state = copy.deepcopy(portfolio._state)
 
-    # Create the throwaway file in the SAME directory as the live file. save()
-    # writes atomically via tempfile + os.replace(), which requires the temp and
-    # destination to share a filesystem, so an isolated file on /tmp would fail
-    # with a cross-device link error.
-    state_dir = Path(orig_file).parent
-    state_dir.mkdir(parents=True, exist_ok=True)
-    fd, tmp_path = tempfile.mkstemp(suffix=".json", prefix="eval_portfolio_", dir=str(state_dir))
-    os.close(fd)
-
-    # load() / save() read the module global by name, so reassigning it here
-    # transparently redirects all reads/writes for the singleton AND any new
-    # Portfolio() instances created inside the block.
-    pf_mod._PORTFOLIO_FILE = Path(tmp_path)
+    # Redirect BOTH the data dir and the state file to a throwaway temp DIR (never the
+    # live data dir). save() does mkstemp(dir=_DATA_DIR) + os.replace() onto
+    # _PORTFOLIO_FILE; keeping both inside the same temp dir means the atomic write
+    # stays on one filesystem (no cross-device error) AND never churns a portfolio_*.tmp
+    # or eval_portfolio_*.json into the live data dir on a failed/interrupted cleanup.
+    # load()/save() read these module globals by name, so reassigning them redirects the
+    # singleton and any new Portfolio() instance created inside the block.
+    tmpdir = Path(tempfile.mkdtemp(prefix="eval_portfolio_"))
+    pf_mod._DATA_DIR = tmpdir
+    pf_mod._PORTFOLIO_FILE = tmpdir / "portfolio_state.json"
 
     try:
         if initial_state is not None:
@@ -56,12 +54,10 @@ def isolated_portfolio(initial_state: dict | None = None):
         portfolio.save()
         yield portfolio
     finally:
+        pf_mod._DATA_DIR = orig_dir
         pf_mod._PORTFOLIO_FILE = orig_file
         portfolio._state = orig_state
-        try:
-            os.remove(tmp_path)
-        except OSError:
-            pass
+        shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 @contextlib.contextmanager

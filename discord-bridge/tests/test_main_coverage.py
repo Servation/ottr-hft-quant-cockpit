@@ -66,14 +66,15 @@ async def test_startup_meeting_logic(bot, tmp_path, mocker):
     mocker.patch("asyncio.sleep", new_callable=AsyncMock)
     mocker.patch("bot.scheduler.meeting_scheduler._execute_meeting", new_callable=AsyncMock)
     
-    # The marker lives under PROJECT_ROOT/data; point it at a temp dir so the test is
-    # CWD-independent and never pollutes the real data dir.
-    mocker.patch("bot.main.PROJECT_ROOT", tmp_path)
+    # The marker is bot.main.LAST_STARTUP_MEETING_FILE (a module constant). Redirect it to a
+    # temp file so the test is CWD-independent and never pollutes the real data dir; this also
+    # overrides the conftest data-isolation fixture's redirect for this test's own assertion.
+    marker = tmp_path / "last_startup_meeting.txt"
+    mocker.patch("bot.main.LAST_STARTUP_MEETING_FILE", marker)
 
     bot._trading_floor_channel = MagicMock()
     bot._trading_floor_channel.send = AsyncMock()
 
-    marker = tmp_path / "data" / "last_startup_meeting.txt"
     # First call runs the meeting and writes the marker.
     await bot._startup_meeting()
     assert marker.exists()
