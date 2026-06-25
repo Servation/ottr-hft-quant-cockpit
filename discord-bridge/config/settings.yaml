@@ -14,7 +14,6 @@ meeting_rotation:
 thresholds:
   emergency_price_drop_pct: 5.0
   emergency_price_spike_pct: 8.0
-  stop_loss_pct: 10.0
   # Midas/Zephyr: hard cap on SOL as a % of total portfolio value.
   # Any BUY that would push SOL above this is blocked at the execution gate.
   max_sol_exposure_pct: 20.0
@@ -28,6 +27,29 @@ sizing:
   target_risk_pct: 2.0        # risk budget per position, % of total (vs annualized vol)
   choppy_regime_factor: 0.25  # multiply size in a CHOPPY regime
   max_position_pct: 50.0      # a single BUY never exceeds this % of total value
+
+# Tier 3 (R0) — autonomous risk-limit ENFORCEMENT knobs, read by bot/risk.py policies
+# and the enforcer wired in from R1. `enabled` is the master switch and stays OFF until
+# the enforcement phases (R1-R3) land and are reviewed; at R0 nothing reads these at
+# runtime yet. Concentration caps stay in `thresholds` above (the buy gate + R3 trim
+# share them); this block holds the new stop-loss / drawdown / cooldown knobs.
+risk_limits:
+  enabled: false               # master switch for autonomous enforcement (off until R1+)
+  check_interval_seconds: 60   # reuse the 60s alert-loop cadence
+  # Stop-loss (R1): exit a position once it trades this far below its average cost.
+  stop_loss_pct: 10.0          # promoted from the old (unused) thresholds.stop_loss_pct
+  stop_loss_mode: avg_cost     # avg_cost | trailing (trailing reserved for an R1 extension)
+  # Drawdown breaker (R2): halt new BUYs when portfolio drawdown from its peak exceeds
+  # halt_pct; only clear once it recovers below resume_pct (hysteresis stops flapping).
+  max_drawdown_halt_pct: 15.0
+  drawdown_resume_pct: 10.0
+  drawdown_auto_derisk: false  # halt-only by default; true also trims risk on a trip (R2 option)
+  # Concentration trim (R3): trim a position once its weight exceeds its cap by this band.
+  concentration_trim_band_pct: 5.0
+  # Shared guards: min seconds between forced actions on the same asset, and the min
+  # equity-curve points before the drawdown breaker may trip (fail-loud on a thin series).
+  action_cooldown_seconds: 900
+  min_curve_points: 24
 
 portfolio:
   starting_balance: 10000

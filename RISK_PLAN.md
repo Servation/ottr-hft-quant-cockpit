@@ -45,7 +45,8 @@ cooldown'd** (no double-fire on a 60s tick), **fails loud on missing data**, and
 **audited**. Gate every change on `pytest -k "not live"` (225) + `run_evals.py
 --no-llm` (3); add a test for every behavior change.
 
-**Status:** PLANNING — nothing implemented. Awaiting review.
+**Status:** R0 COMPLETE (pure policy core + latch + config; inert, `enabled: false`,
+wired into nothing). R1-R4 pending.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -79,7 +80,7 @@ Concrete targets:
 - `config/settings.yaml` — a new `risk_limits` block.
 
 Tasks:
-- [ ] **`bot/risk.py` pure policies**, each returning structured `RiskAction`s
+- [x] **`bot/risk.py` pure policies**, each returning structured `RiskAction`s
   (`{kind, asset, qty|usd, reason, detail}`), never executing:
   - `stop_loss_breaches(holdings, prices, stop_pct, mode)` — positions where
     `(price - avg_cost)/avg_cost <= -stop_pct` (mode `avg_cost`; `trailing` reserved
@@ -91,18 +92,18 @@ Tasks:
     `cap + band`; emits a partial SELL action sized to bring the weight back to the
     cap. Reads the **same** keys as the buy gate (`max_asset_exposure_pct`,
     per-asset overrides) so block and trim never disagree.
-- [ ] **Risk state (latch only)** — `bot/risk.py` (or a tiny `risk_state.py`) persists
+- [x] **Risk state (latch only)** — `bot/risk.py` (or a tiny `risk_state.py`) persists
   just `{halted, halted_since, last_action_ts: {asset: ts}}` to `risk_state.json` via
   the same atomic-write pattern as `portfolio.save()`. The drawdown **peak** is
   *derived from the equity curve* (`equity.load_curve()` max, vs the live value),
   **not** persisted — the curve stays the single source of truth; only the latch +
   per-asset cooldowns need to survive a restart.
-- [ ] **Config** — add `risk_limits` to `settings.yaml` (enable flags, `stop_loss_pct`
+- [x] **Config** — add `risk_limits` to `settings.yaml` (enable flags, `stop_loss_pct`
   promoted here, `max_drawdown_halt_pct`, `drawdown_resume_pct`,
   `concentration_trim_band_pct`, `action_cooldown_seconds`, `min_curve_points`,
   `drawdown_auto_derisk: false`). Keep the existing `thresholds.*` concentration caps
   where they are (R3 reads them); document that `risk_limits` holds the *new* knobs.
-- [ ] **Tests** — `tests/test_risk.py`: each policy on fixed inputs (stop trips at the
+- [x] **Tests** — `tests/test_risk.py`: each policy on fixed inputs (stop trips at the
   threshold and not above it; drawdown hysteresis trips/holds/clears; trim sizes the
   excess correctly and ignores a within-band position; missing/`<=0` price yields **no**
   action, never a bad one).
