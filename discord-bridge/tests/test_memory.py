@@ -88,3 +88,30 @@ def test_cosine_similarity():
     assert cosine([1.0, 0.0], [1.0, 0.0]) == pytest.approx(1.0)
     assert cosine([1.0, 0.0], [0.0, 1.0]) == pytest.approx(0.0)
     assert cosine([], [1.0]) == 0.0  # mismatched/empty -> 0
+
+
+@pytest.mark.asyncio
+async def test_semantic_memory_index_is_capped(mock_memory_paths, mocker):
+    """The embedding index never grows past MAX_INDEXED_MEETINGS; oldest pruned."""
+    import bot.memory
+    mocker.patch.object(bot.memory, "MAX_INDEXED_MEETINGS", 3)
+
+    async def fake_embed(text):
+        return [1.0, 0.0]
+    mocker.patch("bot.embeddings.embed", side_effect=fake_embed)
+
+    sem_mem = SemanticMeetingMemory()
+    for i in range(6):
+        await sem_mem.save_meeting({
+            "id": str(i), "type": "trade_execution",
+            "timestamp": f"2025-01-{i + 1:02d}T00:00:00Z",
+            "summary": f"meeting {i}", "decisions": [], "actions": [],
+        })
+
+    # Capped at 3, keeping only the 3 most recent by timestamp (ids 3, 4, 5).
+    assert len(sem_mem._index) == 3
+    assert set(sem_mem._index.keys()) == {"3", "4", "5"}
+
+    # The on-disk index is bounded too.
+    persisted = json.loads((mock_memory_paths / "embeddings_index.json").read_text())
+    assert len(persisted) == 3

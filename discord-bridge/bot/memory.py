@@ -206,6 +206,13 @@ from bot import embeddings as _embeddings
 VAULT_DIR = DATA_DIR / "vesper_vault"
 INDEX_PATH = DATA_DIR / "embeddings_index.json"
 
+# Cap on how many meetings the semantic index retains. Long-term recall beyond the
+# MAX_FULL_MEETINGS kept in the log is the whole point of S4, so this is much larger
+# than the log — but bounded, because the index is keyed by id and (unlike the log)
+# never condensed, so without a cap embeddings_index.json grows forever as meetings
+# rotate and stale meetings keep surfacing in retrieval.
+MAX_INDEXED_MEETINGS = 50
+
 class SemanticMeetingMemory(MeetingMemory):
     """
     Extends MeetingMemory to store meeting records as Markdown files in a local vault
@@ -240,6 +247,8 @@ class SemanticMeetingMemory(MeetingMemory):
             except Exception as exc:
                 logger.warning("Failed to load embeddings index, rebuilding: %s", exc)
                 self._index = {}
+        # Bound a legacy oversized index in memory; the next save persists it.
+        self._prune_index()
 
     def _save_index(self) -> None:
         DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -247,6 +256,20 @@ class SemanticMeetingMemory(MeetingMemory):
             INDEX_PATH.write_text(json.dumps(self._index), encoding="utf-8")
         except Exception as exc:
             logger.error("Failed to save embeddings index: %s", exc)
+
+    def _prune_index(self) -> None:
+        """Bound the index at MAX_INDEXED_MEETINGS, dropping the oldest by timestamp.
+
+        ISO timestamps sort lexicographically, so sorting by 'ts' is chronological;
+        entries with a missing ts sort oldest and are pruned first. No network /
+        embedder involvement, so this preserves the soft-degrade behavior.
+        """
+        if len(self._index) <= MAX_INDEXED_MEETINGS:
+            return
+        keep = sorted(
+            self._index.items(), key=lambda kv: kv[1].get("ts", ""), reverse=True
+        )[:MAX_INDEXED_MEETINGS]
+        self._index = dict(keep)
 
     @staticmethod
     def _meeting_text(record: dict) -> str:
@@ -268,6 +291,7 @@ class SemanticMeetingMemory(MeetingMemory):
         vec = await _embeddings.embed(text)
         if vec is not None:
             self._index[mid] = {"text": text, "embedding": vec, "ts": record.get("timestamp", "")}
+            self._prune_index()
             self._save_index()
 
     async def _ensure_indexed(self) -> None:
