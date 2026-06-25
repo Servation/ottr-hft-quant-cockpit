@@ -30,6 +30,39 @@ running/observable:
 Tighter cap without a full stop: set `MAX_TRADE_USD` to a low value — any single
 order above that notional is blocked (`trade_blocked reason=max_trade_usd`).
 
+## Tier 3 risk-limit enforcement
+Autonomous risk controls run inside the 60s monitor loop, configured under
+`risk_limits` in `config/settings.yaml`. They are **OFF by default**
+(`enabled: false`) and ship dark — nothing acts until you flip the switch.
+
+What runs once enabled:
+- **Stop-loss** — a position trading at or under `stop_loss_pct` (10%) below its
+  average cost is auto-sold (`risk_action action=STOP_LOSS`) and the desk convened.
+- **Drawdown breaker** — when portfolio drawdown from its peak exceeds
+  `max_drawdown_halt_pct` (15%), new BUYs are blocked (`trade_blocked
+  reason=drawdown_halt`); SELLs/de-risking stay open. Auto-resumes once drawdown
+  recovers below `drawdown_resume_pct` (10%). Latched + persisted in
+  `data/risk_state.json`, so a restart mid-drawdown does not silently resume buying.
+- **Concentration trim** — a position over its cap
+  (`thresholds.max_asset_exposure_pct` / per-asset overrides like
+  `max_sol_exposure_pct`) by `concentration_trim_band_pct` (5%) is trimmed back to
+  the cap (`risk_action action=CONCENTRATION_TRIM`).
+
+Each forced action respects `TRADING_DRY_RUN` (logged + audited, never executed),
+is throttled per asset by `action_cooldown_seconds` (900s), and is announced +
+audited. Review the backtested effect first: `python discord-bridge/eval_risk_overlay.py`.
+
+**Activate (dark → live):**
+1. Confirm the breaker isn't already latched: `data/risk_state.json` should read
+   `"halted": false` (or clear it, below).
+2. Set `risk_limits.enabled: true` in `config/settings.yaml`, then redeploy the bridge.
+
+**Manually clear/set the halt:** `update_parameter risk_halt` (value `0` clears,
+nonzero sets) flips the drawdown latch by hand (audited as `param_change
+name=risk_halt`); or edit `data/risk_state.json` to `"halted": false` and restart.
+Note the kill-switch (`TRADING_DRY_RUN=1`) blocks `update_parameter`, so clear a halt
+with trading live.
+
 ## Rotate the API key
 1. Generate: `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
 2. Update `OTTR_API_KEY` in `.env`, `discord-bridge/.env`, `agent-gateway/.env`,

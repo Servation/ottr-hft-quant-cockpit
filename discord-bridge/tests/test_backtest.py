@@ -91,3 +91,24 @@ def test_regime_strategy_runs():
     assert res["final_value"] > 0
     assert len(res["equity_curve"]) == 150
     assert res["metrics"]["max_drawdown"] is not None
+
+
+def test_risk_overlay_stop_loss_caps_loss():
+    # Rise to 130 then crash; a 10%-from-entry stop exits at 90, avoiding the drop to 70.
+    closes = [100, 120, 130, 110, 95, 90, 80, 70]
+    risk = {"stop_loss_pct": 10.0}
+    base = run_backtest(_candles(closes), BuyAndHold(), starting_cash=10000.0)
+    over = run_backtest(_candles(closes), BuyAndHold(), starting_cash=10000.0, risk=risk)
+    # Exiting on the stop beats riding all the way down, and the worst drawdown is no deeper.
+    assert over["final_value"] > base["final_value"]
+    assert over["metrics"]["max_drawdown"] <= base["metrics"]["max_drawdown"] + 1e-9
+    # Deterministic with the overlay applied.
+    again = run_backtest(_candles(closes), BuyAndHold(), starting_cash=10000.0, risk=risk)
+    assert again["final_value"] == over["final_value"]
+
+
+def test_risk_overlay_no_risk_matches_base():
+    # risk=None must be a pure no-op (the overlay can't change the un-overlaid result).
+    candles = synth_candles(120)
+    assert (run_backtest(candles, RegimeStrategy())["final_value"]
+            == run_backtest(candles, RegimeStrategy(), risk=None)["final_value"])

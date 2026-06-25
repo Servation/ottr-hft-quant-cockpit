@@ -105,3 +105,17 @@ async def test_performance_computes_metrics_and_benchmark():
     assert abs(m["total_return"] - 0.10) < 1e-9
     assert abs(m["benchmark_return"] - 0.05) < 1e-9
     assert abs(m["alpha"] - 0.05) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_performance_includes_risk_block():
+    # Tier 3: the read-only risk block reflects the dark default + the persisted latch.
+    import bot.risk_state as rs
+    rs.save({"halted": True, "halted_since": 123.0, "last_action_ts": {}})
+    resp = await api_server.handle_performance(None)
+    assert resp.status == 200
+    body = json.loads(resp.body.decode())
+    assert "risk" in body
+    assert body["risk"]["enabled"] is False        # dark by default
+    assert body["risk"]["halted"] is True          # reflects the persisted latch
+    assert body["risk"]["halted_since"] == 123.0

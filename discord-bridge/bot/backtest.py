@@ -170,18 +170,64 @@ class RegimeStrategy(Strategy):
 
 # --- engine ----------------------------------------------------------------
 
+def _apply_risk(target_w: float, price: float, equity: float, current_w: float,
+                rstate: dict, risk: dict) -> float:
+    """Overlay the Tier 3 controls on a base target weight, over backtest bars so the
+    controls become measurable. `rstate` carries state across bars (mutated in place).
+
+    Stop-loss: exit a long that's fallen `stop_loss_pct` from its entry, and stay out
+    until the base goes flat (no re-buying into the same downtrend). Drawdown halt: while
+    equity is past `max_drawdown_halt_pct` off its peak, block *increases* in weight (like
+    the live halt blocking new BUYs — holdings are kept, so the book can still recover),
+    resuming below `drawdown_resume_pct`.
+    """
+    sl = risk.get("stop_loss_pct")
+    if sl:
+        if target_w <= 0.0:
+            rstate["entry"] = None
+            rstate["stopped"] = False
+        elif rstate.get("stopped"):
+            target_w = 0.0
+        elif rstate.get("entry") is None:
+            rstate["entry"] = price
+        elif price <= rstate["entry"] * (1.0 - sl / 100.0):
+            rstate["entry"] = None
+            rstate["stopped"] = True
+            target_w = 0.0
+    hp = risk.get("max_drawdown_halt_pct")
+    if hp:
+        peak = max(rstate.get("peak", equity), equity)
+        rstate["peak"] = peak
+        dd = (peak - equity) / peak if peak > 0 else 0.0
+        if rstate.get("halted"):
+            if dd <= risk.get("drawdown_resume_pct", 0.0) / 100.0:
+                rstate["halted"] = False
+        elif dd >= hp / 100.0:
+            rstate["halted"] = True
+        if rstate.get("halted"):
+            target_w = min(target_w, current_w)  # block new buys, keep holdings
+    return target_w
+
+
 def run_backtest(candles: Sequence[dict], strategy: Strategy,
-                 starting_cash: float = _STARTING_CASH) -> dict:
+                 starting_cash: float = _STARTING_CASH,
+                 risk: Optional[dict] = None) -> dict:
     """Replay candles through a strategy; return the equity curve + metrics.
 
     Fills execute at each bar's close with the live slippage + fee model. Returns
     a dict with `equity_curve` ([(ts, value)]), `final_value`, and `metrics`
     (from bot.metrics.summarize).
+
+    When `risk` is given (a dict with optional `stop_loss_pct` / `max_drawdown_halt_pct`
+    / `drawdown_resume_pct`), the Tier 3 controls are overlaid on the strategy so their
+    effect (does a stop cut drawdown without giving back all the return, or whipsaw?) is
+    measurable on the cached fixtures.
     """
     closes = [float(c["close"]) for c in candles]
     cash = float(starting_cash)
     qty = 0.0  # units of the asset held
     equity_curve: List[Tuple[float, float]] = []
+    rstate: dict = {}
 
     for i, candle in enumerate(candles):
         price = closes[i]
@@ -191,6 +237,9 @@ def run_backtest(candles: Sequence[dict], strategy: Strategy,
 
         target_w = max(0.0, min(1.0, strategy.target_weight(i, closes)))
         total_value = cash + qty * price
+        if risk:
+            current_w = (qty * price) / total_value if total_value > 0 else 0.0
+            target_w = _apply_risk(target_w, price, total_value, current_w, rstate, risk)
         desired_asset_value = target_w * total_value
         diff = desired_asset_value - qty * price
 
