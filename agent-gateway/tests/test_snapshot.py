@@ -44,6 +44,9 @@ def test_snapshot_surfaces_real_metrics_when_bridge_up(monkeypatch, tmp_path):
         "metrics": {"max_drawdown": 0.25, "sharpe": 1.5, "total_return": 0.1,
                     "benchmark_return": 0.2, "alpha": -0.1},
         "num_points": 12,
+        "risk": {"enabled": True, "halted": True, "halted_since": 1.0,
+                 "current_drawdown": 0.16, "stop_loss_pct": 10.0,
+                 "max_drawdown_halt_pct": 15.0},
     }))
 
     data = client.get("/api/v1/portfolio/snapshot").json()
@@ -52,6 +55,10 @@ def test_snapshot_surfaces_real_metrics_when_bridge_up(monkeypatch, tmp_path):
     assert data["performance"]["sharpe"] == 1.5
     assert data["performance"]["alpha"] == -0.1
     assert data["performance"]["num_points"] == 12
+    # Tier 3 risk-enforcement state flows through read-only.
+    assert data["risk"]["enabled"] is True
+    assert data["risk"]["halted"] is True
+    assert data["risk"]["current_drawdown"] == 0.16
 
 
 def test_snapshot_degrades_when_bridge_down(monkeypatch, tmp_path):
@@ -65,3 +72,5 @@ def test_snapshot_degrades_when_bridge_down(monkeypatch, tmp_path):
     assert data["drawdown"] == 0.0
     assert data["performance"]["max_drawdown"] is None
     assert data["performance"]["num_points"] == 0
+    # Bridge down -> no risk block (degrades gracefully, never faked).
+    assert data["risk"] is None

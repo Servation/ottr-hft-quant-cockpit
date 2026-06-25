@@ -124,6 +124,7 @@ export async function fetchPortfolioSnapshot(): Promise<PortfolioSnapshot> {
     purchasePrices: data.purchase_prices,
     currentPrices: data.current_prices,
     performance: data.performance ?? null,
+    risk: data.risk ?? null,
   };
 }
 

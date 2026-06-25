@@ -912,6 +912,7 @@ export default function App() {
           lang={lang}
           t={activeTranslations}
           performance={portfolioSnapshot?.performance}
+          risk={portfolioSnapshot?.risk}
         />
 
         {/* Allocation & Discord Agents Board */}

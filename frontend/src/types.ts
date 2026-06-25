@@ -92,6 +92,18 @@ export interface PerformanceMetrics {
   num_points: number;
 }
 
+// Tier 3 risk-enforcement state, surfaced read-only from the bridge (no secrets):
+// whether enforcement is on, whether the drawdown breaker has halted new BUYs, and the
+// current drawdown vs the configured limit.
+export interface RiskState {
+  enabled: boolean;
+  halted: boolean;
+  halted_since: number | null;
+  current_drawdown: number | null;   // positive fraction off the peak (0.16 = -16%)
+  stop_loss_pct: number | null;
+  max_drawdown_halt_pct: number | null;
+}
+
 export interface PortfolioSnapshot {
   equity: number;
   cash: number;
@@ -101,6 +113,7 @@ export interface PortfolioSnapshot {
   purchasePrices?: Record<string, number>;
   currentPrices?: Record<string, number>;
   performance?: PerformanceMetrics | null;
+  risk?: RiskState | null;
 }
 
 export interface NewsItem {
