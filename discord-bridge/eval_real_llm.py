@@ -67,7 +67,7 @@ async def run():
                     in_scores = True
                     continue
                 if in_scores:
-                    mt = re.match(r"\s*-\s*([A-Z]{2,10}):", line)
+                    mt = re.match(r"\s*-\s*\*{0,2}([A-Z]{2,10})\*{0,2}:", line)
                     if mt:
                         assets.add(mt.group(1))
             if len(assets) >= 2:

@@ -10,6 +10,7 @@ import pandas_ta as ta
 import httpx
 
 from bot import settings
+from bot import signals
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
 
 # Map CoinGecko ids to our ticker symbols
 _GECKO_ID_MAP = {
-    "bitcoin": "BTC", 
+    "bitcoin": "BTC",
     "ethereum": "ETH",
     "solana": "SOL",
     "binancecoin": "BNB",
@@ -34,6 +35,20 @@ _GECKO_ID_MAP = {
     "dogecoin": "DOGE",
     "chainlink": "LINK",
     "avalanche-2": "AVAX",
+}
+
+# Ticker -> Kraken USD pair, for daily-OHLC technical indicators. Kraken is used
+# to dodge US geoblocking; not every asset is listed (BNB has no Kraken USD pair),
+# so unmapped assets simply get no indicators rather than fabricated ones.
+_KRAKEN_PAIR_MAP = {
+    "BTC": "XBTUSD",
+    "ETH": "ETHUSD",
+    "SOL": "SOLUSD",
+    "XRP": "XRPUSD",
+    "ADA": "ADAUSD",
+    "DOGE": "XDGUSD",
+    "LINK": "LINKUSD",
+    "AVAX": "AVAXUSD",
 }
 
 
@@ -296,7 +311,7 @@ class PriceFeed:
 
     async def _fetch_klines(self, client: httpx.AsyncClient, symbol: str) -> Optional[pd.DataFrame]:
         """Fetch 100 daily klines from Kraken public API to avoid US geoblocking."""
-        kraken_pair = "XBTUSD" if symbol == "BTC" else "ETHUSD" if symbol == "ETH" else None
+        kraken_pair = _KRAKEN_PAIR_MAP.get(symbol)
         if not kraken_pair:
             return None
             
@@ -329,14 +344,19 @@ class PriceFeed:
             return None
 
     async def get_technical_indicators(self) -> Dict[str, Dict[str, float]]:
-        """Returns EMA, RSI, and MACD for BTC and ETH, utilizing a 1-hour cache."""
+        """Returns EMA, RSI, and MACD for every Kraken-listed traded asset (1h cache).
+
+        Assets without a Kraken USD pair (or with insufficient history) are simply
+        omitted — never faked — so an agent told to cite indicators can't be forced
+        to hallucinate them.
+        """
         now = time.time()
         if self._cached_tech and (now - self._tech_timestamp) < self._tech_cache_ttl:
             return self._cached_tech
-            
+
         indicators = {}
         async with httpx.AsyncClient() as client:
-            for symbol in ["BTC", "ETH"]:
+            for symbol in _KRAKEN_PAIR_MAP:
                 df = await self._fetch_klines(client, symbol)
                 if df is not None and len(df) >= 50:
                     try:
@@ -354,9 +374,18 @@ class PriceFeed:
                             "MACD": macd_val,
                             "MACD_signal": macd_signal,
                         }
+                        # Regime (trending vs choppy) tells agents when trend signals
+                        # are reliable — the edge the backtest found.
+                        er = signals.efficiency_ratio(df["close"].tolist())
+                        if er is not None:
+                            indicators[symbol]["ER"] = er
+                            indicators[symbol]["regime"] = signals.regime_label(er)
                     except Exception as e:
                         logger.error("Failed to calculate indicators for %s: %s", symbol, e)
-                        
+                # Space out calls so eight sequential pairs don't trip Kraken's
+                # public rate limit.
+                await asyncio.sleep(0.3)
+
         if indicators:
             self._cached_tech = indicators
             self._tech_timestamp = now
@@ -425,7 +454,9 @@ class PriceFeed:
             
             tech = tech_indicators.get(symbol)
             if tech:
-                tech_str = f" | EMA(20/50): {tech['EMA_20']:.0f}/{tech['EMA_50']:.0f} | RSI: {tech['RSI_14']:.1f} | MACD: {tech['MACD']:.1f}"
+                regime = tech.get("regime")
+                regime_str = f" | Regime: {regime} (ER {tech.get('ER', 0):.2f})" if regime else ""
+                tech_str = f" | EMA(20/50): {tech['EMA_20']:.0f}/{tech['EMA_50']:.0f} | RSI: {tech['RSI_14']:.1f} | MACD: {tech['MACD']:.1f}{regime_str}"
                 lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str}{tech_str})")
             else:
                 lines.append(f"- **{symbol}**: ${price:,.2f} ({direction} {abs(change):.2f}% | {vol_str} | {fund_str})")
@@ -437,7 +468,20 @@ class PriceFeed:
         
         if fng:
             lines.append(f"- **Fear & Greed Index**: {fng['value']} ({fng['classification']})")
-        
+
+        # Deterministic signals derived from the indicators above (code, not LLM),
+        # so agents reason over an explicit read rather than just raw numbers.
+        try:
+            sig_map = signals.signals_for_assets(
+                tech_indicators, funding_rates, fng.get("value") if fng else None
+            )
+            if sig_map:
+                lines.append("")
+                lines.append("**Deterministic Signals (computed, not LLM). In a CHOPPY regime, trend signals are unreliable — favor defense:**")
+                lines.append(signals.format_signals(sig_map))
+        except Exception:
+            logger.exception("Failed to compute deterministic signals")
+
         return "\n".join(lines)
 
 

@@ -1,7 +1,7 @@
 """Unit tests for the backtest engine (bot.backtest). Pure + deterministic."""
 
 from bot.backtest import (
-    BuyAndHold, SmaCross, RsiMeanReversion, Strategy,
+    BuyAndHold, SmaCross, RsiMeanReversion, SignalStrategy, RegimeStrategy, Strategy,
     run_backtest, compare, default_strategies, synth_candles,
 )
 
@@ -65,12 +65,29 @@ def test_rsi_enters_oversold_exits_overbought():
     assert RsiMeanReversion(14, 30, 70).target_weight(20, rising) == 0.0   # RSI high -> flat
 
 
-def test_compare_includes_alpha_vs_hold():
-    rows = compare(synth_candles(120), default_strategies())
+def test_signal_strategy_runs_and_is_measurable():
+    candles = synth_candles(150)
+    res = run_backtest(candles, SignalStrategy(), starting_cash=10000.0)
+    assert res["final_value"] > 0
+    assert len(res["equity_curve"]) == len(candles)
+    assert res["metrics"]["max_drawdown"] is not None
+
+
+def test_compare_includes_signals_and_alpha_vs_hold():
+    rows = compare(synth_candles(150), default_strategies())
     names = {r["strategy"] for r in rows}
     assert "Buy & Hold" in names
+    assert "Signals (default)" in names
+    assert any(n.startswith("Regime") for n in names)
     # Buy & Hold's alpha vs itself is ~0; every row has an alpha figure.
     for r in rows:
         assert r["alpha_vs_hold"] is not None
     bh = next(r for r in rows if r["strategy"] == "Buy & Hold")
     assert abs(bh["alpha_vs_hold"]) < 1e-9
+
+
+def test_regime_strategy_runs():
+    res = run_backtest(synth_candles(150), RegimeStrategy(), starting_cash=10000.0)
+    assert res["final_value"] > 0
+    assert len(res["equity_curve"]) == 150
+    assert res["metrics"]["max_drawdown"] is not None

@@ -34,29 +34,29 @@ async def run_scheduler_test():
     print(f"[Dynamic Update] Next scheduled meeting is now: {next_type_dyn} at {next_time_dyn}")
     print(f"  (soonest job id: {after.id if after else None})")
 
-    # 5. Validate against the ACTUAL scheduler state, not formatted time strings
-    #    (the old eval compared a PDT-formatted string to a UTC-formatted one,
-    #    which "passed" purely because of the timezone-suffix difference).
+    # 5. Validate against the ACTUAL scheduler state, not formatted time strings.
+    #    Assert the dynamic meeting is registered to fire ~10 minutes out. We do NOT
+    #    assert it's the globally-soonest job: that's wall-clock dependent — a cron
+    #    meeting or interval job can legitimately be <10 min away (e.g. running this
+    #    just before the top of a meeting hour), which used to make the eval flaky.
     expected_fire = datetime.now(timezone.utc) + timedelta(minutes=10)
-    is_dynamic = after is not None and after.id.startswith("dynamic_meeting_")
-    fires_sooner = (
-        before is not None and after is not None
-        and after.next_run_time < before.next_run_time
-    )
+    jobs = meeting_scheduler._scheduler.get_jobs()
+    dynamic_jobs = [j for j in jobs if j.id.startswith("dynamic_meeting_")]
+    is_dynamic = len(dynamic_jobs) == 1
     close_to_10min = (
-        after is not None
-        and abs((after.next_run_time - expected_fire).total_seconds()) < 60
+        is_dynamic
+        and abs((dynamic_jobs[0].next_run_time - expected_fire).total_seconds()) < 60
     )
 
-    if is_dynamic and fires_sooner and close_to_10min:
+    if is_dynamic and close_to_10min:
         print(
-            "\n✅ EVALUATION PASSED: The dynamic meeting became the next-to-fire job, "
-            "scheduled ~10 minutes out, ahead of the standard cron/interval schedule."
+            "\n✅ EVALUATION PASSED: schedule_dynamic_meeting(10) registered a dynamic "
+            "meeting firing ~10 minutes out."
         )
     else:
         print(
-            "\n❌ EVALUATION FAILED: dynamic meeting did not take priority correctly "
-            f"(is_dynamic={is_dynamic}, fires_sooner={fires_sooner}, close_to_10min={close_to_10min})."
+            "\n❌ EVALUATION FAILED: dynamic meeting not registered correctly "
+            f"(is_dynamic={is_dynamic}, close_to_10min={close_to_10min})."
         )
 
     await meeting_scheduler.stop()

@@ -246,10 +246,17 @@ def test_legacy_status_still_counts(fresh_graph):
     assert weights["veteran"]["BTC"] > 0  # legacy STRONG_HIT maps to +1.0, shrunk
 
 
-def test_regex_extraction():
-    import re
-    text = "Blah blah. Final Vote:  BUY  sol\nNext point."
-    match = re.search(r"Final Vote:\s*(BUY|SELL|HOLD|ABSTAIN)\s*([A-Za-z0-9_]+)", text, re.IGNORECASE)
-    assert match is not None
-    assert match.group(1).upper() == "BUY"
-    assert match.group(2).upper() == "SOL"
+def test_vote_regex_tolerates_brackets_and_markdown():
+    # Guards the production parser against formatting the model copies from the
+    # prompt — "Final Vote: [HOLD] BTC" used to silently drop the vote.
+    from bot.meetings import _VOTE_RE
+    cases = {
+        "Blah. Final Vote:  BUY  sol": ("BUY", "SOL"),
+        "Final Vote: [HOLD] BTC": ("HOLD", "BTC"),
+        "Final Vote: **SELL** SOL": ("SELL", "SOL"),
+        "Final Vote: [BUY] [ETH]": ("BUY", "ETH"),
+    }
+    for text, (direction, asset) in cases.items():
+        m = _VOTE_RE.search(text)
+        assert m is not None, text
+        assert (m.group(1).upper(), m.group(2).upper()) == (direction, asset), text
