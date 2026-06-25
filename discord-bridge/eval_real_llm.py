@@ -52,26 +52,30 @@ async def run():
     else:
         print("❌ Algorithmic Consensus Breakdown MISSING!")
         
-    # Check that the breakdown covers more than one asset. Don't hardcode which
-    # tickers — the session trades whatever is in the portfolio/price data
-    # (here BTC + SOL), so count the distinct assets in the "Net Asset Scores"
-    # section instead.
+    # Check that AGENTS actually voted on more than one asset. Parse the "Individual
+    # Votes" section (real LLM votes), NOT "Net Asset Scores" — the scores table now
+    # unions the full watchlist (every tradeable asset always appears), so counting it
+    # would be vacuous. Don't hardcode tickers; the session trades whatever the data
+    # supports. Vote line format: "- **Name**: <DIR> <ASSET> *(rep ...)*".
     import re
     for m in app_msgs:
         if "Algorithmic Consensus Breakdown" in m:
             print("Breakdown output:\n" + m)
             assets = set()
-            in_scores = False
+            in_votes = False
             for line in m.splitlines():
-                if "Net Asset Scores" in line:
-                    in_scores = True
+                if "Individual Votes" in line:
+                    in_votes = True
                     continue
-                if in_scores:
-                    mt = re.match(r"\s*-\s*\*{0,2}([A-Z]{2,10})\*{0,2}:", line)
-                    if mt:
-                        assets.add(mt.group(1))
+                if "Net Asset Scores" in line:
+                    in_votes = False
+                    continue
+                if in_votes:
+                    vm = re.search(r":\s*(?:BUY|SELL|HOLD|ABSTAIN)\s+([A-Z]{2,10})", line)
+                    if vm and vm.group(1) != "MARKET":
+                        assets.add(vm.group(1))
             if len(assets) >= 2:
-                print(f"✅ Breakdown contains multiple assets: {sorted(assets)}")
+                print(f"✅ Agents voted on multiple assets: {sorted(assets)}")
             else:
                 # Informational only (NOT a failure): a unanimous meeting can legitimately
                 # vote a single asset. Avoid the ❌ marker so the runner doesn't false-fail
