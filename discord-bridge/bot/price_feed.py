@@ -14,28 +14,45 @@ from bot import signals
 
 logger = logging.getLogger(__name__)
 
-# API endpoints
-COINGECKO_URL = (
-    "https://api.coingecko.com/api/v3/simple/price"
-    "?ids=bitcoin,ethereum,solana,binancecoin,ripple,cardano,dogecoin,chainlink,avalanche-2"
-    "&vs_currencies=usd&include_24hr_change=true"
-)
-COINCAP_URL = "https://api.coincap.io/v2/assets?ids=bitcoin,ethereum,solana,binance-coin,xrp,cardano,dogecoin,chainlink,avalanche"
-DEFILLAMA_YIELDS_URL = "https://yields.llama.fi/pools"
-COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
-
-# Map CoinGecko ids to our ticker symbols
+# CoinGecko id -> ticker (primary price feed + 14d volatility). These are exactly the
+# tradeable universe (bot/universe.py); BNB is intentionally absent — it has no Kraken USD
+# pair, so it would get no indicators/signals, and we don't fetch what we can't reason about.
 _GECKO_ID_MAP = {
     "bitcoin": "BTC",
     "ethereum": "ETH",
     "solana": "SOL",
-    "binancecoin": "BNB",
     "ripple": "XRP",
     "cardano": "ADA",
     "dogecoin": "DOGE",
     "chainlink": "LINK",
     "avalanche-2": "AVAX",
 }
+
+# CoinCap id -> ticker (fallback feed). CoinCap ids differ from CoinGecko's for some assets
+# (xrp vs ripple, avalanche vs avalanche-2), so the fallback needs its OWN map — reusing
+# the gecko map silently dropped XRP/AVAX on a CoinGecko outage (their CoinCap id isn't a
+# CoinGecko id, so the lookup missed).
+_COINCAP_ID_MAP = {
+    "bitcoin": "BTC",
+    "ethereum": "ETH",
+    "solana": "SOL",
+    "xrp": "XRP",
+    "cardano": "ADA",
+    "dogecoin": "DOGE",
+    "chainlink": "LINK",
+    "avalanche": "AVAX",
+}
+
+# Endpoints. The price-feed id lists are built FROM the maps above so the fetch and the
+# id->symbol decode can never drift out of sync (the bug that let BNB linger).
+COINGECKO_URL = (
+    "https://api.coingecko.com/api/v3/simple/price"
+    f"?ids={','.join(_GECKO_ID_MAP)}"
+    "&vs_currencies=usd&include_24hr_change=true"
+)
+COINCAP_URL = f"https://api.coincap.io/v2/assets?ids={','.join(_COINCAP_ID_MAP)}"
+DEFILLAMA_YIELDS_URL = "https://yields.llama.fi/pools"
+COINGECKO_DERIVATIVES_URL = "https://api.coingecko.com/api/v3/derivatives"
 
 # Ticker -> Kraken USD pair, for daily-OHLC technical indicators. Kraken is used
 # to dodge US geoblocking; not every asset is listed (BNB has no Kraken USD pair),
@@ -54,8 +71,8 @@ _KRAKEN_PAIR_MAP = {
 
 class PriceFeed:
     """
-    Fetches BTC and ETH prices from CoinGecko with CoinCap fallback.
-    Also fetches Volatility (14d historical), Stablecoin Yields, 
+    Fetches spot prices for the tradeable universe (bot/universe.py) from CoinGecko
+    with a CoinCap fallback. Also fetches Volatility (14d historical), Stablecoin Yields,
     Funding Rates, and calculates BTC/ETH Correlation.
     """
 
@@ -123,7 +140,7 @@ class PriceFeed:
         prices: Dict[str, Dict[str, float]] = {}
         for asset in data.get("data", []):
             asset_id = asset.get("id", "")
-            symbol = _GECKO_ID_MAP.get(asset_id)
+            symbol = _COINCAP_ID_MAP.get(asset_id)
             if symbol is None:
                 continue
             price_usd = float(asset.get("priceUsd", 0.0))
