@@ -120,6 +120,39 @@ async def health():
         "message": translate("health_ok")
     }
 
+
+@router.get("/health/detailed")
+async def health_detailed():
+    """Aggregate component health (Tier 4 / O2): proxy the bridge's /api/health, add bridge
+    reachability + latency, and roll up to OK | DEGRADED | DOWN. Read-only, no secrets;
+    always answers (a down bridge reports bridge: DOWN rather than hanging the dashboard)."""
+    components = {}
+    bridge = {"status": "DOWN"}
+    try:
+        t0 = _time.monotonic()
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(_bridge_base_url() + "/api/health", timeout=3.0)
+        latency = round((_time.monotonic() - t0) * 1000)
+        if resp.status_code == 200:
+            components = resp.json().get("components", {}) or {}
+            bridge = {"status": "OK", "latency_ms": latency}
+        else:
+            bridge = {"status": "DOWN", "latency_ms": latency}
+    except Exception as e:
+        logger.warning(f"Bridge health unavailable: {e}")
+        bridge = {"status": "DOWN"}
+
+    components["bridge"] = bridge
+    statuses = [c.get("status") for c in components.values()]
+    bad = [s for s in statuses if s in ("DOWN", "STALE")]
+    if not bad:
+        overall = "OK"
+    elif all(s == "DOWN" for s in statuses):
+        overall = "DOWN"
+    else:
+        overall = "DEGRADED"
+    return {"status": overall, "components": components}
+
 @router.get("/market-data")
 async def get_market_data(symbols: Optional[str] = Query(None)):
     if symbols:

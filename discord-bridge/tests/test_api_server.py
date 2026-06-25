@@ -120,3 +120,18 @@ async def test_performance_includes_risk_block(mocker):
     assert body["risk"]["enabled"] is True         # reflects the configured switch
     assert body["risk"]["halted"] is True          # reflects the persisted latch
     assert body["risk"]["halted_since"] == 123.0
+
+
+# --- /api/health (component health) ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_health_reports_components(monkeypatch):
+    # Tier 4: a read-only component-health rollup. Mock the LLM ping for determinism.
+    from bot import agents
+    monkeypatch.setattr(agents.agent_llm, "check_health", AsyncMock(return_value=True))
+    resp = await api_server.handle_health(None)
+    assert resp.status == 200
+    body = json.loads(resp.body.decode())
+    assert body["status"] in ("OK", "DEGRADED", "DOWN")
+    assert set(body["components"]) >= {"llm", "price_feed", "scheduler", "portfolio"}
+    assert body["components"]["llm"]["status"] == "OK"

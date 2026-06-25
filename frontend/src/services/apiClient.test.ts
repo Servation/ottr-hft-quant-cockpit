@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { postTradingStart, postAgentChat, fetchPortfolioSnapshot } from './apiClient';
+import { postTradingStart, postAgentChat, fetchPortfolioSnapshot, fetchSystemHealth } from './apiClient';
 
 // Smoke test: state-changing calls must attach the configured X-API-Key.
 // Vite statically inlines VITE_-prefixed env vars at transform time, so we
@@ -74,5 +74,20 @@ describe('fetchPortfolioSnapshot mapping', () => {
     // Tier 3 risk-enforcement state passes through read-only.
     expect(result.risk?.enabled).toBe(true);
     expect(result.risk?.current_drawdown).toBe(0.05);
+  });
+});
+
+describe('fetchSystemHealth', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('returns the aggregated component health', async () => {
+    const health = { status: 'DEGRADED', components: { bridge: { status: 'OK' }, llm: { status: 'DOWN' } } };
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => health })));
+    const result = await fetchSystemHealth();
+    expect(result.status).toBe('DEGRADED');
+    expect(result.components.llm.status).toBe('DOWN');
+    expect(result.components.bridge.status).toBe('OK');
   });
 });

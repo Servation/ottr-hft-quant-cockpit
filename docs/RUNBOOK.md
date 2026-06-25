@@ -106,6 +106,10 @@ A healthy bridge startup shows: a Discord login line, "Webhook ready" for all 7
 agents, "Scheduler started — 6 meeting slots", "API Server running on port 8001",
 and **no `CONFIG:` errors**.
 
+**Live component health:** `GET http://localhost:8000/api/v1/health/detailed` (gateway)
+rolls up LLM / price-feed / scheduler / portfolio / bridge status into
+`OK | DEGRADED | DOWN`; the dashboard's System Health panel shows it (polled ~30s).
+
 ## Deploy checklist
 - [ ] `cd discord-bridge && pytest -k "not live" tests/` green.
 - [ ] `cd agent-gateway && pytest tests/` green.

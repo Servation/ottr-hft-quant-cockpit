@@ -152,3 +152,18 @@ export interface ChatMessage {
   timestamp: string;
 }
 
+// Tier 4 (O2): aggregated component health from the gateway /health/detailed.
+export interface ComponentHealth {
+  status: 'OK' | 'DEGRADED' | 'DOWN' | 'STALE' | 'UNKNOWN';
+  latency_ms?: number;
+  last_quote_age_sec?: number | null;
+  next_meeting?: string;
+  next_type?: string;
+  positions?: number;
+}
+
+export interface SystemHealth {
+  status: 'OK' | 'DEGRADED' | 'DOWN';
+  components: Record<string, ComponentHealth>;
+}
+
