@@ -80,6 +80,45 @@ async def test_full_meeting_run(engine, mocker):
 
 
 
+def test_summarize_outcome_from_votes():
+    """Meeting records summarize the actual votes, not the chair's generic prose."""
+    from bot.meetings import MeetingEngine
+
+    # Unanimous abstain -> a distinct, recordable outcome (was boilerplate before).
+    contribs = {f"a{i}": "report\n\n[DEBATE]: Final Vote: ABSTAIN SOL" for i in range(6)}
+    summary, decisions = MeetingEngine._summarize_outcome(
+        "Trade Execution", contribs, "I have reviewed the consensus."
+    )
+    assert "SOL" in summary and "ABSTAIN" in summary
+    assert decisions == ["No position changes (no directional consensus)"]
+
+    # Directional majority -> captured as a real decision with the vote split.
+    contribs = {
+        "a1": "Final Vote: SELL BTC", "a2": "Final Vote: SELL BTC",
+        "a3": "Final Vote: SELL BTC", "a4": "Final Vote: HOLD BTC",
+    }
+    summary, decisions = MeetingEngine._summarize_outcome("Trade Execution", contribs, "")
+    assert "BTC" in summary and "SELL" in summary
+    assert any("SELL BTC" in d and "3/4" in d for d in decisions)
+
+    # Belief revision: an agent's last vote supersedes the original.
+    contribs = {"a1": "Final Vote: BUY ETH\n\n[DEBATE]: Final Vote: SELL ETH"}
+    summary, _ = MeetingEngine._summarize_outcome("Trade Execution", contribs, "")
+    assert "SELL" in summary and "BUY" not in summary
+
+    # No votes (e.g. strategy session) -> falls back to the closing prose.
+    summary, _ = MeetingEngine._summarize_outcome(
+        "Strategy Session", {"a1": "no vote here"}, "Discussed allocation strategy."
+    )
+    assert summary.startswith("Discussed allocation strategy")
+
+    # LLM error closing with no votes -> clean summary, not the raw error string.
+    summary, decisions = MeetingEngine._summarize_outcome(
+        "Strategy Session", {}, "[error] LLM call failed: Connection error."
+    )
+    assert "did not complete" in summary and "[error]" not in summary
+
+
 def test_meeting_rotation(tmp_path, mocker):
     state_file = tmp_path / "rotation.json"
     mocker.patch("bot.meetings.ROTATION_STATE_PATH", state_file)

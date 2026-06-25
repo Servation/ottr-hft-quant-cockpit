@@ -398,11 +398,15 @@ class MeetingEngine:
             logger.exception("Failed to post portfolio totals")
 
         # ---- 5. Persist meeting record -------------------------------------
+        # Build the summary/decisions from the votes actually cast, so the record
+        # captures the real outcome (asset, direction, split) and is semantically
+        # distinct in memory — not the facilitator's generic closing line.
+        summary, decisions = self._summarize_outcome(mt.name, agent_contributions, closing_msg)
         meeting_record = MeetingMemory.make_meeting_record(
             meeting_type=mt.id,
-            summary=closing_msg[:300],
+            summary=summary,
             agent_contributions=agent_contributions,
-            decisions=self._extract_decisions(closing_msg),
+            decisions=decisions,
             actions=self._extract_actions(closing_msg),
         )
         await meeting_memory.save_meeting(meeting_record)
@@ -766,6 +770,68 @@ class MeetingEngine:
         )
 
     # -- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _summarize_outcome(
+        meeting_name: str,
+        agent_contributions: Dict[str, str],
+        closing_msg: str,
+    ) -> tuple[str, List[str]]:
+        """Summarize a meeting from the votes actually cast, for the memory record.
+
+        Why this exists: the facilitator's closing prose is often a thin generic
+        line ("I have reviewed the consensus"), which made every meeting record
+        near-identical and useless for semantic recall. The votes (`Final Vote:
+        ...`) are the reliable signal of what the room actually decided, so we
+        build the summary + decisions from those. Each agent's LAST vote per asset
+        wins (a belief-revision vote supersedes the original). Falls back to the
+        closing prose when no votes were cast (e.g. a free-form strategy session).
+        """
+        # (agent, asset) -> direction; last write wins so a revision supersedes.
+        last_vote: Dict[tuple, str] = {}
+        for a_id, text in agent_contributions.items():
+            for m in _VOTE_RE.finditer(text or ""):
+                direction = m.group(1).upper()
+                asset = (m.group(2) or "MARKET").upper()
+                last_vote[(a_id, asset)] = direction
+
+        if not last_vote:
+            # No structured votes — fall back to the closing prose, but never
+            # persist a raw LLM error string as if it were meeting content.
+            if closing_msg.startswith("[error]"):
+                return (f"{meeting_name}: no consensus, meeting did not complete "
+                        "(facilitator LLM error).", [])
+            return closing_msg[:300], MeetingEngine._extract_decisions(closing_msg)
+
+        # Tally each agent's final vote per asset.
+        tallies: Dict[str, Dict[str, int]] = {}
+        for (a_id, asset), direction in last_vote.items():
+            tallies.setdefault(asset, {})
+            tallies[asset][direction] = tallies[asset].get(direction, 0) + 1
+
+        parts: List[str] = []
+        decisions: List[str] = []
+        for asset, counts in tallies.items():
+            total = sum(counts.values())
+            top_dir, top_n = max(counts.items(), key=lambda kv: kv[1])
+            if len(counts) == 1:
+                parts.append(f"{asset}: unanimous {top_dir} ({total})")
+            else:
+                split = ", ".join(
+                    f"{n} {d}" for d, n in sorted(counts.items(), key=lambda kv: -kv[1])
+                )
+                parts.append(f"{asset}: {top_dir} ({split})")
+            # Only a directional majority is an actionable decision.
+            if top_dir in ("BUY", "SELL"):
+                decisions.append(f"{top_dir} {asset} ({top_n}/{total} agents)")
+
+        summary = f"{meeting_name}: " + "; ".join(parts)
+        # Append the chair's prose as supplementary color when it's substantive.
+        if closing_msg and not closing_msg.startswith("[error]"):
+            summary = f"{summary}\nChair: {closing_msg[:200]}"
+        if not decisions:
+            decisions = ["No position changes (no directional consensus)"]
+        return summary[:500], decisions
 
     @staticmethod
     def _extract_decisions(closing_text: str) -> List[str]:
