@@ -61,9 +61,9 @@ function pad(num: number): string {
 
 // Pre-packaged starting list of 10 execution logs
 export function generateInitialLogs(): ExecutionLogEntry[] {
-  const symbols = ['BTC', 'ETH', 'SOL', 'BNB'];
+  const symbols = ['BTC', 'ETH', 'SOL'];
   const actions: ('BUY' | 'SELL' | 'HOLD')[] = ['BUY', 'SELL', 'BUY', 'SELL', 'BUY', 'BUY', 'SELL', 'BUY', 'SELL', 'BUY'];
-  const basePrices: Record<string, number> = { BTC: 88200, ETH: 3450, SOL: 165, BNB: 580 };
+  const basePrices: Record<string, number> = { BTC: 88200, ETH: 3450, SOL: 165 };
   
   const list: ExecutionLogEntry[] = [];
   const now = new Date();
@@ -91,8 +91,8 @@ export function generateInitialLogs(): ExecutionLogEntry[] {
       action,
       quantity: size,
       latencyMs,
-      arrivalPrice: Number(arrivalPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'BNB' || symbol === 'SOL' ? 2 : 4)),
-      vwapFillPrice: Number(vwapFillPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'BNB' || symbol === 'SOL' ? 2 : 4)),
+      arrivalPrice: Number(arrivalPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'SOL' ? 2 : 4)),
+      vwapFillPrice: Number(vwapFillPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'SOL' ? 2 : 4)),
       slippagePct: Number(slippagePct.toFixed(4)),
       feeUsd: Number(feeUsd.toFixed(2))
     });
@@ -125,8 +125,8 @@ export function createNewLogEntry(
     action,
     quantity: size,
     latencyMs,
-    arrivalPrice: Number(currentPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'BNB' || symbol === 'SOL' ? 2 : 4)),
-    vwapFillPrice: Number(vwapFillPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'BNB' || symbol === 'SOL' ? 2 : 4)),
+    arrivalPrice: Number(currentPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'SOL' ? 2 : 4)),
+    vwapFillPrice: Number(vwapFillPrice.toFixed(symbol === 'BTC' || symbol === 'ETH' || symbol === 'SOL' ? 2 : 4)),
     slippagePct: Number(slippagePct.toFixed(4)),
     feeUsd: Number(feeUsd.toFixed(2))
   };
