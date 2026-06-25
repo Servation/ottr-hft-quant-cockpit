@@ -411,6 +411,20 @@ class MeetingEngine:
         )
         await meeting_memory.save_meeting(meeting_record)
 
+        # Live: push the meeting outcome to the dashboard (Tier 4 / O3). Fire-and-forget,
+        # so a down gateway never affects the meeting.
+        try:
+            from bot import webhooks
+            webhooks.publish("meeting_outcome", {
+                "id": meeting_record["id"],
+                "meeting_type": mt.id,
+                "name": mt.name,
+                "summary": summary,
+                "decisions": decisions,
+            })
+        except Exception:
+            logger.debug("Failed to publish meeting_outcome", exc_info=True)
+
         logger.info("Meeting %s completed (%s).", mt.name, meeting_record["id"])
         return meeting_record
 

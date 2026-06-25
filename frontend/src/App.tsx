@@ -5,7 +5,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { translations } from './translations';
-import { ChartDataPoint, ExecutionLogEntry, MarketAsset, TradingAgentState, LocalLlmConfig, BackendAgentState, PortfolioSnapshot, OptimizationLogEntry } from './types';
+import { ChartDataPoint, ExecutionLogEntry, MarketAsset, TradingAgentState, LocalLlmConfig, BackendAgentState, PortfolioSnapshot, OptimizationLogEntry, MeetingOutcome } from './types';
 import {
   createNewLogEntry,
   getFormattedTime
@@ -240,6 +240,9 @@ export default function App() {
   // Keep track of parameter tuning history logs from the Optimizer
   const [optimizationHistory, setOptimizationHistory] = useState<OptimizationLogEntry[]>([]);
 
+  // Latest meeting outcome (Tier 4 / O3), pushed live at meeting close.
+  const [meetingOutcome, setMeetingOutcome] = useState<MeetingOutcome | null>(null);
+
   // Track the multi-agent execution status phase (0 to 4)
   const [consensusPhase, setConsensusPhase] = useState<number>(0);
 
@@ -467,6 +470,9 @@ export default function App() {
         },
         (history) => {
           setOptimizationHistory(history);
+        },
+        (outcome) => {
+          setMeetingOutcome(outcome);
         }
       );
     }
@@ -909,6 +915,18 @@ export default function App() {
         
         {/* Overview equity curve and key metrics cards */}
         <SystemHealthPanel lang={lang} />
+
+        {meetingOutcome && (
+          <div className="bg-black/40 p-3 rounded border border-neutral-800 text-[11px] font-mono">
+            <span className="uppercase tracking-wider text-neutral-500 font-semibold">
+              {lang === 'en' ? 'Latest Meeting' : 'Последняя встреча'}
+            </span>
+            {meetingOutcome.name && <span className="text-neutral-300 ml-2">{meetingOutcome.name}</span>}
+            {meetingOutcome.summary && (
+              <p className="text-neutral-400 mt-1 whitespace-pre-wrap">{meetingOutcome.summary}</p>
+            )}
+          </div>
+        )}
 
         <OverviewPanel
           data={chartData}
