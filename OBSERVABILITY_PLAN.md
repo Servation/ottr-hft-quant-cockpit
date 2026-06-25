@@ -35,8 +35,8 @@ trade). The bridge stays the **sole writer**; the gateway relays/aggregates, nev
 **No secrets to clients** (same posture as the snapshot-leak fix). Gate every change on
 `pytest -k "not live"` + `run_evals.py`; add a test per change.
 
-**Status:** O0 COMPLETE (live execution + portfolio events on every trade, fire-and-forget,
-bridge-only). O1-O3 pending.
+**Status:** O0-O1 COMPLETE (O0 live execution + portfolio events; O1 trade rationale flows
+to the record + audit + live feed). O2-O3 pending.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -71,8 +71,8 @@ Tasks:
   `price`); a 2s timeout + fail-soft push means a down/slow gateway never blocks a trade.
   _(Order-fill path in `alerts` is a small O3 follow-on.)_
 - [~] **`meeting_outcome` event** — at meeting close, emit `{summary, decisions, consensus,
-  votes}`. _(Deferred to O1: it needs new gateway allow-list + frontend plumbing, and pairs
-  naturally with the trade rationale, unlike the execution/portfolio events the gateway already
+  votes}`. _(Deferred to O3: it needs new gateway allow-list + frontend plumbing, grouped with
+  the other new live-event work there, unlike the execution/portfolio events the gateway already
   broadcasts.)_
 - [x] **Tests** — `tests/test_webhooks.py` (5): payload shaping, a trade fires both events,
   publish is fire-and-forget (schedules the send, doesn't await), `execute_trade` wires it in.
@@ -94,19 +94,18 @@ Concrete targets:
 - `frontend/src/components/ExecutionLogsTable.tsx` (the CoT disclosure, already built).
 
 Tasks:
-- [ ] **Capture reasoning at trade time** — thread a `reasoning` through `execute_trade` (the
-  agent's own justification from the tool call, plus the consensus tally + market/regime
-  context already on hand). Store it on the trade record (`portfolio.buy/sell`) and the
-  `audit_event("trade", ...)`. Keep it out of the cost basis / P&L math (pure annotation).
-- [ ] **Surface it** — the gateway execution-log returns the real `reasoning` (drop the
-  hardcoded fallback when present); the `execution` SSE event (O0) carries it; the
-  `ExecutionLogsTable` CoT box renders it. Optionally wire `journal_manager.record_journal_entry`
-  so the rationale also feeds the LLM's own future context.
-- [ ] **Link to the meeting (optional)** — stamp the originating `meeting_id` on the trade so a
-  trade can be traced back to its consensus record.
-- [ ] **Tests** — a trade carries the reasoning into the record + audit; the gateway surfaces it
-  (not the placeholder); ExecutionLogsTable shows it (vitest). Reasoning is never injected back
-  into an LLM prompt unsanitized (Phase-2 invariant).
+- [x] **Capture reasoning at trade time** — `execute_trade` takes an optional `reasoning` (the
+  agent's own one-line justification, capped at 500 chars), stored on the trade record
+  (`portfolio.buy/sell`) and the `audit_event("trade", ...)`. Pure annotation, kept out of the
+  cost basis / P&L. _(Auto-enriching with the consensus tally / regime context is a follow-on.)_
+- [x] **Surface it** — the `execution` SSE event (O0) carries the reasoning and the gateway
+  execution-log already prefers `trade["reasoning"]` over the hardcoded fallback; the
+  `ExecutionLogsTable` CoT box already renders it — so the whole display chain lights up with no
+  gateway/frontend change. _(Wiring `journal_manager.record_journal_entry` to feed the LLM's own
+  context is deferred — it would re-enter a prompt, so it needs sanitization/fencing first.)_
+- [~] **Link to the meeting (optional)** — stamp the originating `meeting_id` on the trade.
+- [x] **Tests** — `tests/test_rationale.py` (3): reasoning persists on the trade record,
+  `execute_trade` threads it to the writer + audit, the execution payload carries it.
 
 **Exit:** every executed trade shows a real, specific "why" in the dashboard's reasoning
 disclosure and the audit log; the placeholder string is gone.

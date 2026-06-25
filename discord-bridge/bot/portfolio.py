@@ -116,7 +116,7 @@ class Portfolio:
 
     # ── Trading ──────────────────────────────────────────────────
 
-    def buy(self, asset: str, usd_amount: float, price: float) -> Dict[str, Any]:
+    def buy(self, asset: str, usd_amount: float, price: float, reasoning: str = "") -> Dict[str, Any]:
         """
         Buy an asset with a USD amount at the given market price.
         Slippage is applied upward (worse fill for buyer).
@@ -167,6 +167,7 @@ class Portfolio:
             "slippage_pct": _SLIPPAGE_PCT,
             "fee_usd": fee,
             "fee_pct": _FEE_PCT,
+            "reasoning": reasoning,
         }
         self._append_trade(trade)
         self.save()
@@ -176,7 +177,7 @@ class Portfolio:
         )
         return trade
 
-    def sell(self, asset: str, quantity: float, price: float) -> Dict[str, Any]:
+    def sell(self, asset: str, quantity: float, price: float, reasoning: str = "") -> Dict[str, Any]:
         """
         Sell a quantity of an asset at the given market price.
         Slippage is applied downward (worse fill for seller).
@@ -226,6 +227,7 @@ class Portfolio:
             "slippage_pct": _SLIPPAGE_PCT,
             "fee_usd": fee,
             "fee_pct": _FEE_PCT,
+            "reasoning": reasoning,
         }
         self._append_trade(trade)
         self.save()
