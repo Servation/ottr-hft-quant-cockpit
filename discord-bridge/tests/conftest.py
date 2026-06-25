@@ -18,6 +18,19 @@ def _isolate_equity_log(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_risk_state(tmp_path, monkeypatch):
+    """Redirect the risk-state latch to a temp file for every test.
+
+    bot.risk_state is the sole writer of data/risk_state.json. Live data/ is shared
+    state the suite must never mutate (same rule as the equity/portfolio fixtures), so
+    point it at tmp for any test that loads or saves the latch.
+    """
+    import bot.risk_state as _risk_state
+    monkeypatch.setattr(_risk_state, "_DATA_DIR", tmp_path)
+    monkeypatch.setattr(_risk_state, "_STATE_FILE", tmp_path / "risk_state.json")
+
+
+@pytest.fixture(autouse=True)
 def _no_real_api_server(mocker):
     """Stop on_ready() tests from binding the real aiohttp port (:8001).
 
