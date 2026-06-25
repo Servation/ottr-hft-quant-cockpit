@@ -157,6 +157,11 @@ class TestSolExposureCap:
         monkeypatch.setenv("TRADING_DRY_RUN", "0")
         monkeypatch.delenv("MAX_TRADE_USD", raising=False)
         mocker.patch("bot.tools.price_feed.get_prices", new=AsyncMock(return_value=PRICES_WITH_SOL))
+        # Keep position sizing inert so these exposure-cap tests aren't perturbed by it
+        # (no volatility/regime -> no resize). Sizing has its own tests.
+        mocker.patch("bot.tools.price_feed.get_volatility", new=AsyncMock(return_value={}))
+        mocker.patch("bot.tools.price_feed.get_technical_indicators", new=AsyncMock(return_value={}))
+        mocker.patch("bot.tools.portfolio.get_total_value", return_value=1e6)
 
     def _mock_settings(self, mocker, max_sol_pct):
         """Replace bot.tools.settings with a MagicMock that returns the given cap."""

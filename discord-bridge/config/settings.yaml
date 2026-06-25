@@ -18,6 +18,16 @@ thresholds:
   # Midas/Zephyr: hard cap on SOL as a % of total portfolio value.
   # Any BUY that would push SOL above this is blocked at the execution gate.
   max_sol_exposure_pct: 20.0
+  # General per-asset concentration cap (% of total) for assets without a
+  # stricter per-asset override above. Applies to BTC/ETH/etc.
+  max_asset_exposure_pct: 35.0
+
+# Regime/volatility position sizing (bot/sizing.py). A BUY is resized to a
+# vol-targeted, regime-scaled amount; in a CHOPPY regime it shrinks hard.
+sizing:
+  target_risk_pct: 2.0        # risk budget per position, % of total (vs annualized vol)
+  choppy_regime_factor: 0.25  # multiply size in a CHOPPY regime
+  max_position_pct: 50.0      # a single BUY never exceeds this % of total value
 
 portfolio:
   starting_balance: 10000

@@ -146,13 +146,21 @@ async def test_end_to_end_trade_execution():
     # Mock price feed
     from bot.price_feed import price_feed
     original_get_prices = price_feed.get_prices
+    original_get_vol = price_feed.get_volatility
+    original_get_tech = price_feed.get_technical_indicators
     async def mock_get_prices():
         return {
             "BTC": {"price": 60000.0, "change_24h": 0.0},
             "ETH": {"price": 3000.0, "change_24h": 0.0},
             "SOL": {"price": 150.0, "change_24h": 0.0}
         }
+    # Position sizing in execute_trade would otherwise fetch live volatility/regime
+    # (network) and resize this fixed $500 test trade. Stub them for a deterministic e2e.
+    async def _empty():
+        return {}
     price_feed.get_prices = mock_get_prices
+    price_feed.get_volatility = _empty
+    price_feed.get_technical_indicators = _empty
     
     class MockDiscordBot:
         async def post_system_status(self, msg): pass
@@ -204,6 +212,8 @@ async def test_end_to_end_trade_execution():
         # Restore mocks
         agent_llm._client.chat.completions.create = original_create
         price_feed.get_prices = original_get_prices
+        price_feed.get_volatility = original_get_vol
+        price_feed.get_technical_indicators = original_get_tech
 
 if __name__ == "__main__":
     setup_environment()
