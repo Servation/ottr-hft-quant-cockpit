@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parent
 EVALS = [
     ("eval_trades.py", False),
     ("eval_backtest.py", False),
+    ("eval_risk_overlay.py", False),
     ("tests/eval_scheduler.py", False),
     ("eval_real_llm.py", True),
     ("eval_injection.py", True),

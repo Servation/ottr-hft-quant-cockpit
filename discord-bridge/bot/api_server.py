@@ -101,7 +101,29 @@ async def handle_performance(request):
         summary = metrics.summarize(
             points, btc_prices=btc if any(b for b in btc) else None
         )
-        return web.json_response({"metrics": summary, "num_points": len(points)})
+
+        # Tier 3: surface the live risk-control state (read-only, no secrets) so the
+        # dashboard can show whether enforcement is on, whether the drawdown breaker is
+        # halted, and the current drawdown vs the configured limit.
+        from bot import risk_state, settings
+        rl = settings.get("risk_limits", {})
+        rstate = risk_state.load()
+        cur_dd = None
+        values = [p[1] for p in points]
+        if len(values) >= 2:
+            peak = max(values)
+            cur_dd = (peak - values[-1]) / peak if peak > 0 else None
+        risk_block = {
+            "enabled": bool(rl.get("enabled", False)),
+            "halted": bool(rstate.get("halted", False)),
+            "halted_since": rstate.get("halted_since"),
+            "stop_loss_pct": rl.get("stop_loss_pct"),
+            "max_drawdown_halt_pct": rl.get("max_drawdown_halt_pct"),
+            "current_drawdown": cur_dd,
+        }
+        return web.json_response(
+            {"metrics": summary, "num_points": len(points), "risk": risk_block}
+        )
     except Exception as e:
         # Don't leak internals; the snapshot degrades gracefully without metrics.
         logger.error(f"Error computing performance: {e}")

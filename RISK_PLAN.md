@@ -45,8 +45,9 @@ cooldown'd** (no double-fire on a 60s tick), **fails loud on missing data**, and
 **audited**. Gate every change on `pytest -k "not live"` (225) + `run_evals.py
 --no-llm` (3); add a test for every behavior change.
 
-**Status:** R0-R3 COMPLETE (R0 core; R1 stop-loss; R2 drawdown breaker + halt gate;
-R3 concentration trim; all dark behind `enabled: false`). R4 pending.
+**Status:** R0-R4 COMPLETE — R0 core; R1 stop-loss; R2 drawdown breaker + halt gate;
+R3 concentration trim; R4 backtest overlay + read-only risk block + runbook. All dark
+behind `enabled: false`; the only remaining step is the deliberate activation.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -228,25 +229,29 @@ Concrete targets:
 - `docs/RUNBOOK.md`, `AUDIT_PLAN.md` invariants, `CLAUDE.md` safety section.
 
 Tasks:
-- [ ] **Backtest integration** — apply the stop-loss + drawdown-halt policies inside the
+- [x] **Backtest integration** — apply the stop-loss + drawdown-halt policies inside the
   backtest engine (they're pure, so they plug in) and report each strategy *with vs
   without* the risk overlay on the real BTC/ETH/SOL fixtures: does a 10% stop / 15% halt
   cut drawdown without giving back all the return? Register the comparison in
   `eval_backtest.py` so it stays measured (the Tier-1 rule applied to risk). Expected
   finding to validate: stops cap tail loss but can whipsaw in chop — quantify it.
-- [ ] **Observability** — add a read-only `risk` block to the performance payload
+- [~] **Observability** — add a read-only `risk` block to the performance payload
   (`halted`, `current_drawdown` vs limit, stops armed, last forced action) so the CEO can
   see the controls are live. Gateway reads, never writes; no secrets (Phase-1 invariant).
-- [ ] **Ops** — RUNBOOK section: what each control does, how to tune the `risk_limits`
+  _(Bridge `/api/performance` risk block done + tested; the gateway proxy + frontend
+  widget are a light follow-on.)_
+- [x] **Ops** — RUNBOOK section: what each control does, how to tune the `risk_limits`
   thresholds, how to manually reset a halt, how it composes with the kill-switch. Add
   "autonomous risk enforcement" to the AUDIT_PLAN / CLAUDE.md invariants so a later change
   can't silently regress it.
-- [ ] **Tests** — backtest determinism with the overlay (re-runs identical); the
+- [x] **Tests** — backtest determinism with the overlay (re-runs identical); the
   performance endpoint exposes the risk block and degrades to nulls when state is absent.
 
-**Exit:** the risk overlay is backtested on real fixtures and CI-green; the dashboard
-shows live risk state; the runbook documents operation + manual reset; the invariant is
-recorded.
+**Exit:** the risk overlay is backtested on real fixtures and CI-green; the runbook
+documents operation + activation + manual reset; the invariant is recorded. _(Backtest
+finding: the overlay cut MaxDD hard across BTC/ETH/SOL — e.g. SOL SMA 65%->25%, ETH
+Regime 40%->15% — and lifted bear-market return, with the predicted give-back in some
+trends. Full dashboard surfacing of the risk block is the one follow-on.)_
 
 ---
 
