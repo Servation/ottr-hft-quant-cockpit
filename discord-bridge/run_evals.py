@@ -112,6 +112,15 @@ def run_one(script: str, timeout: int, base_url: str | None) -> tuple[str, str]:
 
 
 def main() -> int:
+    # Windows consoles default to cp1252, which raises UnicodeEncodeError when we echo a
+    # child eval's emoji output — crashing the whole runner mid-suite. Force UTF-8 so the
+    # runner can always print (and keep going) regardless of the host locale.
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
     ap = argparse.ArgumentParser()
     ap.add_argument("only", nargs="*", help="Run only these eval script(s).")
     ap.add_argument("--no-llm", action="store_true", help="Skip LLM-backed evals.")
