@@ -45,18 +45,17 @@ import {
   TrendingDown
 } from 'lucide-react';
 
-// Static master registry of available cryptocurrencies (strictly crypto)
+// Addable cryptocurrencies = the backend tradeable universe minus the core BTC/ETH
+// (which are always active). Kept in sync with discord-bridge/bot/universe.py — the desk
+// only analyzes/trades these 8 (the Kraken-indicator coins). BNB/DOT/UNI/LTC were removed:
+// they're not in the universe, so the dashboard shouldn't offer them as tradeable.
 const AVAILABLE_CRYPTOS = [
   { symbol: 'SOL', name: 'Solana', colorClass: 'text-purple-400' },
-  { symbol: 'BNB', name: 'Binance Coin', colorClass: 'text-amber-400' },
   { symbol: 'XRP', name: 'Ripple', colorClass: 'text-blue-300' },
   { symbol: 'ADA', name: 'Cardano', colorClass: 'text-blue-400' },
   { symbol: 'DOGE', name: 'Dogecoin', colorClass: 'text-yellow-500' },
   { symbol: 'AVAX', name: 'Avalanche', colorClass: 'text-rose-500' },
   { symbol: 'LINK', name: 'Chainlink', colorClass: 'text-indigo-400' },
-  { symbol: 'DOT', name: 'Polkadot', colorClass: 'text-pink-400' },
-  { symbol: 'UNI', name: 'Uniswap', colorClass: 'text-pink-500' },
-  { symbol: 'LTC', name: 'Litecoin', colorClass: 'text-neutral-400' },
 ];
 
 export default function App() {
@@ -104,16 +103,12 @@ export default function App() {
       setMarketPrices((prev) => {
         if (prev[symbol]) return prev;
         const defaultDef: Record<string, { price: number; name: string }> = {
-          BNB: { price: 580, name: 'Binance Coin' },
           SOL: { price: 165, name: 'Solana' },
           XRP: { price: 0.58, name: 'Ripple' },
           ADA: { price: 0.45, name: 'Cardano' },
           DOGE: { price: 0.14, name: 'Dogecoin' },
           AVAX: { price: 14.50, name: 'Avalanche' },
-          LINK: { price: 15.20, name: 'Chainlink' },
-          DOT: { price: 6.20, name: 'Polkadot' },
-          UNI: { price: 7.50, name: 'Uniswap' },
-          LTC: { price: 82.50, name: 'Litecoin' }
+          LINK: { price: 15.20, name: 'Chainlink' }
         };
         const def = defaultDef[symbol] || { price: 100, name: symbol };
         return {
@@ -557,7 +552,7 @@ export default function App() {
           const newPrice = Math.max(0.001, oldPrice * (1 + drift));
           nextPrices[symbol] = {
             ...oldAsset,
-            price: Number(newPrice.toFixed(symbol === 'ETH' || symbol === 'BTC' || symbol === 'BNB' || symbol === 'LTC' || symbol === 'SOL' ? 2 : 4)),
+            price: Number(newPrice.toFixed(symbol === 'ETH' || symbol === 'BTC' || symbol === 'SOL' ? 2 : 4)),
             change24h: oldAsset.change24h + drift * 100
           };
         });
@@ -692,7 +687,7 @@ export default function App() {
               const isAccepted = Math.random() > 0.15;
               const activeAssetSymbols = activeCryptos;
               const chosenSymbol = activeAssetSymbols[Math.floor(Math.random() * activeAssetSymbols.length)];
-              const targetLatestPrice = marketPrices[chosenSymbol]?.price || (chosenSymbol === 'ETH' ? 3450 : chosenSymbol === 'SOL' ? 165 : chosenSymbol === 'BNB' ? 580 : 88200);
+              const targetLatestPrice = marketPrices[chosenSymbol]?.price || (chosenSymbol === 'ETH' ? 3450 : chosenSymbol === 'SOL' ? 165 : 88200);
 
               if (agent.id === 'agentScreener') {
                 nextStatus = 'IDLE';
