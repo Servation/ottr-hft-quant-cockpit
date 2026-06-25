@@ -31,6 +31,20 @@ def _isolate_risk_state(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_audit_log(tmp_path, monkeypatch):
+    """Redirect the audit log to a temp file for every test.
+
+    bot.audit.audit_event appends to AUDIT_LOG_FILE (or the live data/audit_log.jsonl when
+    unset). Mutating-tool tests (execute_trade, place_limit_order, cancel_orders, risk
+    actions) call audit_event, so without this they leak fake records into the live audit
+    trail — e.g. the recurring 'order_placed ord124' lines from test_protective_orders that
+    looked like a real $90k take-profit. Live data/ is shared state the suite must never
+    mutate (same rule as the equity / risk-state fixtures).
+    """
+    monkeypatch.setenv("AUDIT_LOG_FILE", str(tmp_path / "audit_log.jsonl"))
+
+
+@pytest.fixture(autouse=True)
 def _no_real_api_server(mocker):
     """Stop on_ready() tests from binding the real aiohttp port (:8001).
 

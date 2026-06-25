@@ -320,14 +320,23 @@ class MeetingScheduler:
             return ("unknown", "scheduler not running")
 
         jobs = self._scheduler.get_jobs()
-        if not jobs:
+        # Only actual meeting jobs count toward "next meeting" — exclude the background
+        # interval jobs (prediction grading every 15m, equity snapshot hourly). Those fire
+        # far sooner, so including them made get_next_meeting_info report the next meeting as
+        # ~15m away (the eval job's fire time) paired with the real next meeting's TYPE — a
+        # mismatch the dashboard/health surfaced as a meeting that never actually started.
+        meeting_jobs = [
+            j for j in jobs
+            if j.id.startswith("meeting_") or j.id.startswith("dynamic_meeting_")
+        ]
+        if not meeting_jobs:
             return ("unknown", "no jobs scheduled")
 
         # Find the soonest next-fire-time. Jobs can be stored in different
-        # timezones (cron/interval jobs use _TIMEZONE; dynamic meetings are
-        # created in UTC), so normalize the display to a single timezone to
-        # avoid confusing mixed "PDT"/"UTC" output that is impossible to compare.
-        soonest = min(jobs, key=lambda j: j.next_run_time)
+        # timezones (cron jobs use _TIMEZONE; dynamic meetings are created in UTC),
+        # so normalize the display to a single timezone to avoid confusing mixed
+        # "PDT"/"UTC" output that is impossible to compare.
+        soonest = min(meeting_jobs, key=lambda j: j.next_run_time)
         try:
             from zoneinfo import ZoneInfo
             local_next = soonest.next_run_time.astimezone(ZoneInfo(_TIMEZONE))
