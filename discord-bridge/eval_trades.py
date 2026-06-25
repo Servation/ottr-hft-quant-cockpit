@@ -217,11 +217,12 @@ async def test_end_to_end_trade_execution():
 
 if __name__ == "__main__":
     setup_environment()
-    from eval_utils import isolated_portfolio
+    from eval_utils import isolated_data
     try:
-        # Run inside an isolated portfolio so the eval never mutates the live
-        # data/portfolio_state.json.
-        with isolated_portfolio():
+        # Run inside isolated portfolio + meeting memory so the eval never mutates
+        # the live data/portfolio_state.json OR appends a test meeting to the live
+        # data/meeting_log.json (the e2e runs a real meeting that calls save_meeting).
+        with isolated_data():
             test_portfolio_logic()
             asyncio.run(test_end_to_end_trade_execution())
     except Exception as e:
