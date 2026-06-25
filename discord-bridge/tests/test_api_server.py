@@ -108,14 +108,15 @@ async def test_performance_computes_metrics_and_benchmark():
 
 
 @pytest.mark.asyncio
-async def test_performance_includes_risk_block():
-    # Tier 3: the read-only risk block reflects the dark default + the persisted latch.
+async def test_performance_includes_risk_block(mocker):
+    # Tier 3: the read-only risk block reflects the configured switch + the persisted latch.
+    mocker.patch.dict("bot.settings", {"risk_limits": {"enabled": True}})
     import bot.risk_state as rs
     rs.save({"halted": True, "halted_since": 123.0, "last_action_ts": {}})
     resp = await api_server.handle_performance(None)
     assert resp.status == 200
     body = json.loads(resp.body.decode())
     assert "risk" in body
-    assert body["risk"]["enabled"] is False        # dark by default
+    assert body["risk"]["enabled"] is True         # reflects the configured switch
     assert body["risk"]["halted"] is True          # reflects the persisted latch
     assert body["risk"]["halted_since"] == 123.0

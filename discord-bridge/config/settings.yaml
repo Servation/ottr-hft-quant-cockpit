@@ -34,7 +34,7 @@ sizing:
 # runtime yet. Concentration caps stay in `thresholds` above (the buy gate + R3 trim
 # share them); this block holds the new stop-loss / drawdown / cooldown knobs.
 risk_limits:
-  enabled: false               # master switch for autonomous enforcement (off until R1+)
+  enabled: true                # master switch for autonomous enforcement (ACTIVATED 2026-06-25)
   check_interval_seconds: 60   # reuse the 60s alert-loop cadence
   # Stop-loss (R1): exit a position once it trades this far below its average cost.
   stop_loss_pct: 10.0          # promoted from the old (unused) thresholds.stop_loss_pct

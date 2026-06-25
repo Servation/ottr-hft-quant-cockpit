@@ -150,9 +150,10 @@ async def test_drawdown_halt_allows_sell(monkeypatch, mocker):
 @pytest.mark.asyncio
 async def test_drawdown_halt_ignored_while_disabled(monkeypatch, mocker):
     monkeypatch.delenv("MAX_TRADE_USD", raising=False)
+    mocker.patch.dict("bot.tools.settings", {"risk_limits": {"enabled": False}})  # enforcement off
     import bot.risk_state as rs
-    rs.save({"halted": True, "halted_since": 1.0, "last_action_ts": {}})   # latched but dark
+    rs.save({"halted": True, "halted_since": 1.0, "last_action_ts": {}})   # latched but disabled
     mocker.patch.dict("bot.tools.portfolio._state", {"holdings": {}})
     buy = mocker.patch("bot.tools.portfolio.buy", return_value={"quantity": 0.01, "fill_price": 50000.0})
     await handle_tool_call("execute_trade", {"action": "BUY", "asset": "BTC", "amount": 500})
-    buy.assert_called_once()    # risk_limits.enabled is false -> latch ignored
+    buy.assert_called_once()    # enforcement disabled -> latch ignored
