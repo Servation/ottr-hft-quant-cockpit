@@ -306,6 +306,37 @@ class MeetingEngine:
                 )
                 logger.debug("%s (debate) responded in %.2fs", agent_id, latency)
 
+        # ---- 3b. Belief-revision round: dissenters reconsider --------------
+        # The debate is one-shot; this gives agents who voted against the emerging
+        # consensus the strongest opposing argument and a chance to confirm or change
+        # their vote. The revised vote (appended as a [DEBATE] segment) supersedes.
+        revision_targets, consensus_line, _counter = self._prep_revision(agent_contributions)
+        if revision_targets:
+            await post_message_fn(
+                mt.facilitator_id,
+                "🔄 **Revision** — the room is leaning one way. Dissenters, weigh the counter-case and reconsider.",
+            )
+            conversation_log.append(
+                f"[{AGENTS[mt.facilitator_id].emoji} {AGENTS[mt.facilitator_id].name}]: "
+                "Dissenters, reconsider given the counter-argument."
+            )
+            for agent_id in revision_targets:
+                await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "THINKING", "current_task": "Reconsidering"}])
+                context = self._build_agent_context(
+                    agent_id, mt, conversation_log,
+                    price_data, portfolio_summary, ceo_directives, memory_context,
+                    revision_context=consensus_line,
+                )
+                response, _ = await agent_llm.generate_response(agent_id, context, strip_output_format=True)
+                # Append as a [DEBATE] segment so the closing tally uses the revised vote.
+                agent_contributions[agent_id] += f"\n\n[DEBATE]: {response}"
+                await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "SPEAKING", "current_task": "Revising"}])
+                await post_message_fn(agent_id, response)
+                await sync_agent_state([{"id": agent_id, "name": AGENTS[agent_id].name, "status": "IDLE", "current_task": "Waiting"}])
+                conversation_log.append(
+                    f"[{AGENTS[agent_id].emoji} {AGENTS[agent_id].name}]: {response}"
+                )
+
         # ---- 4. Facilitator closing summary & Execution -------------------
         await sync_agent_state([{"id": mt.facilitator_id, "name": AGENTS[mt.facilitator_id].name, "status": "THINKING", "current_task": "Drafting summary & executing"}])
         closing_msg, _ = await self._build_closing(
@@ -389,6 +420,53 @@ class MeetingEngine:
         """Return all non-facilitator participants so everyone can participate in the debate."""
         return list(participant_ids)
 
+    def _prep_revision(self, contributions: Dict[str, str]):
+        """From the debate votes, find dissenters worth a belief-revision turn.
+
+        Returns (dissenter_ids, consensus_line, counter_argument). Empty when there
+        is no clear majority on the most-voted asset or nobody dissents — in which
+        case the revision round is skipped (the debate already agreed).
+        """
+        # Latest debate vote per agent, tallied per asset.
+        asset_dir_voters: Dict[str, Dict[str, List[str]]] = {}
+        for agent_id, text in contributions.items():
+            if "[DEBATE]:" not in text:
+                continue
+            debate_text = text.split("[DEBATE]:")[-1]
+            seen_assets = set()
+            for m in _VOTE_RE.finditer(debate_text):
+                direction = m.group(1).upper()
+                asset = (m.group(2) or "MARKET").upper()
+                if direction == "ABSTAIN" or asset in seen_assets:
+                    continue
+                seen_assets.add(asset)
+                asset_dir_voters.setdefault(asset, {}).setdefault(direction, []).append(agent_id)
+
+        if not asset_dir_voters:
+            return [], "", ""
+
+        # Primary asset = the one with the most votes; majority direction on it.
+        primary = max(asset_dir_voters, key=lambda a: sum(len(v) for v in asset_dir_voters[a].values()))
+        dirs = asset_dir_voters[primary]
+        majority_dir = max(dirs, key=lambda d: len(dirs[d]))
+        n_for = len(dirs[majority_dir])
+        n_total = sum(len(v) for v in dirs.values())
+        dissenters = [aid for d, voters in dirs.items() if d != majority_dir for aid in voters]
+
+        # Only run revision when there's a real majority to defend and someone dissents.
+        if n_for <= n_total / 2 or not dissenters:
+            return [], "", ""
+
+        # Counter-argument: a consensus-aligned agent's debate text (the case to beat).
+        aligned_id = dirs[majority_dir][0]
+        counter = contributions.get(aligned_id, "").split("[DEBATE]:")[-1].strip()[:400]
+        aligned_name = AGENTS[aligned_id].name.split()[0] if aligned_id in AGENTS else aligned_id
+        consensus_line = (
+            f"Emerging consensus: **{majority_dir} {primary}** ({n_for} of {n_total} votes).\n"
+            f"Strongest case for it (from {aligned_name}): \"{counter}\""
+        )
+        return list(dict.fromkeys(dissenters)), consensus_line, counter
+
     # -- context building ---------------------------------------------------
 
     def _build_opening(
@@ -424,6 +502,7 @@ class MeetingEngine:
         ceo_directives: str,
         memory_context: str,
         is_debate_round: bool = False,
+        revision_context: Optional[str] = None,
     ) -> list[dict]:
         """
         Build the chat-completion messages list for a single agent turn.
@@ -499,7 +578,19 @@ class MeetingEngine:
             
             user_content_parts.append(identity_anchor)
 
-        if is_debate_round:
+        if revision_context:
+            user_content_parts.append(
+                "### YOUR TASK — REVISION ROUND\n"
+                "The debate is over and a consensus is forming, but you dissented. "
+                "Weigh the strongest argument from the other side honestly.\n\n"
+                + revision_context +
+                "\n\nReconsider. You may HOLD your position or CHANGE your mind — changing it when "
+                "the counter-argument is genuinely stronger is a sign of good judgment, not weakness.\n"
+                "Reply in 2-3 sentences (are you holding or changing, and why), then end with EXACTLY:\n"
+                "   Final Vote: <DIRECTION> <ASSET>   (BUY/SELL/HOLD/ABSTAIN, no brackets)\n"
+                "Keep it under 100 words."
+            )
+        elif is_debate_round:
             user_content_parts.append(
                 "### YOUR TASK — DEBATE ROUND\n"
                 "Now that all initial reports are on the table, this is the full assessment round.\n"
