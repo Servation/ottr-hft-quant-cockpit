@@ -36,6 +36,29 @@ def _dry_run() -> bool:
     return os.getenv("TRADING_DRY_RUN", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _update_highs(state, holdings, prices) -> bool:
+    """Maintain per-asset trailing high-water marks in `state['highs']` (the trailing-stop
+    reference). Ratchets each held asset's high up to the live price and drops the mark
+    when a position closes, so the trail resets on the next entry. Returns True if anything
+    changed (so the caller persists it)."""
+    highs = state.setdefault("highs", {})
+    changed = False
+    held = set()
+    for asset, h in holdings.items():
+        qty = float(h.get("quantity", 0.0) or 0.0)
+        price = float(prices.get(asset, {}).get("price", 0.0) or 0.0)
+        if qty > 0 and price > 0:
+            held.add(asset)
+            if price > float(highs.get(asset, 0.0) or 0.0):
+                highs[asset] = price
+                changed = True
+    for asset in list(highs):
+        if asset not in held:
+            del highs[asset]
+            changed = True
+    return changed
+
+
 async def enforce(bot, prices: Dict[str, dict]) -> None:
     """Run one enforcement pass. No-op unless enabled; never raises into the loop."""
     if not _enabled() or not prices:
@@ -48,13 +71,21 @@ async def enforce(bot, prices: Dict[str, dict]) -> None:
         dirty = False
         emergencies: List[dict] = []
 
-        # R1 — stop-loss: exit any position trading past stop_loss_pct below avg cost.
+        # R1 — stop-loss: exit any position past stop_loss_pct below its stop reference
+        # (avg cost, or a trailing high-water mark when stop_loss_mode=trailing).
         holdings = portfolio._state.get("holdings", {})
+        stop_mode = str(cfg.get("stop_loss_mode", "avg_cost"))
+        highs = None
+        if stop_mode == "trailing":
+            if _update_highs(state, holdings, prices):
+                dirty = True
+            highs = state.get("highs")
         breaches = risk.stop_loss_breaches(
             holdings,
             prices,
             stop_pct=float(cfg.get("stop_loss_pct", 10.0)),
-            mode=str(cfg.get("stop_loss_mode", "avg_cost")),
+            mode=stop_mode,
+            highs=highs,
         )
         for action in breaches:
             result = await _execute_risk_action(action, prices, state, now, cooldown, bot)

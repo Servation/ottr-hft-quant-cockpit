@@ -37,7 +37,9 @@ Autonomous risk controls run inside the 60s monitor loop, configured under
 
 What runs once enabled:
 - **Stop-loss** — a position trading at or under `stop_loss_pct` (10%) below its
-  average cost is auto-sold (`risk_action action=STOP_LOSS`) and the desk convened.
+  average cost is auto-sold (`risk_action action=STOP_LOSS`) and the desk convened. Set
+  `stop_loss_mode: trailing` to instead stop a fixed % off the position's running high
+  (locks in gains; backtested to cut drawdown sharply on passive holds).
 - **Drawdown breaker** — when portfolio drawdown from its peak exceeds
   `max_drawdown_halt_pct` (15%), new BUYs are blocked (`trade_blocked
   reason=drawdown_halt`); SELLs/de-risking stay open. Auto-resumes once drawdown

@@ -175,25 +175,35 @@ def _apply_risk(target_w: float, price: float, equity: float, current_w: float,
     """Overlay the Tier 3 controls on a base target weight, over backtest bars so the
     controls become measurable. `rstate` carries state across bars (mutated in place).
 
-    Stop-loss: exit a long that's fallen `stop_loss_pct` from its entry, and stay out
-    until the base goes flat (no re-buying into the same downtrend). Drawdown halt: while
+    Stop-loss: exit a long that's fallen `stop_loss_pct` below its reference and stay out
+    until the base goes flat (no re-buying into the same downtrend). The reference is the
+    entry price (`stop_mode` "fixed", the default) or the position's running high
+    (`stop_mode` "trailing", which ratchets up to lock in gains). Drawdown halt: while
     equity is past `max_drawdown_halt_pct` off its peak, block *increases* in weight (like
     the live halt blocking new BUYs — holdings are kept, so the book can still recover),
     resuming below `drawdown_resume_pct`.
     """
     sl = risk.get("stop_loss_pct")
     if sl:
+        trailing = risk.get("stop_mode") == "trailing"
         if target_w <= 0.0:
             rstate["entry"] = None
+            rstate["high"] = None
             rstate["stopped"] = False
         elif rstate.get("stopped"):
             target_w = 0.0
-        elif rstate.get("entry") is None:
-            rstate["entry"] = price
-        elif price <= rstate["entry"] * (1.0 - sl / 100.0):
-            rstate["entry"] = None
-            rstate["stopped"] = True
-            target_w = 0.0
+        else:
+            if rstate.get("entry") is None:
+                rstate["entry"] = price
+                rstate["high"] = price
+            if price > rstate.get("high", price):
+                rstate["high"] = price
+            ref = rstate["high"] if trailing else rstate["entry"]
+            if price <= ref * (1.0 - sl / 100.0):
+                rstate["entry"] = None
+                rstate["high"] = None
+                rstate["stopped"] = True
+                target_w = 0.0
     hp = risk.get("max_drawdown_halt_pct")
     if hp:
         peak = max(rstate.get("peak", equity), equity)

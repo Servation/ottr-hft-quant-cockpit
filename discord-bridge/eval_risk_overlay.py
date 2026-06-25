@@ -56,6 +56,21 @@ def _check_asset(name, candles):
         again = run_backtest(candles, make(), risk=risk)
         assert again["final_value"] == over["final_value"], f"{name}: non-deterministic overlay"
 
+    # Stop-mode comparison (stop only, no halt): fixed (from entry) vs trailing (from the
+    # position high). Answers whether the trailing variant earns its keep.
+    sl = risk["stop_loss_pct"]
+    print(f"\n[{name}] stop mode, stop-only ({sl:.0f}%): fixed vs trailing")
+    print(f"{'Strategy':<24}{'fix ret':>10}{'trail ret':>11}{'fix DD':>9}{'trail DD':>10}")
+    print("-" * 64)
+    for make in (lambda: BuyAndHold(), lambda: RegimeStrategy()):
+        fixed = run_backtest(candles, make(), risk={"stop_loss_pct": sl, "stop_mode": "fixed"})
+        trail = run_backtest(candles, make(), risk={"stop_loss_pct": sl, "stop_mode": "trailing"})
+        fm, tm = fixed["metrics"], trail["metrics"]
+        print(f"{fixed['strategy']:<24}"
+              f"{_pct(fm.get('total_return')):>10}{_pct(tm.get('total_return')):>11}"
+              f"{_pct(fm.get('max_drawdown')):>9}{_pct(tm.get('max_drawdown')):>10}")
+        assert fixed["final_value"] > 0 and trail["final_value"] > 0, f"{name}: stop-mode blew up"
+
 
 def main():
     fixtures = sorted(glob.glob(os.path.join(FIXTURE_DIR, "*_daily.csv")))
