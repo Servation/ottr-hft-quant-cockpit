@@ -62,7 +62,13 @@ class PriceFeed:
     def __init__(self) -> None:
         price_feed_cfg = settings.get("price_feed", {})
         self._cache_ttl: float = float(price_feed_cfg.get("cache_ttl_seconds", 60))
-        
+        # Outlier guard: reject a fetched price that deviates more than this % from the
+        # last known-good value for the asset (or is non-positive), substituting the
+        # last-good price. Stops an API glitch (e.g. a $100k BTC print, or a partial
+        # payload that drops an asset to $0) from reaching valuation/risk math, where it
+        # once drove a bogus forced trade. 0 disables the guard.
+        self._max_deviation_pct: float = float(price_feed_cfg.get("max_deviation_pct", 50.0))
+
         # New caches for rate-limited endpoints
         self._volatility_cache_ttl: float = 4 * 3600  # 4 hours
         self._yield_cache_ttl: float = 4 * 3600       # 4 hours
@@ -153,10 +159,48 @@ class PriceFeed:
                         return self._cached_prices
                     raise Exception("Critical Market Data Unavailable: Both primary and fallback APIs failed.")
 
+        # Guard the freshly-fetched tick against glitches BEFORE trusting it. self._cached_prices
+        # still holds the prior good tick here (we overwrite it just below), so it is the
+        # reference for the deviation check.
+        prices = self._sanitize_prices(prices)
+
         self._cached_prices = prices
         self._cache_timestamp = now
         self._history.append((now, prices))
         return prices
+
+    def _sanitize_prices(
+        self, fresh: Dict[str, Dict[str, float]]
+    ) -> Dict[str, Dict[str, float]]:
+        """Reject implausible values in a freshly-fetched tick, substituting the last
+        known-good price for that asset. Catches the two failure modes that let a $100k
+        BTC print through and drove a bogus concentration trim: a non-positive price (a
+        partial payload that drops an asset to $0) and an outlier that jumps more than
+        max_deviation_pct from the last cached value. On a cold start (no reference) or
+        with the guard disabled (max_deviation_pct<=0) values pass through unchanged.
+        Substitutions are logged loudly so a flaky upstream is visible."""
+        reference = self._cached_prices or {}
+        max_dev = self._max_deviation_pct
+        clean: Dict[str, Dict[str, float]] = {}
+        for symbol, entry in fresh.items():
+            price = float((entry or {}).get("price", 0.0) or 0.0)
+            ref_entry = reference.get(symbol) or {}
+            ref_price = float(ref_entry.get("price", 0.0) or 0.0)
+            bad_reason = None
+            if price <= 0.0:
+                if ref_price > 0.0:
+                    bad_reason = "non-positive"
+            elif max_dev > 0 and ref_price > 0.0 and abs(price - ref_price) / ref_price > (max_dev / 100.0):
+                bad_reason = f"{abs(price - ref_price) / ref_price * 100:.0f}% > {max_dev:.0f}% deviation"
+            if bad_reason:
+                logger.warning(
+                    "Price guard: %s=%.6g rejected (%s; last good %.6g) — using last known-good",
+                    symbol, price, bad_reason, ref_price,
+                )
+                clean[symbol] = dict(ref_entry)
+            else:
+                clean[symbol] = entry
+        return clean
 
     def get_price_history(self) -> List[Dict[str, Any]]:
         """

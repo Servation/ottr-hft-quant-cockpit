@@ -73,6 +73,11 @@ token_budgets:
 
 price_feed:
   cache_ttl_seconds: 60
+  # Outlier guard: reject a fetched price that deviates more than this % from the last
+  # known-good value for the asset (or is non-positive), substituting the last-good price.
+  # Stops an API glitch (e.g. a $100k BTC print) from reaching valuation/risk math, where
+  # it once drove a bogus concentration trim. 0 disables.
+  max_deviation_pct: 50.0
 
 discord:
   webhook_delay_seconds: 2
