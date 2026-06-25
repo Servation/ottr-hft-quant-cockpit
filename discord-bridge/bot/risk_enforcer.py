@@ -70,6 +70,10 @@ async def enforce(bot, prices: Dict[str, dict]) -> None:
         dirty = dirty or dd_changed
         emergencies.extend(dd_emergencies)
 
+        # R3 — concentration trim: pull any position that drifted over its cap back to it.
+        if await _eval_concentration(holdings, prices, state, now, cooldown, bot, cfg):
+            dirty = True
+
         if dirty:
             risk_state.save(state)
         if emergencies:
@@ -186,6 +190,40 @@ async def _eval_drawdown(state, prices, cfg, now, bot):
         ))
         return True, []
     return False, []
+
+
+async def _eval_concentration(holdings, prices, state, now, cooldown, bot, cfg) -> bool:
+    """Trim any position that has drifted over its concentration cap + band back to the
+    cap, via a partial SELL. Uses the SAME caps as the buy-time gate (`thresholds.*` with
+    per-asset overrides), so block and trim never disagree. Returns True if a forced sell
+    stamped the latch (so the caller persists it). Runs regardless of any halt — a trim
+    only ever reduces risk.
+    """
+    thresholds = settings.get("thresholds", {})
+    default_cap = float(thresholds.get("max_asset_exposure_pct", 0) or 0)
+    per_asset_caps = {}
+    for asset in holdings:
+        override = thresholds.get(f"max_{asset.lower()}_exposure_pct")
+        if override is not None:
+            per_asset_caps[asset] = float(override)
+    if default_cap <= 0 and not per_asset_caps:
+        return False
+    try:
+        total_value = portfolio.get_total_value(prices)
+    except Exception:
+        logger.exception("Concentration trim: failed to value the portfolio")
+        return False
+
+    band = float(cfg.get("concentration_trim_band_pct", 5.0))
+    breaches = risk.concentration_breaches(
+        holdings, prices, total_value, default_cap, per_asset_caps, band
+    )
+    dirty = False
+    for action in breaches:
+        result = await _execute_risk_action(action, prices, state, now, cooldown, bot)
+        if result in ("sold", "dry_run"):
+            dirty = True
+    return dirty
 
 
 async def _convene_emergency(bot, alert_data: List[dict]) -> None:

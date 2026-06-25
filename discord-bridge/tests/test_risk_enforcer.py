@@ -135,3 +135,31 @@ async def test_drawdown_resumes_below_resume_line(fake_bot, patched, monkeypatch
     monkeypatch.setattr(risk_enforcer.portfolio, "_state", {"holdings": {}})
     await risk_enforcer.enforce(fake_bot, _prices(BTC=92.0))
     assert risk_state.load()["halted"] is False
+
+
+# ── R3: concentration trim ────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_concentration_trims_over_cap(fake_bot, patched, monkeypatch):
+    # SOL is $5000 of a $10k book (50%); SOL's 20% override (vs the 35% default) plus the
+    # 5% band means 50% > 25% -> trim down to the 20% cap.
+    monkeypatch.setattr(risk_enforcer.equity, "load_curve", lambda: [])   # no drawdown step
+    monkeypatch.setattr(risk_enforcer.portfolio, "get_total_value", lambda p: 10000.0)
+    monkeypatch.setattr(risk_enforcer.portfolio, "_state",
+                        {"holdings": _holdings(SOL=(50.0, 80.0))})
+    await risk_enforcer.enforce(fake_bot, _prices(SOL=100.0))
+    patched.assert_called_once()
+    asset, qty, price = patched.call_args[0]
+    # value 5000, target 20% * 10000 = 2000 -> trim 3000 / $100 = 30 coins.
+    assert asset == "SOL" and round(qty, 6) == 30.0
+
+
+@pytest.mark.asyncio
+async def test_concentration_within_band_not_trimmed(fake_bot, patched, monkeypatch):
+    # BTC at 38% with the 35% default cap + 5% band (= 40%): inside the band -> no trim.
+    monkeypatch.setattr(risk_enforcer.equity, "load_curve", lambda: [])
+    monkeypatch.setattr(risk_enforcer.portfolio, "get_total_value", lambda p: 10000.0)
+    monkeypatch.setattr(risk_enforcer.portfolio, "_state",
+                        {"holdings": _holdings(BTC=(38.0, 90.0))})
+    await risk_enforcer.enforce(fake_bot, _prices(BTC=100.0))
+    patched.assert_not_called()

@@ -45,8 +45,8 @@ cooldown'd** (no double-fire on a 60s tick), **fails loud on missing data**, and
 **audited**. Gate every change on `pytest -k "not live"` (225) + `run_evals.py
 --no-llm` (3); add a test for every behavior change.
 
-**Status:** R0-R2 COMPLETE (R0 core; R1 stop-loss enforcer; R2 drawdown breaker +
-execute_trade halt gate; all dark behind `enabled: false`). R3-R4 pending.
+**Status:** R0-R3 COMPLETE (R0 core; R1 stop-loss; R2 drawdown breaker + halt gate;
+R3 concentration trim; all dark behind `enabled: false`). R4 pending.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -201,15 +201,15 @@ Concrete targets:
   `max_asset_exposure_pct`) — read by both the buy gate and the trim.
 
 Tasks:
-- [ ] **Detect + trim** — each tick, `risk.concentration_breaches` flags positions over
+- [x] **Detect + trim** — each tick, `risk.concentration_breaches` flags positions over
   `cap + concentration_trim_band_pct` (a tolerance band so normal wiggle doesn't churn);
   the shared `_execute_risk_action()` SELLs the **excess** back to the cap (partial),
   cooldown-latched, dry-run-respecting, audited, posted. Trim only ever *reduces* an
   oversized position (never opens or flips).
-- [ ] **Coherence with the buy gate** — same config keys, same per-asset override
+- [x] **Coherence with the buy gate** — same config keys, same per-asset override
   precedence (SOL stricter), so a buy blocked at 20% and a trim back to 20% use one source
   of truth. No second definition of "the cap."
-- [ ] **Tests** — a position above `cap + band` trims to the cap; a position within the
+- [x] **Tests** — a position above `cap + band` trims to the cap; a position within the
   band is untouched; the SOL override trims tighter than the general cap; cooldown
   prevents repeated trims within the window.
 
