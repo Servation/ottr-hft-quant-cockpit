@@ -77,6 +77,57 @@ async def test_get_prices_both_fail_uses_stale_cache(price_feed_instance, mocker
     prices = await price_feed_instance.get_prices()
     assert prices["BTC"]["price"] == 123.0
 
+def test_sanitize_prices_substitutes_outlier_and_zero(price_feed_instance):
+    """The outlier guard replaces an outlier print or a dropped (zero) asset with the
+    last known-good value, so a glitch tick can't reach valuation/risk math; a normal
+    move passes through. Regression for the $100k BTC tick that drove a bogus trim."""
+    feed = price_feed_instance
+    feed._max_deviation_pct = 50.0
+    feed._cached_prices = {
+        "BTC": {"price": 64000.0, "change_24h": 1.0},
+        "ETH": {"price": 1700.0, "change_24h": 0.5},
+        "SOL": {"price": 70.0, "change_24h": -2.0},
+    }
+    fresh = {
+        "BTC": {"price": 100000.0, "change_24h": 5.0},  # +56% outlier -> substituted
+        "ETH": {"price": 1734.0, "change_24h": 0.6},    # +2% normal -> kept
+        "SOL": {"price": 0.0, "change_24h": 0.0},       # dropped to $0 -> substituted
+    }
+    clean = feed._sanitize_prices(fresh)
+    assert clean["BTC"]["price"] == 64000.0   # outlier rejected, last-good used
+    assert clean["ETH"]["price"] == 1734.0    # normal move kept
+    assert clean["SOL"]["price"] == 70.0      # zero rejected, last-good used
+
+
+def test_sanitize_prices_passthrough_on_cold_start(price_feed_instance):
+    """With no reference cache yet, the guard can't validate, so values pass through
+    unchanged — a cold start must never blank the book."""
+    feed = price_feed_instance
+    feed._cached_prices = None
+    fresh = {"BTC": {"price": 100000.0, "change_24h": 0.0}}
+    assert feed._sanitize_prices(fresh)["BTC"]["price"] == 100000.0
+
+
+@pytest.mark.asyncio
+async def test_get_prices_applies_guard_against_outlier(price_feed_instance, mocker):
+    """End to end: a refetch returning a BTC outlier is sanitized against the prior
+    cached tick before being returned and re-cached."""
+    feed = price_feed_instance
+    feed._max_deviation_pct = 50.0
+    feed._cached_prices = {"BTC": {"price": 64000.0, "change_24h": 0.0}}  # prior good tick
+    feed._cache_timestamp = 0  # expired -> force a refetch
+
+    def gecko_side_effect(url, *args, **kwargs):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.json.return_value = {"bitcoin": {"usd": 100000.0, "usd_24h_change": 0.0}}
+        return resp
+    mocker.patch("httpx.AsyncClient.get", new_callable=AsyncMock, side_effect=gecko_side_effect)
+
+    prices = await feed.get_prices()
+    assert prices["BTC"]["price"] == 64000.0  # guard kept last-good, not the $100k glitch
+
+
 @pytest.mark.asyncio
 async def test_get_price_history(price_feed_instance):
     price_feed_instance._history = [(123456789.0, {"BTC": {"price": 1.0}})]
