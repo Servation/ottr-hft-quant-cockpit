@@ -10,7 +10,7 @@ nothing real trades; the risk-state latch is isolated to a temp file by the auto
 import pytest
 from unittest.mock import AsyncMock, MagicMock
 
-from bot import risk_enforcer
+from bot import risk_enforcer, risk_state
 
 
 def _holdings(**kv):
@@ -96,3 +96,42 @@ async def test_missing_price_is_skipped(fake_bot, patched):
     # BTC is held but absent from the feed: a missing price must never read as a loss.
     await risk_enforcer.enforce(fake_bot, _prices(ETH=2000.0))
     patched.assert_not_called()
+
+
+# ── R2: drawdown circuit breaker ──────────────────────────────────────
+
+def _curve(n, value=100.0):
+    return [{"total_value": value}] * n
+
+
+@pytest.mark.asyncio
+async def test_drawdown_trips_and_latches(fake_bot, patched, monkeypatch):
+    # Peak 100, live 80 -> 20% drawdown, halt at 15% -> trips and latches.
+    monkeypatch.setattr(risk_enforcer.equity, "load_curve", lambda: _curve(30))
+    monkeypatch.setattr(risk_enforcer.portfolio, "get_total_value", lambda p: 80.0)
+    monkeypatch.setattr(risk_enforcer.portfolio, "_state", {"holdings": {}})
+    await risk_enforcer.enforce(fake_bot, _prices(BTC=80.0))
+    assert risk_state.load()["halted"] is True
+    fake_bot._trading_floor_channel.send.assert_awaited()    # halt announced
+    risk_enforcer._convene_emergency.assert_awaited()        # desk convened
+
+
+@pytest.mark.asyncio
+async def test_drawdown_thin_curve_never_trips(fake_bot, patched, monkeypatch):
+    # Only 5 points (< min_curve_points): a thin series must not trip, even on a deep loss.
+    monkeypatch.setattr(risk_enforcer.equity, "load_curve", lambda: _curve(5))
+    monkeypatch.setattr(risk_enforcer.portfolio, "get_total_value", lambda p: 40.0)
+    monkeypatch.setattr(risk_enforcer.portfolio, "_state", {"holdings": {}})
+    await risk_enforcer.enforce(fake_bot, _prices(BTC=40.0))
+    assert risk_state.load()["halted"] is False
+
+
+@pytest.mark.asyncio
+async def test_drawdown_resumes_below_resume_line(fake_bot, patched, monkeypatch):
+    # Already halted; recover to 8% (< the 10% resume line) -> clears the latch.
+    risk_state.save({"halted": True, "halted_since": 1.0, "last_action_ts": {}})
+    monkeypatch.setattr(risk_enforcer.equity, "load_curve", lambda: _curve(30))
+    monkeypatch.setattr(risk_enforcer.portfolio, "get_total_value", lambda p: 92.0)
+    monkeypatch.setattr(risk_enforcer.portfolio, "_state", {"holdings": {}})
+    await risk_enforcer.enforce(fake_bot, _prices(BTC=92.0))
+    assert risk_state.load()["halted"] is False

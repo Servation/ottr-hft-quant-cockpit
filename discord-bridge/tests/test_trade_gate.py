@@ -120,3 +120,39 @@ async def test_sol_override_is_stricter_than_general(monkeypatch, mocker):
 
     assert "exposure cap" in res.lower() and "SOL" in res
     buy.assert_not_called()
+
+
+# --- Drawdown halt gate (Tier 3 R2) ---------------------------------------
+
+@pytest.mark.asyncio
+async def test_drawdown_halt_blocks_buy(monkeypatch, mocker):
+    monkeypatch.delenv("MAX_TRADE_USD", raising=False)
+    mocker.patch.dict("bot.tools.settings", {"risk_limits": {"enabled": True}})
+    import bot.risk_state as rs
+    rs.save({"halted": True, "halted_since": 1.0, "last_action_ts": {}})
+    buy = mocker.patch("bot.tools.portfolio.buy")
+    res = await handle_tool_call("execute_trade", {"action": "BUY", "asset": "BTC", "amount": 500})
+    assert "halt" in res.lower()
+    buy.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_drawdown_halt_allows_sell(monkeypatch, mocker):
+    monkeypatch.delenv("MAX_TRADE_USD", raising=False)
+    mocker.patch.dict("bot.tools.settings", {"risk_limits": {"enabled": True}})
+    import bot.risk_state as rs
+    rs.save({"halted": True, "halted_since": 1.0, "last_action_ts": {}})
+    sell = mocker.patch("bot.tools.portfolio.sell", return_value={"quantity": 0.01, "fill_price": 50000.0})
+    await handle_tool_call("execute_trade", {"action": "SELL", "asset": "BTC", "amount": 0.01})
+    sell.assert_called_once()   # SELLs (de-risking) stay allowed during a halt
+
+
+@pytest.mark.asyncio
+async def test_drawdown_halt_ignored_while_disabled(monkeypatch, mocker):
+    monkeypatch.delenv("MAX_TRADE_USD", raising=False)
+    import bot.risk_state as rs
+    rs.save({"halted": True, "halted_since": 1.0, "last_action_ts": {}})   # latched but dark
+    mocker.patch.dict("bot.tools.portfolio._state", {"holdings": {}})
+    buy = mocker.patch("bot.tools.portfolio.buy", return_value={"quantity": 0.01, "fill_price": 50000.0})
+    await handle_tool_call("execute_trade", {"action": "BUY", "asset": "BTC", "amount": 500})
+    buy.assert_called_once()    # risk_limits.enabled is false -> latch ignored

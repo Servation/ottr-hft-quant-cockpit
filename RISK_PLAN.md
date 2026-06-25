@@ -45,8 +45,8 @@ cooldown'd** (no double-fire on a 60s tick), **fails loud on missing data**, and
 **audited**. Gate every change on `pytest -k "not live"` (225) + `run_evals.py
 --no-llm` (3); add a test for every behavior change.
 
-**Status:** R0-R1 COMPLETE (R0 pure core; R1 autonomous stop-loss enforcer wired into
-the 60s loop, dark behind `enabled: false`). R2-R4 pending.
+**Status:** R0-R2 COMPLETE (R0 core; R1 stop-loss enforcer; R2 drawdown breaker +
+execute_trade halt gate; all dark behind `enabled: false`). R3-R4 pending.
 
 Status legend: `[ ]` todo · `[~]` in progress · `[x]` done.
 
@@ -163,24 +163,24 @@ Concrete targets:
   `MAX_TRADE_USD` (`:208-223`) and concentration (`:225-258`) gates.
 
 Tasks:
-- [ ] **Trip / latch** — each tick compute current drawdown = `(peak - live_value)/peak`
+- [x] **Trip / latch** — each tick compute current drawdown = `(peak - live_value)/peak`
   where `peak = max(curve values, live_value)` and `live_value =
   portfolio.get_total_value(prices)` (responsive at 60s even though the curve samples
   hourly). On `drawdown >= max_drawdown_halt_pct`, latch `halted=true` in `risk_state`,
   post to the trading floor, and convene an emergency meeting (reuse the alert path). Skip
   entirely until the curve has `>= min_curve_points` (fail-loud: never trip on a thin
   series).
-- [ ] **Enforce the halt** — `execute_trade` reads the latch and **blocks new BUYs**
+- [x] **Enforce the halt** — `execute_trade` reads the latch and **blocks new BUYs**
   (read tools and SELLs stay allowed, so the desk can de-risk and reason). This is a
   *softer* auto-tripped sibling of the hard `TRADING_DRY_RUN` master kill: they compose
   (kill-switch off = nothing trades; halt = stop *adding* risk).
-- [ ] **Resume** — auto-unlatch when drawdown recovers below `drawdown_resume_pct`
+- [x] **Resume** — auto-unlatch when drawdown recovers below `drawdown_resume_pct`
   (hysteresis from R0); also expose a manual reset (a tool / CEO directive, audited).
   The latch persists, so a restart mid-drawdown does **not** silently resume buying.
-- [ ] **Optional auto-de-risk** — `drawdown_auto_derisk` (default **false**): when true,
+- [~] **Optional auto-de-risk** — `drawdown_auto_derisk` (default **false**): when true,
   on trip also trim the most-concentrated / worst positions via the R3 path. Conservative
   default is halt-only; forced liquidation is opt-in.
-- [ ] **Tests** — breaker trips at the halt threshold, holds through the hysteresis band,
+- [x] **Tests** — breaker trips at the halt threshold, holds through the hysteresis band,
   clears below resume; a halted state blocks a BUY in `execute_trade` but allows a SELL;
   the latch round-trips through `risk_state.json`; a thin curve never trips.
 
