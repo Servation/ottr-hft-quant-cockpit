@@ -213,7 +213,15 @@ class TradingFloorBot(discord.Client):
             if self._trading_floor_channel:
                 persona = AGENTS.get(agent_id)
                 agent_name = persona.name if persona else agent_id
-                await self._trading_floor_channel.send(f"**[{agent_name}]** {content}")
+                # channel.send (unlike the webhook path below) does NOT auto-split, so a
+                # long message — e.g. the full-universe consensus breakdown posted as "APP",
+                # which has no webhook — would be rejected with 400 "Invalid Form Body".
+                # Split to the same 2000-char limit and never let a send error abort the meeting.
+                for chunk in _split_message(f"**[{agent_name}]** {content}", DISCORD_MSG_LIMIT):
+                    try:
+                        await self._trading_floor_channel.send(chunk)
+                    except discord.HTTPException as exc:
+                        logger.error(f"Channel send failed for '{agent_id}': {exc}")
             return
 
         agent_persona = AGENTS.get(agent_id)

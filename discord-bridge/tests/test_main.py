@@ -127,9 +127,39 @@ async def test_post_as_agent_fallback(bot, mocker):
     bot._trading_floor_channel.send = AsyncMock()
     
     await bot.post_as_agent("unknown_agent", "Hello world")
-    
+
     bot._trading_floor_channel.send.assert_awaited_once()
     assert "Hello world" in bot._trading_floor_channel.send.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_post_as_agent_fallback_splits_long_message(bot):
+    """The webhook-less fallback path must also respect Discord's 2000-char limit.
+    A long message (e.g. the full-universe consensus breakdown posted as "APP") used to
+    hit channel.send unsplit -> 400 "Invalid Form Body"."""
+    bot._trading_floor_channel = MagicMock()
+    bot._trading_floor_channel.send = AsyncMock()
+
+    long_content = "X" * 5000  # ~2.5 messages' worth
+    await bot.post_as_agent("APP", long_content)
+
+    calls = bot._trading_floor_channel.send.await_args_list
+    assert len(calls) >= 3  # split into multiple sends
+    for c in calls:
+        assert len(c[0][0]) <= 2000  # every chunk fits Discord's limit
+
+
+@pytest.mark.asyncio
+async def test_post_as_agent_fallback_swallows_send_error(bot):
+    """A Discord send failure on the fallback path must not propagate (the meeting
+    that posts the breakdown must keep running)."""
+    import discord
+    bot._trading_floor_channel = MagicMock()
+    bot._trading_floor_channel.send = AsyncMock(
+        side_effect=discord.HTTPException(MagicMock(), "boom")
+    )
+    # Should not raise.
+    await bot.post_as_agent("APP", "Hello world")
 
 @pytest.mark.asyncio
 async def test_post_system_status(bot):
