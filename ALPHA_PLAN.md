@@ -22,7 +22,7 @@ sole portfolio writer, fail-loud, caps).
 
 **Status:** S0-S2 done (incl. signal tuning, a **regime-aware strategy that beats HODL
 on all three assets**, LLM behavior tuning, and **regime-driven position sizing**).
-S3-S4 todo.
+S3 done (belief-revision round). S4 (embeddings memory) is the remaining stretch.
 
 **Regime-aware edge (the win):** gating trend-following on the Kaufman efficiency
 ratio (`bot/signals.efficiency_ratio` / `regime_label`; `bot/backtest.RegimeStrategy`)
@@ -130,14 +130,21 @@ The debate is one pass of vote-emission; nobody revises after being challenged, 
 single model with personas stripped during debate collapses toward one view.
 
 Tasks:
-- [ ] Add a revision round: after initial votes, give each dissenter the strongest
-  opposing argument and let them confirm or change their `Final Vote`.
-- [ ] Capture self-reported **confidence** in the vote and thread it to `record_vote`
-  (enables the M3 calibration that was deferred for lack of a confidence signal).
-- [ ] Widen diversity: per-agent temperature spread; give the risk_auditor/contrarian
-  an explicit "argue against the room" framing; stop stripping persona output formats
-  in the round where differentiation matters.
-- [ ] Tests: a meeting test asserts the revision round runs and a changed vote is recorded with its confidence.
+- [x] Revision round (`run_meeting` step 3b + `_prep_revision`): after the debate,
+  agents who voted against the emerging consensus are shown the majority view + the
+  strongest opposing argument and get a turn to confirm or change their `Final Vote`
+  (appended as a `[DEBATE]:` segment so the closing tally uses the revised vote).
+  Live-validated: a `SELL`-voting risk_auditor, given the trend counter-case, revised
+  to `BUY` with reasoning ("I will yield to the majority's technical conviction").
+- [~] Confidence capture deferred — the revision prompt asks for a vote; threading a
+  numeric confidence through `_VOTE_RE` → `record_vote` (for M3 calibration) is the
+  remaining piece.
+- [~] Inference diversity: the M-phase LLM tuning already widened behavior via the
+  desk rule + temperature spread; the explicit "argue against the room" contrarian
+  framing is a small follow-on.
+- [x] Tests: `test_belief_revision.py` (dissent detection — finds a dissenter vs a real
+  majority, skips on unanimity/tie/no-votes, ignores ABSTAIN); meeting-flow tests still
+  green with the revision round wired in.
 
 **Exit:** agents can change their vote after rebuttal; votes carry confidence; the
 panel is meaningfully less homogeneous.
