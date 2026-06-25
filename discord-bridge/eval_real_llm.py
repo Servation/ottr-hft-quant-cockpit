@@ -111,8 +111,9 @@ async def run():
 
 
 if __name__ == "__main__":
-    # Run inside an isolated portfolio so the strategy session's tool calls
-    # never mutate the live data/portfolio_state.json.
-    from eval_utils import isolated_portfolio
-    with isolated_portfolio():
+    # Run inside isolated portfolio + meeting memory so the strategy session's
+    # tool calls never mutate the live data/portfolio_state.json and the saved
+    # meeting record never lands in the live data/meeting_log.json.
+    from eval_utils import isolated_data
+    with isolated_data():
         asyncio.run(run())
