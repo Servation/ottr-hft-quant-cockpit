@@ -23,18 +23,20 @@ _SLIPPAGE_PCT = float(_portfolio_cfg.get("slippage_pct", 0.1))
 # portfolio value (and thus the equity curve), keeping measured return honest.
 _FEE_PCT = float(_portfolio_cfg.get("fee_pct", 0.0))
 _DEFAULT_MIN_TRADE_USD = float(_portfolio_cfg.get("min_trade_usd", 100.0))
-_ASSETS: List[str] = _portfolio_cfg.get("assets", ["BTC", "ETH"])
 _MAX_TRADE_HISTORY = 50
 
 
 def _default_state() -> Dict[str, Any]:
-    """Generates the initial portfolio state."""
-    holdings: Dict[str, Dict[str, float]] = {}
-    for asset in _ASSETS:
-        holdings[asset] = {"quantity": 0.0, "avg_cost": 0.0}
+    """Generates the initial portfolio state.
+
+    Holdings start EMPTY and are created by trades (buy() uses setdefault). A holding is
+    a thing we OWN, never something we merely watch — the tradeable set is the WATCHLIST
+    (bot/universe.py), kept separate. Pre-seeding holdings from a config list was the bug
+    that made fully-sold assets (and never-bought ones) linger as phantom {qty:0} "holdings".
+    """
     return {
         "cash": _STARTING_BALANCE,
-        "holdings": holdings,
+        "holdings": {},
         "total_pnl": 0.0,
         "trade_history": [],
         "orders": [],
@@ -331,12 +333,19 @@ class Portfolio:
         return total
 
     def get_summary(self, prices_dict: Dict[str, Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Returns a snapshot of the portfolio for display or LLM context."""
+        """Returns a snapshot of the portfolio for display or LLM context.
+
+        `holdings` here is what we actually OWN: only positions with quantity > 0. A
+        fully-sold position lingers in the internal dict as {qty:0} (sell() keeps the key),
+        but it is NOT a holding and must never be shown as one — that is the watchlist's job.
+        """
         holdings_summary = {}
         total_unrealized_pnl = 0.0
-        
+
         for asset, h in self._state["holdings"].items():
             qty = h["quantity"]
+            if qty <= 0:
+                continue  # not held — 0-qty entries are watchlist members at most, not holdings
             avg_cost = h["avg_cost"]
             current_price = prices_dict.get(asset, {}).get("price", avg_cost) if prices_dict else avg_cost
             

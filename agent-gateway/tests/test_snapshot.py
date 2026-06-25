@@ -61,6 +61,31 @@ def test_snapshot_surfaces_real_metrics_when_bridge_up(monkeypatch, tmp_path):
     assert data["risk"]["current_drawdown"] == 0.16
 
 
+def test_snapshot_excludes_zero_qty_holdings(monkeypatch, tmp_path):
+    """A fully-sold (or never-rebought) position lingers in the bridge state at qty 0
+    (sell() keeps the key). The snapshot must surface only OWNED positions — a $0
+    allocation for a phantom holding is exactly what the held/watchlist split removes."""
+    f = tmp_path / "pf.json"
+    f.write_text(json.dumps({
+        "cash": 1000.0,
+        "holdings": {
+            "BTC": {"quantity": 0.5, "avg_cost": 60000.0},
+            "ETH": {"quantity": 0.0, "avg_cost": 0.0},   # fully sold — not held
+            "SOL": {"quantity": 0.0, "avg_cost": 0.0},   # never re-bought — not held
+        },
+        "total_pnl": 0.0,
+    }))
+    monkeypatch.setenv("PORTFOLIO_STATE_PATH", str(f))
+    monkeypatch.setattr(api_router.market_proxy, "get_ticker", AsyncMock(return_value=65000.0))
+    monkeypatch.setattr(api_router, "_fetch_performance", AsyncMock(return_value=None))
+
+    data = client.get("/api/v1/portfolio/snapshot").json()
+    assert set(data["holdings"].keys()) == {"BTC"}
+    assert "ETH" not in data["current_prices"] and "SOL" not in data["current_prices"]
+    # Total value = cash + the one held position (0.5 BTC @ 65k); phantom 0-qty rows add nothing.
+    assert data["total_value"] == pytest.approx(1000.0 + 0.5 * 65000.0)
+
+
 def test_snapshot_degrades_when_bridge_down(monkeypatch, tmp_path):
     f = tmp_path / "pf.json"
     f.write_text(json.dumps({"cash": 1000.0, "holdings": {}, "total_pnl": 0.0}))

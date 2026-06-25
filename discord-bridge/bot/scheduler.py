@@ -261,7 +261,9 @@ class MeetingScheduler:
             if portfolio_summary:
                 try:
                     lines = [f"**Cash:** ${portfolio_summary.get('cash', 0):,.2f}"]
-                    lines.append("**Holdings:**")
+                    # get_summary() already filters to owned positions (qty > 0); a fully-sold
+                    # asset is not shown here — it stays on the watchlist, surfaced separately.
+                    lines.append("**Holdings (owned):**")
                     holdings = portfolio_summary.get('holdings', {})
                     if not holdings:
                         lines.append("  - None")

@@ -195,12 +195,21 @@ async def get_portfolio_snapshot():
         except Exception as e:
             logger.error(f"Failed to read discord portfolio state: {e}")
 
+    # Owned positions only (qty > 0). The bridge keeps a fully-sold asset in the dict at
+    # qty 0 (sell() zeroes but keeps the key); that is NOT a holding and must not surface
+    # as a $0 allocation on the dashboard — it's a watchlist member at most.
+    held = {
+        sym: data
+        for sym, data in portfolio_data.get("holdings", {}).items()
+        if data.get("quantity", 0) > 0
+    }
+
     # Fetch current prices for active holdings
     current_prices = {}
     total_holdings_value = 0.0
     purchase_prices = {}
-    
-    for sym, data in portfolio_data.get("holdings", {}).items():
+
+    for sym, data in held.items():
         try:
             price = await market_proxy.get_ticker(sym)
             current_prices[sym] = price
@@ -243,7 +252,7 @@ async def get_portfolio_snapshot():
         "symbols": trading_config.symbols,
         "interval_seconds": trading_config.interval_seconds,
         "trading_active": True,
-        "holdings": portfolio_data.get("holdings", {}),
+        "holdings": held,
         "purchase_prices": purchase_prices,
         "usd_cash": portfolio_data.get("cash", 0),
         "current_prices": current_prices,

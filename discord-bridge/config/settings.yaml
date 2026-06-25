@@ -80,11 +80,6 @@ portfolio:
   # taker fee; keep separate from slippage.
   fee_pct: 0.1
   min_trade_usd: 100.0
-  # NOTE: legacy seed list for a fresh portfolio's holdings. Superseded by `universe`
-  # above; removed in the holdings/watchlist split (holdings derive from trades).
-  assets:
-    - BTC
-    - ETH
 
 token_budgets:
   system_prompt: 400

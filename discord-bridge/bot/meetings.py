@@ -380,10 +380,18 @@ class MeetingEngine:
             lines = [
                 "📊 **Portfolio Running Totals:**",
                 f"• **Cash:** ${cash:,.2f}",
-                "• **Holdings:**"
+                "• **Holdings (owned):**"
             ]
-            for sym in portfolio._state["holdings"]:
-                qty = portfolio._state["holdings"][sym]["quantity"]
+            # Only positions we actually own (qty > 0); a fully-sold asset lingers in the
+            # dict at qty 0 but is not a holding — it stays on the watchlist, not here.
+            held = [
+                (sym, h["quantity"])
+                for sym, h in portfolio._state["holdings"].items()
+                if h.get("quantity", 0.0) > 0
+            ]
+            if not held:
+                lines.append("  - None")
+            for sym, qty in held:
                 sym_price = prices.get(sym, {}).get("price", 0.0)
                 val = qty * sym_price
                 lines.append(f"  - **{sym}:** {qty:.6f} (${val:,.2f})")
