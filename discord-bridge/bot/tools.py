@@ -5,6 +5,7 @@ from bot.portfolio import portfolio
 from bot.scheduler import meeting_scheduler
 from bot.audit import audit_event
 from bot import settings
+from bot import sizing
 
 logger = logging.getLogger(__name__)
 
@@ -221,37 +222,79 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                     await audit_log_fn(msg)
                 return msg
 
-            # SOL exposure cap: block BUY if it would push SOL above the portfolio % limit.
-            # Midas/Zephyr set this via thresholds.max_sol_exposure_pct in settings.yaml.
-            if action == "BUY" and asset == "SOL":
-                max_sol_pct = float(settings.get("thresholds", {}).get("max_sol_exposure_pct", 0) or 0)
-                if max_sol_pct > 0:
+            # Concentration cap: block a BUY that would push ANY asset above its
+            # portfolio-% limit. A per-asset override (e.g. thresholds.max_sol_exposure_pct)
+            # beats the general thresholds.max_asset_exposure_pct, so SOL stays stricter.
+            if action == "BUY":
+                _caps = settings.get("thresholds", {})
+                asset_cap = (
+                    float(_caps.get(f"max_{asset.lower()}_exposure_pct", 0) or 0)
+                    or float(_caps.get("max_asset_exposure_pct", 0) or 0)
+                )
+                if asset_cap > 0:
                     total_value = portfolio.get_total_value(prices)
-                    sol_qty = portfolio._state["holdings"].get("SOL", {}).get("quantity", 0.0)
-                    current_sol_value = sol_qty * price
-                    projected_sol_value = current_sol_value + amount
+                    held_qty = portfolio._state["holdings"].get(asset, {}).get("quantity", 0.0)
+                    projected_value = held_qty * price + amount
                     projected_total = total_value + amount
                     if projected_total > 0:
-                        projected_pct = (projected_sol_value / projected_total) * 100
-                        if projected_pct > max_sol_pct:
+                        projected_pct = (projected_value / projected_total) * 100
+                        if projected_pct > asset_cap:
                             msg = (
-                                f"🚫 **SOL exposure cap:** buying ${amount:,.2f} would push SOL to "
+                                f"🚫 **{asset} exposure cap:** buying ${amount:,.2f} would push {asset} to "
                                 f"**{projected_pct:.1f}%** of the portfolio, exceeding the "
-                                f"**{max_sol_pct:.0f}%** cap. Reduce position size or wait for rebalancing."
+                                f"**{asset_cap:.0f}%** cap. Reduce position size or wait for rebalancing."
                             )
                             logger.warning(
-                                "SOL exposure cap blocked BUY SOL $%.2f "
-                                "(projected %.1f%% > cap %.1f%%)",
-                                amount, projected_pct, max_sol_pct,
+                                "Exposure cap blocked BUY %s $%.2f (projected %.1f%% > cap %.1f%%)",
+                                asset, amount, projected_pct, asset_cap,
                             )
                             audit_event(
-                                "trade_blocked", reason="sol_exposure_cap",
+                                "trade_blocked", reason="exposure_cap",
                                 action=action, asset=asset, notional=amount,
-                                projected_pct=projected_pct, cap=max_sol_pct,
+                                projected_pct=projected_pct, cap=asset_cap,
                             )
                             if audit_log_fn:
                                 await audit_log_fn(msg)
                             return msg
+
+            # Regime/volatility position sizing (runs AFTER the safety caps, so an
+            # injected oversized request is still blocked, not silently resized).
+            # Resizes a BUY to a vol-targeted, regime-appropriate amount; in a CHOPPY
+            # regime the size shrinks hard — often below the minimum, which
+            # deterministically blocks trend-entries where the edge doesn't pay.
+            if action == "BUY" and amount > 0:
+                regime = None
+                try:
+                    vols = await price_feed.get_volatility()
+                    tech = await price_feed.get_technical_indicators()
+                    regime = tech.get(asset, {}).get("regime")
+                    sized = sizing.max_buy_notional(
+                        portfolio.get_total_value(prices), vols.get(asset), regime
+                    )
+                except Exception:
+                    logger.exception("Position sizing failed; using requested amount")
+                    sized = amount
+                if 0 < sized < amount:
+                    if sized < portfolio.min_trade_usd:
+                        msg = (
+                            f"🚫 **Sized out:** {asset} is in a **{regime or 'high-volatility'}** "
+                            f"regime; vol/regime sizing reduces a safe entry to ~${sized:,.2f}, below "
+                            f"the ${portfolio.min_trade_usd:,.2f} minimum — no trade."
+                        )
+                        logger.info(
+                            "Sizing blocked BUY %s: sized $%.2f < min $%.2f (regime=%s)",
+                            asset, sized, portfolio.min_trade_usd, regime,
+                        )
+                        audit_event("trade_blocked", reason="position_sizing", asset=asset,
+                                    requested=amount, sized=sized, regime=regime)
+                        if audit_log_fn:
+                            await audit_log_fn(msg)
+                        return msg
+                    logger.info("Sizing resized BUY %s from $%.2f to $%.2f (regime=%s)",
+                                asset, amount, sized, regime)
+                    audit_event("trade_resized", asset=asset, requested=amount,
+                                sized=sized, regime=regime)
+                    amount = sized
 
             if action == "BUY":
                 trade = portfolio.buy(asset, amount, price)

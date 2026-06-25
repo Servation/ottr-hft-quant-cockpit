@@ -20,8 +20,9 @@ in the equity metrics + reputation. Gate every change on `pytest -k "not live"` 
 `run_evals.py --no-llm`. Preserve all audit invariants (idempotent tools, kill-switch,
 sole portfolio writer, fail-loud, caps).
 
-**Status:** S0 + S1 done (incl. signal tuning + a **regime-aware strategy that finally
-beats HODL on all three assets**). S2-S4 todo.
+**Status:** S0-S2 done (incl. signal tuning, a **regime-aware strategy that beats HODL
+on all three assets**, LLM behavior tuning, and **regime-driven position sizing**).
+S3-S4 todo.
 
 **Regime-aware edge (the win):** gating trend-following on the Kaufman efficiency
 ratio (`bot/signals.efficiency_ratio` / `regime_label`; `bot/backtest.RegimeStrategy`)
@@ -111,13 +112,15 @@ link to volatility or conviction. The concentration cap is SOL-only and hardcode
 (`tools.py:226-254`).
 
 Tasks:
-- [ ] New sizing model (`bot/sizing.py`): target notional = vol-target (size inversely to the asset's volatility to hit a fixed risk budget) × conviction (net weighted consensus score, optionally × analyst confidence), bounded by cash, `MAX_TRADE_USD`, and a per-asset concentration cap. Fractional-Kelly as an alternative knob.
-- [ ] Wire it into the execution path so size is computed from conviction+vol (the LLM proposes direction/asset; the model sizes it), keeping the existing caps as hard guards.
-- [ ] Generalize the concentration cap from SOL-only to any asset.
-- [ ] Tests: higher vol → smaller size; higher conviction → larger; caps respected; backtest sizing is consistent.
+- [x] `bot/sizing.py` (`max_buy_notional`): vol-targeted base size (risk budget / annualized vol), **regime-scaled** (×0.25 in a CHOPPY regime — the validated edge), optional conviction multiplier, hard-capped at `max_position_pct` of the book. Pure + unit-tested.
+- [x] Wired into `execute_trade` as a guardrail: a BUY is **resized** to `max_buy_notional`; in a CHOPPY regime the size shrinks below the minimum and the trend-entry is **blocked** outright. Runs after the MAX_TRADE_USD gate so an injected oversized request is still blocked (not silently resized).
+- [x] Generalized the concentration cap from SOL-only to **any asset** (`max_asset_exposure_pct`, with per-asset overrides like `max_sol_exposure_pct` staying stricter).
+- [x] Tests: `test_sizing.py` (vol-target, regime shrink, conviction, per-trade cap) + `test_trade_gate.py` (resize in trend, sized-out in chop, BTC concentration cap, SOL stricter override). eval_trades stubs sizing for its deterministic e2e.
 
-**Exit:** position size is a function of conviction × volatility (not a free LLM pick);
-the concentration cap applies to every asset; covered by tests.
+**Exit:** DONE. A BUY is sized by volatility × regime (not a free LLM pick); choppy
+trend-entries are blocked; the concentration cap applies to every asset; covered by tests.
+_(Conviction-from-consensus wiring deferred — `execute_trade` doesn't yet receive the
+net consensus score; `max_buy_notional` already accepts a `conviction` arg for it.)_
 
 ---
 

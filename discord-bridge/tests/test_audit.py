@@ -33,6 +33,10 @@ async def test_trade_execution_is_audited(audit_file, monkeypatch, mocker):
     monkeypatch.delenv("MAX_TRADE_USD", raising=False)
     mocker.patch("bot.tools.price_feed.get_prices",
                  new=AsyncMock(return_value={"BTC": {"price": 50000.0, "change_24h": 0.0}}))
+    # Keep position sizing inert so it doesn't resize/block this audited test trade.
+    mocker.patch("bot.tools.price_feed.get_volatility", new=AsyncMock(return_value={}))
+    mocker.patch("bot.tools.price_feed.get_technical_indicators", new=AsyncMock(return_value={}))
+    mocker.patch("bot.tools.portfolio.get_total_value", return_value=1e6)
     mocker.patch("bot.tools.portfolio.buy",
                  return_value={"quantity": 0.01, "fill_price": 50000.0})
     await handle_tool_call("execute_trade", {"action": "BUY", "asset": "BTC", "amount": 500})
