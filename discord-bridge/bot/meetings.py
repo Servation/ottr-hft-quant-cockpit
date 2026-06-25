@@ -18,6 +18,7 @@ from bot.agents import AGENTS, agent_llm
 from bot.memory import meeting_memory, MeetingMemory
 from bot.tools import READ_TOOLS, ACTION_TOOLS, handle_tool_call
 from bot.security import sanitize_user_input
+from bot.universe import tradeable_universe
 from bot.webhooks import sync_agent_state
 
 logger = logging.getLogger(__name__)
@@ -509,11 +510,13 @@ class MeetingEngine:
             mt.opening_prompt,
             "",
             f"**Focus:** {mt.focus}",
+            "",
+            f"**Watchlist (analyzed + tradeable):** {', '.join(tradeable_universe())}",
         ]
         if price_data:
             parts += ["", f"**Market State:**\n{price_data}"]
         if portfolio_summary:
-            parts += ["", f"**Portfolio Snapshot:**\n{portfolio_summary}"]
+            parts += ["", f"**Holdings (owned):**\n{portfolio_summary}"]
         if ceo_directives:
             parts += ["", f"**CEO Directives:**\n{ceo_directives}"]
         return "\n".join(parts)
@@ -554,7 +557,20 @@ class MeetingEngine:
             )
             user_content_parts.append(f"### Market State\n{price_data}")
         if portfolio_summary:
-            user_content_parts.append(f"### Portfolio\n{portfolio_summary}\n\n*(Instruction: Focus your primary analysis on managing the assets we currently hold in the portfolio. You may analyze outside assets, but prioritize our active positions first.)*")
+            user_content_parts.append(f"### Portfolio — Holdings (owned)\n{portfolio_summary}")
+        # The WATCHLIST is the full tradeable universe — what the desk analyzes and may
+        # open OR close positions in — and is distinct from current holdings. Show it
+        # explicitly and require a stance on every member, so alts aren't silently skipped
+        # just because we don't hold them yet.
+        user_content_parts.append(
+            "### Watchlist (analyzed + tradeable)\n"
+            f"{', '.join(tradeable_universe())}\n\n"
+            "*(Instruction: 'Holdings (owned)' above is only what we currently hold. The "
+            "watchlist is the full set you may BUY or SELL — every member is tradeable, not "
+            "just BTC/ETH/SOL. Form a clear stance (BUY / SELL / HOLD) on EACH watchlist "
+            "asset the data supports, and briefly justify any you choose to ignore. Don't "
+            "fixate only on current positions.)*"
+        )
         if ceo_directives:
             safe_directives = sanitize_user_input(ceo_directives)
             user_content_parts.append(
@@ -721,6 +737,15 @@ class MeetingEngine:
                     discord_msg += "```markdown\n# 🧮 Algorithmic Consensus Breakdown\n\n"
                     discord_msg += "## Individual Votes\n" + "\n".join(breakdown_lines) + "\n\n"
                     discord_msg += "## Net Asset Scores\n"
+
+                    # Ensure EVERY watchlist asset gets a stance, even one no agent voted on:
+                    # an un-discussed tradeable asset is a HOLD/NEUTRAL by default, never a
+                    # silent omission. Voted assets keep their order; the rest of the universe
+                    # follows so the table always spans the full tradeable set.
+                    for asset in tradeable_universe():
+                        if asset not in asset_scores:
+                            asset_scores[asset] = 0.0
+                            asset_vote_counts[asset] = {"BUY": 0, "SELL": 0, "HOLD": 0}
 
                     for asset, score in asset_scores.items():
                         counts = asset_vote_counts.get(asset, {})
