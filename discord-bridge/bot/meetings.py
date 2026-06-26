@@ -695,7 +695,10 @@ class MeetingEngine:
                     "*(Note: Use these track records to weight each other's opinions. "
                     "If someone has a high win rate on an asset, defer to them.)*\n\n"
                 )
-                discord_msg += f"```markdown\n# 📜 Historical Agent Reputations\n\n{rep_summary}\n```\n"
+                # Emoji titles go ABOVE the code fence, never inside it: an emoji on a
+                # ```markdown line breaks Discord's code-block rendering (the fence shows as
+                # literal text). Keeping the fence emoji-free also avoids two adjacent fences.
+                discord_msg += f"**📜 Historical Agent Reputations**\n```markdown\n{rep_summary}\n```\n"
                 
             if agent_contributions:
                 weights = reputation_graph.get_agent_weights()
@@ -734,7 +737,7 @@ class MeetingEngine:
 
                 if breakdown_lines:
                     closing_prompt += "### Algorithmic Weighted Consensus\n"
-                    discord_msg += "```markdown\n# 🧮 Algorithmic Consensus Breakdown\n\n"
+                    discord_msg += "**🧮 Algorithmic Consensus Breakdown**\n```markdown\n"
                     discord_msg += "## Individual Votes\n" + "\n".join(breakdown_lines) + "\n\n"
                     discord_msg += "## Net Asset Scores\n"
 

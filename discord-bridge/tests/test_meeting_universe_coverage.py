@@ -78,3 +78,36 @@ async def test_closing_scores_span_the_full_universe(engine, mocker):
         assert sym in scores_section, f"{sym} missing from the consensus table"
     # An un-voted asset is an explicit neutral tally, not absent.
     assert "0B/0S/0H" in scores_section
+
+
+@pytest.mark.asyncio
+async def test_breakdown_emoji_title_sits_outside_the_code_fence(engine, mocker):
+    """An emoji on a ```markdown fence line breaks Discord's code-block rendering (the
+    fence renders as literal text). The 🧮 title must be a bold header ABOVE the fence,
+    and the fenced content must open straight into the emoji-free data."""
+    mocker.patch(
+        "bot.meetings.agent_llm.generate_response",
+        new=AsyncMock(return_value=("closing summary", None)),
+    )
+    posted = {}
+
+    async def capture(agent, msg):
+        posted.setdefault(agent, []).append(msg)
+
+    await engine._build_closing(
+        MEETING_TYPES["strategy_session"],
+        conversation_log=["discussion"],
+        price_data="prices",
+        portfolio_summary="portfolio",
+        agent_contributions={"technical_analyst": "[DEBATE]: Final Vote: BUY BTC"},
+        post_message_fn=capture,
+    )
+    msg = "\n".join(posted.get("APP", []))
+
+    assert "**🧮 Algorithmic Consensus Breakdown**" in msg      # emoji title is bold text…
+    assert "# 🧮" not in msg                                    # …not the old in-fence h1
+    assert "```markdown\n## Individual Votes" in msg            # fence opens to emoji-free data
+    # No emoji should ever sit on a line that opens a code fence.
+    for line in msg.splitlines():
+        if line.startswith("```"):
+            assert "🧮" not in line and "📜" not in line
