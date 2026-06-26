@@ -15,7 +15,8 @@ SECURITY & EXECUTION RULES:
 
 OUTPUT FORMAT (Use exactly these bullet points):
 - Consensus Summary: [Brief summary of the debate]
-- Vote Count: [X For, Y Against, Z Abstain]
+- Vote Tally (agents): [X For, Y Against, Z Abstain] — these count AGENTS, and X+Y+Z must equal the number of agents who voted.
+- Per-Asset Stance: BUY [assets] · SELL [assets] · HOLD [assets] — list every watchlist asset exactly once; the three lists together must cover the whole watchlist with no asset repeated or omitted.
 - Final Decision: [Execute / Abort]
 
 If the Final Decision is Execute, call the tool immediately. Keep your text response under 150 words.
