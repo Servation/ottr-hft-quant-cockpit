@@ -184,15 +184,35 @@ class TestSolExposureCap:
         )
 
     @pytest.mark.asyncio
-    async def test_sol_buy_blocked_over_cap(self, mocker):
-        """BUY SOL is blocked when it would push SOL above max_sol_exposure_pct."""
-        # Portfolio: $10k total, $0 SOL.  Buying $3k SOL → ~23% > 20% cap.
+    async def test_sol_buy_over_cap_is_clamped_not_blocked(self, mocker):
+        """BUY SOL over the cap is CLAMPED down to the cap's headroom and still executes."""
+        # Portfolio: $10k total, $0 SOL, 20% cap. Buying $3k SOL → clamps to $2.5k
+        # (= 20% under the (held+x)/(total+x) model). Sizing is inert here (no vol/regime).
         self._mock_settings(mocker, max_sol_pct=20.0)
         self._stub_portfolio(mocker, total_value=10_000.0, sol_quantity=0.0)
-        buy = mocker.patch("bot.tools.portfolio.buy")
+        buy = mocker.patch(
+            "bot.tools.portfolio.buy",
+            return_value={"quantity": 25.0, "fill_price": 100.0},
+        )
 
         result = await handle_tool_call(
             "execute_trade", {"action": "BUY", "asset": "SOL", "amount": 3_000}
+        )
+
+        buy.assert_called_once()
+        assert buy.call_args.args[1] == pytest.approx(2_500.0, rel=1e-3)  # clamped notional
+        assert "Trade Executed" in result
+
+    @pytest.mark.asyncio
+    async def test_sol_buy_blocked_when_already_at_cap(self, mocker):
+        """BUY SOL is blocked (no clamp) when SOL already fills its cap — no headroom."""
+        # $10k total, SOL already 25 units @ $100 = $2.5k => at the 20% cap. No room.
+        self._mock_settings(mocker, max_sol_pct=20.0)
+        self._stub_portfolio(mocker, total_value=10_000.0, sol_quantity=25.0)
+        buy = mocker.patch("bot.tools.portfolio.buy")
+
+        result = await handle_tool_call(
+            "execute_trade", {"action": "BUY", "asset": "SOL", "amount": 1_000}
         )
 
         assert "cap" in result.lower() or "exposure" in result.lower()

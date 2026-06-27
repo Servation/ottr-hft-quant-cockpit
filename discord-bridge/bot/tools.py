@@ -249,40 +249,58 @@ async def handle_tool_call(tool_name: str, arguments: dict, audit_log_fn=None, p
                     await audit_log_fn(msg)
                 return msg
 
-            # Concentration cap: block a BUY that would push ANY asset above its
-            # portfolio-% limit. A per-asset override (e.g. thresholds.max_sol_exposure_pct)
+            # Concentration cap: CLAMP a BUY down to its per-asset portfolio-% limit
+            # (buy up to the cap) rather than rejecting it outright, then let the vol-sizer
+            # below shrink it further. A per-asset override (e.g. thresholds.max_sol_exposure_pct)
             # beats the general thresholds.max_asset_exposure_pct, so SOL stays stricter.
+            # Safety: the MAX_TRADE_USD gate above still HARD-blocks an oversized/injected
+            # request before reaching here, so this clamp only right-sizes an order whose
+            # notional is already within the single-trade cap. A position already AT the cap
+            # (no usable headroom) is still blocked.
             if action == "BUY":
                 _caps = settings.get("thresholds", {})
                 asset_cap = (
                     float(_caps.get(f"max_{asset.lower()}_exposure_pct", 0) or 0)
                     or float(_caps.get("max_asset_exposure_pct", 0) or 0)
                 )
-                if asset_cap > 0:
+                if 0 < asset_cap < 100:
                     total_value = portfolio.get_total_value(prices)
                     held_qty = portfolio._state["holdings"].get(asset, {}).get("quantity", 0.0)
-                    projected_value = held_qty * price + amount
-                    projected_total = total_value + amount
-                    if projected_total > 0:
-                        projected_pct = (projected_value / projected_total) * 100
-                        if projected_pct > asset_cap:
-                            msg = (
-                                f"🚫 **{asset} exposure cap:** buying ${amount:,.2f} would push {asset} to "
-                                f"**{projected_pct:.1f}%** of the portfolio, exceeding the "
-                                f"**{asset_cap:.0f}%** cap. Reduce position size or wait for rebalancing."
-                            )
-                            logger.warning(
-                                "Exposure cap blocked BUY %s $%.2f (projected %.1f%% > cap %.1f%%)",
-                                asset, amount, projected_pct, asset_cap,
-                            )
-                            audit_event(
-                                "trade_blocked", reason="exposure_cap",
-                                action=action, asset=asset, notional=amount,
-                                projected_pct=projected_pct, cap=asset_cap,
-                            )
-                            if audit_log_fn:
-                                await audit_log_fn(msg)
-                            return msg
+                    held_value = held_qty * price
+                    c = asset_cap / 100.0
+                    # Max BUY $ that keeps the asset at/under its cap, using the same
+                    # (held+x)/(total+x) model as the prior check:
+                    #   (held + x) / (total + x) = c  ->  x = (c*total - held) / (1 - c)
+                    max_buy = (c * total_value - held_value) / (1.0 - c)
+                    if max_buy < portfolio.min_trade_usd:
+                        # Already at/near the cap — no room for a meaningful position.
+                        msg = (
+                            f"🚫 **{asset} exposure cap:** {asset} is already at its "
+                            f"**{asset_cap:.0f}%** limit (headroom ${max(max_buy, 0.0):,.2f} is below the "
+                            f"${portfolio.min_trade_usd:,.2f} minimum) — no BUY."
+                        )
+                        logger.warning(
+                            "Exposure cap blocked BUY %s: headroom $%.2f < min $%.2f (cap %.0f%%)",
+                            asset, max_buy, portfolio.min_trade_usd, asset_cap,
+                        )
+                        audit_event(
+                            "trade_blocked", reason="exposure_cap",
+                            action=action, asset=asset, notional=amount,
+                            headroom=max(max_buy, 0.0), cap=asset_cap,
+                        )
+                        if audit_log_fn:
+                            await audit_log_fn(msg)
+                        return msg
+                    if amount > max_buy:
+                        logger.info(
+                            "Exposure clamp: BUY %s reduced $%.2f -> $%.2f (cap %.0f%%)",
+                            asset, amount, max_buy, asset_cap,
+                        )
+                        audit_event(
+                            "trade_resized", asset=asset, requested=amount,
+                            sized=max_buy, reason="exposure_clamp", cap=asset_cap,
+                        )
+                        amount = max_buy
 
             # Regime/volatility position sizing (runs AFTER the safety caps, so an
             # injected oversized request is still blocked, not silently resized).
