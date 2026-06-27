@@ -93,17 +93,26 @@ async def test_buy_sized_out_in_choppy_regime(monkeypatch, mocker):
 # --- Generalized concentration cap ----------------------------------------
 
 @pytest.mark.asyncio
-async def test_concentration_cap_blocks_btc(monkeypatch, mocker):
+async def test_concentration_cap_clamps_btc(monkeypatch, mocker):
     monkeypatch.delenv("MAX_TRADE_USD", raising=False)
+    mocker.patch("bot.tools.price_feed.get_prices",
+                 new=AsyncMock(return_value={"BTC": {"price": 50000.0, "change_24h": 0.0}}))
+    # Isolate the concentration clamp from the vol-sizer (sizing has its own tests).
+    mocker.patch("bot.tools.price_feed.get_volatility", new=AsyncMock(return_value={}))
+    mocker.patch("bot.tools.price_feed.get_technical_indicators", new=AsyncMock(return_value={}))
+    mocker.patch("bot.tools.sizing.max_buy_notional", return_value=1e9)
     mocker.patch("bot.tools.portfolio.get_total_value", return_value=1000.0)
     mocker.patch.dict("bot.tools.portfolio._state", {"holdings": {}})
-    buy = mocker.patch("bot.tools.portfolio.buy")
+    buy = mocker.patch("bot.tools.portfolio.buy",
+                       return_value={"quantity": 0.01, "fill_price": 50000.0})
 
-    # $3000 BUY on a $1000 book -> 75% of portfolio, over the 35% general cap.
+    # $3000 BUY on a $1000 book is over the 35% general cap -> CLAMPED to the 35%
+    # headroom (0.35*1000/0.65 = $538.46) and executed, not rejected.
     res = await handle_tool_call("execute_trade", {"action": "BUY", "asset": "BTC", "amount": 3000})
 
-    assert "exposure cap" in res.lower() and "BTC" in res
-    buy.assert_not_called()
+    buy.assert_called_once()
+    assert buy.call_args.args[1] == pytest.approx(538.46, rel=1e-3)
+    assert "Trade Executed" in res
 
 
 @pytest.mark.asyncio
@@ -111,15 +120,21 @@ async def test_sol_override_is_stricter_than_general(monkeypatch, mocker):
     monkeypatch.delenv("MAX_TRADE_USD", raising=False)
     mocker.patch("bot.tools.price_feed.get_prices",
                  new=AsyncMock(return_value={"SOL": {"price": 100.0, "change_24h": 0.0}}))
+    mocker.patch("bot.tools.price_feed.get_volatility", new=AsyncMock(return_value={}))
+    mocker.patch("bot.tools.price_feed.get_technical_indicators", new=AsyncMock(return_value={}))
+    mocker.patch("bot.tools.sizing.max_buy_notional", return_value=1e9)
     mocker.patch("bot.tools.portfolio.get_total_value", return_value=10000.0)
     mocker.patch.dict("bot.tools.portfolio._state", {"holdings": {}})
-    buy = mocker.patch("bot.tools.portfolio.buy")
+    buy = mocker.patch("bot.tools.portfolio.buy",
+                       return_value={"quantity": 25.0, "fill_price": 100.0})
 
-    # $3000 SOL -> ~23% of portfolio: under the 35% general cap, but over SOL's 20%.
+    # $3000 SOL is under the 35% general cap but over SOL's 20% override -> CLAMPED to
+    # SOL's 20% headroom (0.20*10000/0.80 = $2500), proving the override is stricter.
     res = await handle_tool_call("execute_trade", {"action": "BUY", "asset": "SOL", "amount": 3000})
 
-    assert "exposure cap" in res.lower() and "SOL" in res
-    buy.assert_not_called()
+    buy.assert_called_once()
+    assert buy.call_args.args[1] == pytest.approx(2500.0, rel=1e-3)
+    assert "Trade Executed" in res
 
 
 # --- Drawdown halt gate (Tier 3 R2) ---------------------------------------

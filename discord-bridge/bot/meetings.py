@@ -803,12 +803,37 @@ class MeetingEngine:
                 f"(e.g. order fill, major price move, urgent CEO directive)."
             )
 
+        # Sizing guidance: a BUY's `amount` is USD and is REJECTED outright (no partial
+        # fill) if it exceeds the single-trade cap, so a model that requests its whole
+        # cash balance silently never trades. Tell the chair the cap and that the desk
+        # vol-sizes every approved BUY down automatically, so it should request a modest
+        # entry within the cap rather than a large notional. This keeps the safety gate
+        # (and its injection-block ordering) untouched — we only steer the proposal.
+        import os as _os
+        _cap = float(_os.getenv("MAX_TRADE_USD", "0") or 0)
+        if _cap > 0:
+            sizing_note = (
+                f"TRADE SIZING: `execute_trade` `amount` is in USD for a BUY. A single BUY "
+                f"is HARD-CAPPED at ${_cap:,.0f} and is REJECTED ENTIRELY (no partial fill) "
+                f"if it exceeds that. The risk desk then automatically vol-sizes every "
+                f"approved BUY down to a small, regime-appropriate amount, so you do NOT "
+                f"need to deploy large sums — request a modest entry at or below ${_cap:,.0f} "
+                f"(never the full cash balance)."
+            )
+        else:
+            sizing_note = (
+                "TRADE SIZING: the risk desk automatically vol-sizes every approved BUY down "
+                "to a small, regime-appropriate amount, so request a modest entry (a few "
+                "hundred to low-thousands USD), never the full cash balance."
+            )
+
         closing_prompt += (
             f"Produce a structured closing with:\n"
             f"1. Key perspectives summary (2-3 bullets)\n"
             f"2. Decision(s)\n"
             f"3. Action items\n"
             f"4. Next review checkpoint — {schedule_note}\n\n"
+            f"{sizing_note}\n\n"
             f"CRITICAL: If a trade, order, or parameter change is approved by the majority, you MUST use the appropriate tool (execute_trade, schedule_meeting, update_parameter, cancel_orders) to execute it natively. DO NOT use text tags.\n\n"
             f"Be concise — under 250 words."
         )
