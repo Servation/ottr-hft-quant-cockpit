@@ -241,6 +241,8 @@ class AgentLLM:
         # the same call (e.g. a local model re-leaking a raw <|tool_call> tag on
         # the next loop iteration) cannot execute the same side-effecting tool twice.
         executed_tool_signatures: set[str] = set()
+        # Guards the one-shot "you wrote the tool call as text" re-ask below.
+        reasked = False
 
         def _tool_signature(name: str, args: dict) -> str:
             import json as _json
@@ -251,8 +253,10 @@ class AgentLLM:
 
         try:
             async with self.lock:
-                # We allow a maximum of 1 tool loop per turn
-                for _ in range(2):
+                # Up to 3 passes: a tool round, an optional one-shot re-ask when a
+                # local model writes its tool call as text instead of emitting it
+                # natively, and a final text response.
+                for _ in range(3):
                     kwargs = {
                         "model": settings["llm_model_id"],
                         "messages": messages,
@@ -341,6 +345,34 @@ class AgentLLM:
                                 # Strip it from final content so it doesn't leak to Discord
                                 final_content = re.sub(r"<\|?tool_call\|?>.*?<\|?/?tool_call\|?>", "", final_content, flags=re.DOTALL)
                                 tools = None
+                                continue
+
+                        # Re-ask fallback: some local models (e.g. the lighter 4b) intermittently
+                        # WRITE an action tool call as plain text (`execute_trade(...)` / `{...}`)
+                        # instead of emitting a native call, which silently no-ops — the decision
+                        # is announced but never executes. If this agent can execute, still has
+                        # tools attached, hasn't already been re-asked, and its text contains a
+                        # tool call written as `name(`/`name{`, nudge it ONCE to re-emit natively.
+                        # Execution stays strictly on the native path (we never parse trades from
+                        # free text), so the cap / dry-run / idempotency guards are unchanged.
+                        if tool_handler and tools and not reasked:
+                            import re as _re
+                            if _re.search(
+                                r"\b(execute_trade|schedule_meeting|update_parameter|cancel_orders|place_limit_order)\s*[\(\{]",
+                                final_content,
+                            ):
+                                reasked = True
+                                messages.append({"role": "assistant", "content": final_content})
+                                messages.append({
+                                    "role": "user",
+                                    "content": (
+                                        "SYSTEM: You wrote a tool call as plain text. Plain-text "
+                                        "tool calls DO NOT execute. If the decision is to act, call "
+                                        "the function now using the native tool/function-calling "
+                                        "interface (not text). Otherwise restate your final decision "
+                                        "with no tool-call syntax."
+                                    ),
+                                })
                                 continue
 
                         break
