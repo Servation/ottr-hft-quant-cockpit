@@ -106,15 +106,32 @@ class Kraken:
                 out[sym] = q
         return out
 
-    async def daily_closes(self, pair: str) -> List[Tuple[int, float]]:
-        """Closed daily candles as [(open_ts, close)], oldest first.
+    async def daily_ohlc(self, pair: str) -> List[Tuple[int, float, float]]:
+        """Closed daily candles as [(open_ts, close, usd_volume)], oldest first.
 
         Kraken's last row is the still-forming day; it is dropped so indicators don't
-        drift intraday (the spot price carries the live information instead).
+        drift intraday (the spot price carries the live information instead). USD volume
+        is the day's base volume times its VWAP (the close when Kraken reports no VWAP).
         """
         result = await self._get("OHLC", {"pair": pair, "interval": 1440})
         rows = next((v for k, v in result.items() if k != "last"), None)
         if not rows:
             raise KrakenError(f"no candles for {pair}")
-        closed = rows[:-1]
-        return [(int(r[0]), float(r[4])) for r in closed if float(r[4]) > 0]
+        out = []
+        for r in rows[:-1]:
+            close, vwap, volume = float(r[4]), float(r[5]), float(r[6])
+            if close > 0:
+                out.append((int(r[0]), close, volume * (vwap if vwap > 0 else close)))
+        return out
+
+    async def daily_closes(self, pair: str) -> List[Tuple[int, float]]:
+        """Closed daily candles as [(open_ts, close)], oldest first."""
+        return [(ts, close) for ts, close, _ in await self.daily_ohlc(pair)]
+
+    async def asset_pairs(self) -> Dict[str, dict]:
+        """Every tradable pair Kraken lists (the screener's universe of candidates)."""
+        return await self._get("AssetPairs", {})
+
+    async def tickers(self) -> Dict[str, dict]:
+        """The raw ticker of every pair, in one request (no `pair` = all of them)."""
+        return await self._get("Ticker", {})

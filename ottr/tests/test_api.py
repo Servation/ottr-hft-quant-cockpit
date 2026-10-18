@@ -265,3 +265,13 @@ async def test_kill_switch_records_who_asked(api, store):
     assert d["by"] == "discord" and store.audits("kill_switch")[0]["by"] == "discord"
     await post_kill(s, {"engaged": True, "by": "not allowed!"}, status=400)
     await post_kill(s, {"engaged": True, "by": 7}, status=400)
+
+
+async def test_screen_is_served_once_the_engine_has_one(api, cfg):
+    from tests.fakes import sample_screen
+    eng, s, _ = api
+    d = await get(s, "/api/screen", status=404)
+    assert d["error"].startswith("no screen yet")
+    eng.store.save_screen(sample_screen(cfg))
+    d = await get(s, "/api/screen")
+    assert d["id"] == "s-test" and d["rows"][0]["symbol"] == "NEAR" and d["rows"][0]["qualifies"]

@@ -135,7 +135,7 @@ async def test_status_survives_a_partial_failure(make, engine_api):
 # -- /ask ----------------------------------------------------------------------------------
 async def test_ask_defers_before_reading_and_answers(make, engine_api):
     deferred_at_call = []
-    model = RecordingModel(["ETH is 51% of the book — the only position."])
+    model = RecordingModel(["ETH is 51% of the book \u2014 the only position."])
     svc = make(model=model)
     defer = Deferral(engine_api)
     model.on_call = lambda: deferred_at_call.append(defer.calls)
@@ -146,7 +146,7 @@ async def test_ask_defers_before_reading_and_answers(make, engine_api):
         [p for _, p, _, _ in engine_api.requests[:defer.requests_before]] == ["/api/council"]
     assert not out.ephemeral
     assert out.text.startswith("> **Jeff:** what do we hold?")
-    assert "ETH is 51% of the book, the only position." in out.text and "—" not in out.text
+    assert "ETH is 51% of the book, the only position." in out.text and "\u2014" not in out.text
     assert "-# claude, low effort | " in out.text and "1 of 20 asks this hour" in out.text
     row = svc.log.recent(1)[0]
     assert row["status"] == "ok" and row["model_call"] == 1 and "DESK DATA" in row["prompt"]
@@ -314,7 +314,7 @@ async def test_prompt_carries_the_desk_and_the_rules(engine_api):
                    "Jeff asked: old q", "You answered: old a"):
         assert needle in p, needle
     assert p.rstrip().endswith("Question from Jeff (now): why ETH?")
-    assert "—" not in p
+    assert "\u2014" not in p
 
 
 async def test_prompt_marks_missing_sections(engine_api):
@@ -382,8 +382,8 @@ def test_rendered_views_have_no_em_dashes(engine_api):
     texts = [render.status(d["/api/health"], d["/api/book"], engine_api.council, {}, now),
              render.positions(d["/api/positions"], now), render.meeting(d["/api/meetings"]["meetings"][0], now),
              render.kill_result({"effective_dry_run": True}, False, "Jeff")]
-    assert all("—" not in t for t in texts)
-    assert render.no_em_dash("a — b—c") == "a, b, c"
+    assert all("\u2014" not in t for t in texts)
+    assert render.no_em_dash("a \u2014 b\u2014c") == "a, b, c"
 
 
 def test_status_shows_an_engaged_kill_switch_and_alarms(engine_api):
@@ -510,3 +510,41 @@ async def test_end_to_end_against_a_real_engine_api(chat_cfg, store, ledger, tmp
         await svc.api.aclose()
         svc.log.close()
         await server.stop()
+
+
+# -- screener in chat ------------------------------------------------------------------------
+async def test_screen_shows_candidates_universe_ranks_and_how_to_promote(make, engine_api, chat_cfg):
+    from tests.fakes import sample_screen
+    svc = make()
+    assert (await svc.screen(ME)).startswith("No screen yet: the engine runs one a day")
+    engine_api.screen = sample_screen(chat_cfg)
+    text = await svc.screen(ME)
+    assert text.startswith("**Screener** <t:") and "Advisory: the desk never trades these." in text
+    assert "**Candidates**" in text and re.search(r"NEAR\s+86\s+\+3\.72\s+\+1\.03", text)
+    assert "Your universe ranks BTC #3, ETH #4 (of 4)." in text
+    assert 'To trade NEAR: add it to `universe`, `NEAR = 10.0` under [caps]' in text
+    assert all(len(c) <= 2000 for c in render.split_message(text)) and "\u2014" not in text
+    assert engine_api.writes() == []
+
+
+async def test_screen_when_nothing_qualifies_says_why(make, engine_api, chat_cfg):
+    from tests.fakes import sample_screen
+    engine_api.screen = sample_screen(chat_cfg, qualifying=False)
+    text = await make().screen(ME)
+    assert "**No candidate qualifies right now.**" in text and "NEAR: not up over 14d" in text
+    assert "To trade" not in text
+
+
+async def test_the_ask_prompt_knows_the_screener(engine_api, chat_cfg):
+    from tests.fakes import sample_screen
+    p = prompt.build(await _ctx(engine_api), [], "q", "Jeff", time.time())
+    assert "SCREENER: no run yet" in p
+    engine_api.screen = sample_screen(chat_cfg)
+    p = prompt.build(await _ctx(engine_api), [], "what else looks good?", "Jeff", time.time())
+    assert "SCREENER (code ranks liquid Kraken pairs OUTSIDE the universe" in p
+    assert "qualifying: NEAR: score 86" in p and "universe ranks: BTC #3, ETH #4 of 4" in p
+
+
+async def test_an_engine_older_than_the_screener_is_reported(make, engine_api):
+    engine_api.missing.add("/api/screen")
+    assert "older than the chat bot" in await make().screen(ME)

@@ -61,6 +61,7 @@ ENDPOINTS = [
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
     "GET  /api/council          whether a meeting is running now, the next and the last meeting",
+    "GET  /api/screen           the latest screener run: other Kraken pairs ranked (advisory, never traded)",
     "GET  /api/kill-switch      kill switch state",
     "POST /api/kill-switch      {\"engaged\": true|false, \"reason\": \"...\", \"by\": \"...\"}; empty body engages. Bearer auth.",
 ]
@@ -405,6 +406,15 @@ async def get_council(request: web.Request) -> web.Response:
                "last_meeting": dict(zip(("id", "ts", "status"), last)) if last else None})
 
 
+async def get_screen(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    with ctx.reader.snapshot():
+        d = ctx.reader.latest_screen()
+    if d is None:
+        raise web.HTTPNotFound(reason="no screen yet: the engine runs one a day, and `ottr screen` runs one now")
+    return ok(d)
+
+
 async def get_kill(request: web.Request) -> web.Response:
     return ok(request.app[CTX].kill.state())
 
@@ -457,6 +467,7 @@ def create_app(ctx: ApiContext) -> web.Application:
     app.router.add_get("/api/meetings/{id}", get_meeting)
     app.router.add_get("/api/audit", get_audit)
     app.router.add_get("/api/council", get_council)
+    app.router.add_get("/api/screen", get_screen)
     app.router.add_get("/api/kill-switch", get_kill)
     app.router.add_post("/api/kill-switch", post_kill)
     return app

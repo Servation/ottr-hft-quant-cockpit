@@ -35,7 +35,8 @@ ottr/src/ottr/
   config.py        typed config (config.toml + env + ottr/.env), validated at load
   market/          Kraken quotes (bid/ask/24h high) and closed daily candles, Coinbase
                    fallback quotes, pure-Python indicators (EMA, RSI, MACD, efficiency
-                   ratio, regime, 30d vol, return correlation), MarketSnapshot + packet
+                   ratio, regime, 30d vol, return correlation), MarketSnapshot + packet,
+                   and the daily screener of other Kraken pairs (advisory)
   council/         CLI model adapters (claude -p, codex exec, agy -p), schemas, Council
   risk/            gate (pre-trade checks + sizing), monitor (trailing stop, trim,
                    drawdown breaker), Intent/Verdict types
@@ -135,6 +136,12 @@ buy-and-hold from day 0, so performance is never judged in a vacuum.
 - **Kill switch.** Set with `OTTR_DRY_RUN=1`, in config, or via
   `POST /api/kill-switch`. It's persisted, so it survives a restart, and the API can't
   release a dry run that config imposes.
+- **Screener (advisory).** Once a day the engine ranks the other liquid Kraken USD pairs
+  against the universe: a volatility-adjusted 14/30/90-day trend, strength vs BTC, the
+  size the risk model would allow, smoothness, diversification and volume, as percentile
+  ranks. A candidate qualifies only when every horizon is up, it beats BTC and it is near
+  its 30-day high; pullbacks and spikes are penalized. Nothing is traded: the owner adds a
+  coin to `universe` (with a cap and its Kraken pair) to make it tradable.
 - **Discord chat.** `ottr chat` is a slash-command bot (outbound only, no privileged
   intents) that the supervisor runs as a second child with its own restart loop, so a chat
   crash never touches the engine. /status, /positions and /meeting are plain code over the
@@ -185,6 +192,9 @@ The first draft of this design was critiqued by GPT and Gemini. The adopted poin
   - **P3 measure:** a per-model scorecard grading each analyst's stances at +24h and +7d,
     chair vs analysts, and a backtest of the sizing and risk policy on Kraken candles.
   - **P4 dashboard:** a web UI on the API.
+  - **Screener follow-ups:** grade past picks (did qualifying candidates beat BTC over
+    the next 7 and 30 days?) before trusting the score more; then, optionally, let the
+    council see candidates and propose promotions for the owner to approve.
   - **Chat follow-ups:**
     - CEO directives: owner free text ("stay out of DOGE this week") stored through an
       authenticated API endpoint and shown to the analysts and the chair as context. Code

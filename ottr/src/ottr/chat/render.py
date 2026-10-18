@@ -20,7 +20,7 @@ from ottr.chat.client import ApiError, ApiUnreachable
 
 DISCORD_LIMIT = 2000
 MAX_CHUNKS = 4            # a reply longer than ~8000 characters is cut, with a note
-EM_DASH = "—"
+EM_DASH = "\u2014"
 VERDICTS = {0: "OK", 1: "DEGRADED", 2: "LEDGER PROBLEM", 3: "ENGINE DOWN"}
 
 
@@ -202,6 +202,48 @@ def meeting(m: Optional[dict], now: float) -> str:
             if s.get("stance") != "HOLD":
                 out.append(f"> {s['asset']} {s['stance']}: {clip(s.get('thesis'), 220)} "
                            f"Risk: {clip(s.get('key_risk'), 140)}")
+    return "\n".join(out)
+
+
+def screen(d: Optional[dict], now: float) -> str:
+    """The latest screener run: candidates outside the universe, and where the universe ranks."""
+    from ottr.market import screen as sc
+    if d is None:
+        return ("No screen yet: the engine runs one a day, the first a couple of minutes after it "
+                "starts. `ottr screen` on the host runs one now.")
+    rows = d.get("rows", [])
+    outside = [r for r in rows if not r["in_universe"]]
+    n = (d.get("settings") or {}).get("top_n", 5)
+    head = (f"**Screener** {when(d.get('ts'))}: {len(outside)} liquid Kraken pairs outside the universe "
+            f"scored (of {d.get('listed', '?')} listed). Advisory: the desk never trades these.")
+    top = sc.candidates(d, n)
+    out = [head]
+    if top:
+        out.append("**Candidates** (up over 14, 30 and 90 days, ahead of BTC, near the 30-day high):")
+        shown = top
+    else:
+        out.append("**No candidate qualifies right now.** Strongest pairs outside the universe:")
+        shown = sc.closest(d, 3)
+    table = [f"{'':6} {'SCORE':>5} {'TREND':>6} {'vsBTC':>6} {'SIZE':>5} {'30D':>5} {'VOL':>5} {'$/DAY':>7}"]
+    for r in shown:
+        size = "n/a" if r.get("sizable") is None else f"{r['sizable'] * 100:.1f}%"
+        vol = "n/a" if r.get("vol") is None else f"{r['vol'] * 100:.0f}%"
+        table.append(f"{r['symbol']:6} {r['score']:>5.0f} {r['trend']:>+6.2f} {r['vs_btc']:>+6.2f} {size:>5} "
+                     f"{sc.signed_pct(r.get('chg_30d')):>5} {vol:>5} {sc.money(r.get('usd_volume')):>7}")
+    out += ["```", *table, "```"]
+    notes = [f"{r['symbol']}: {', '.join(r['flags'])}" for r in shown if r.get("flags")]
+    if not top:
+        notes += [f"{r['symbol']}: {sc.why_not(r)}" for r in shown]
+    if notes:
+        out.append("; ".join(notes))
+    ranks = ", ".join(f"{r['symbol']} #{r['rank']}" for r in rows if r["in_universe"])
+    if ranks:
+        out.append(f"Your universe ranks {ranks} (of {len(rows)}).")
+    if top:
+        out.append(sc.promote_hint(top[0]))
+    out.append("-# TREND and vsBTC: volatility-adjusted drift (a steadier climb scores higher). SIZE: what "
+               "the risk model would hold at full conviction. Score: ranks on trend, vs BTC, size, "
+               "smoothness, diversification and volume.")
     return "\n".join(out)
 
 

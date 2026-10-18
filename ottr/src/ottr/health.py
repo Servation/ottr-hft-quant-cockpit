@@ -33,7 +33,7 @@ EXIT_DOWN = 3       # the engine is not running
 CRITICAL, WARNING = "critical", "warning"
 # Risk and market feed the protective exits; equity and council only measure and propose.
 SEVERITY = {"watchdog": CRITICAL, "market": CRITICAL, "risk": CRITICAL,
-            "equity": WARNING, "council": WARNING}
+            "equity": WARNING, "council": WARNING, "screen": WARNING}  # screen: advisory only
 
 
 def intervals(cfg: Config) -> Dict[str, float]:
@@ -44,6 +44,7 @@ def intervals(cfg: Config) -> Dict[str, float]:
         "risk": cfg.engine.risk_interval_sec,
         "equity": cfg.engine.equity_interval_sec,
         "council": cfg.council.interval_hours * 3600,
+        **({"screen": cfg.screen.interval_hours * 3600} if cfg.screen.enabled else {}),
     }
 
 

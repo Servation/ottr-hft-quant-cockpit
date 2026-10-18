@@ -184,3 +184,22 @@ def test_packet_is_time_anchored_and_marks_unknowns(cfg):
     text = MarketSnapshot(as_of=1_800_000_000, assets={"ETH": v}).packet()
     assert text.startswith("AS OF: 2027-01-15")
     assert "n/a" in text and "no_live_quote" in text
+
+
+async def test_market_data_uses_the_configured_pair_for_an_extra_asset(cfg):
+    import dataclasses as dc
+    from ottr.market.service import MarketData
+    seen = {}
+
+    class Recording(StubKraken):
+        async def quotes(self, pairs):
+            seen.update(pairs)
+            return {}
+
+    c = dc.replace(cfg, universe=["BTC", "NEAR"], pairs={"NEAR": "NEARUSD"})
+
+    async def no_fallback(missing):
+        return {a: q(a, 5.0, "coinbase") for a in missing}
+
+    await MarketData(c, kraken=Recording(), fallback=no_fallback).quotes(force=True)
+    assert seen == {"BTC": "XBTUSD", "NEAR": "NEARUSD"}

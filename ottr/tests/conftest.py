@@ -28,8 +28,10 @@ def isolated_env(tmp_path, monkeypatch):
 @pytest.fixture
 def cfg(tmp_path):
     c = cfgmod.load(data_dir=tmp_path)
-    # Engine tests must never bind the real dashboard port; API tests opt in with port 0.
-    return dataclasses.replace(c, api=dataclasses.replace(c.api, enabled=False, port=0))
+    # Engine tests must never bind the real dashboard port (API tests opt in with port 0)
+    # or reach Kraken through the screener (screener tests pass a fake one).
+    return dataclasses.replace(c, api=dataclasses.replace(c.api, enabled=False, port=0),
+                               screen=dataclasses.replace(c.screen, enabled=False))
 
 
 @pytest.fixture

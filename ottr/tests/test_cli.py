@@ -167,3 +167,22 @@ def test_chat_refuses_to_start_when_disabled(tmp_path, monkeypatch):
         "enabled = true             # `ottr supervise` runs it", "enabled = false            # `ottr supervise` runs it"),
         encoding="utf-8")
     assert cli.main(["--config", str(p), "chat"]) == 78
+
+
+def test_screen_prints_the_ranking_and_stores_nothing(tmp_path, monkeypatch, capsys):
+    from ottr.market import screen
+    from tests.fakes import sample_screen_result
+    monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+
+    async def fake_run(kraken, cfg, pause=1.1):
+        return sample_screen_result(cfg)
+
+    monkeypatch.setattr(screen, "run", fake_run)
+    assert cli.main(["screen"]) == 0
+    out = capsys.readouterr().out
+    assert out.startswith("Scanning Kraken USD pairs") and "OTTR screener, live (not stored" in out
+    assert "QUALIFIES" in out
+    assert "candidates: NEAR, XMR" in out and 'NEAR = "NEARUSD"' in out
+    assert not (tmp_path / "ottr.db").exists()
+    assert cli.main(["screen", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["id"] == "s-test"

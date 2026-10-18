@@ -123,6 +123,18 @@ class Chat:
 
 
 @dataclass(frozen=True)
+class Screen:
+    enabled: bool = True               # daily scan of other Kraken USD pairs; advisory, never traded
+    interval_hours: float = 24.0       # daily candles change once a day
+    min_usd_volume: float = 1_000_000  # 30-day median daily volume, in USD
+    max_spread_pct: float = 0.30       # live bid/ask spread
+    min_history_days: int = 120        # seasoning: skips new listings and their launch pumps
+    max_pairs: int = 60                # most liquid pairs scored after the prefilter (Kraken's rate limit)
+    top_n: int = 5                     # candidates shown to the owner
+    post_to_discord: bool = True       # a short digest after each scan
+
+
+@dataclass(frozen=True)
 class Config:
     universe: List[str]
     trading: Trading
@@ -136,6 +148,8 @@ class Config:
     alerts: Alerts = field(default_factory=Alerts)
     api: Api = field(default_factory=Api)
     chat: Chat = field(default_factory=Chat)
+    screen: Screen = field(default_factory=Screen)
+    pairs: Dict[str, str] = field(default_factory=dict)  # [pairs]: Kraken pair per extra universe asset
     # Secrets stay out of repr() so a logged or printed Config can't leak them.
     discord_webhook_url: Optional[str] = field(default=None, repr=False)
     api_key: Optional[str] = field(default=None, repr=False)  # OTTR_API_KEY: guards the kill switch
@@ -146,6 +160,11 @@ class Config:
 
     def cap_pct(self, asset: str) -> float:
         return self.caps.get(asset.upper(), self.caps.get("default", 35.0))
+
+    def kraken_pair(self, asset: str) -> Optional[str]:
+        """The Kraken pair for `asset`: [pairs] first, then the built-in table."""
+        from ottr.market.kraken import PAIRS
+        return self.pairs.get(asset) or PAIRS.get(asset)
 
 
 class ConfigError(ValueError):
@@ -246,6 +265,8 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
         alerts=_section(Alerts, raw.get("alerts", {}), "alerts"),
         api=_section(Api, raw.get("api", {}), "api"),
         chat=_section(Chat, raw.get("chat", {}), "chat"),
+        screen=_section(Screen, raw.get("screen", {}), "screen"),
+        pairs={str(k).upper().strip(): str(v).strip() for k, v in raw.get("pairs", {}).items()},
         data_dir=Path(data_dir or os.getenv("OTTR_DATA_DIR") or (ROOT / "data")),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL") or None,
         api_key=os.getenv("OTTR_API_KEY") or None,
@@ -278,6 +299,20 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
         raise ConfigError("chat.timeout_sec must be in (0, 600]")
     if ch.enabled and not cfg.api.enabled:
         raise ConfigError("chat.enabled needs api.enabled: the chat bot reads the book through the API")
+    sc = cfg.screen
+    if sc.interval_hours <= 0 or sc.min_usd_volume < 0 or not 0 < sc.max_spread_pct <= 5:
+        raise ConfigError("screen.interval_hours must be > 0, min_usd_volume >= 0, max_spread_pct in (0, 5]")
+    if sc.min_history_days < 91 or not 1 <= sc.top_n <= 20 or not 1 <= sc.max_pairs <= 200:
+        # 91: the 90-day trend and correlation need 90 daily returns.
+        raise ConfigError("screen.min_history_days must be >= 91, top_n in 1..20, max_pairs in 1..200")
+    for k, v in cfg.pairs.items():
+        if not k.isalnum() or not v.isalnum():
+            raise ConfigError(f"[pairs] {k} = {v!r}: expected a symbol and a Kraken pair name like NEARUSD")
+    unpriced = [a for a in cfg.universe if not cfg.kraken_pair(a)]
+    if unpriced:
+        # Without a pair an asset would never get a quote: say so here, not as a market alarm.
+        raise ConfigError(f"no Kraken pair for {unpriced}: add them under [pairs], e.g. "
+                          f'{unpriced[0]} = "{unpriced[0]}USD"')
     if cfg.risk.drawdown_resume_pct >= cfg.risk.drawdown_halt_pct:
         raise ConfigError("risk.drawdown_resume_pct must be below drawdown_halt_pct")
     if cfg.council.min_analysts < 1 or cfg.council.min_analysts > len(cfg.council.analysts):
