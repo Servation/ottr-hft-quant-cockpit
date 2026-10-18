@@ -1,4 +1,4 @@
-# OTTR v2: council-driven paper-trading engine (see ../V2_PLAN.md).
+# OTTR: council-driven paper-trading engine (see ../docs/DESIGN.md).
 [project]
 name = "ottr"
 version = "2.0.0a1"

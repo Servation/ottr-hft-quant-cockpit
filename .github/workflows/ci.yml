@@ -2,14 +2,14 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main ]
   pull_request:
   workflow_dispatch:
 
 jobs:
-  # OTTR v2 (council engine). Windows too: it runs natively on the Windows host, and the
-  # single-writer lock has an OS-specific (msvcrt vs fcntl) path that must be exercised.
-  ottr-v2:
+  # Windows too: OTTR runs natively on a Windows host, and the single-writer lock and the
+  # supervisor have OS-specific paths (msvcrt vs fcntl, Job Objects) that must be exercised.
+  ottr:
     strategy:
       fail-fast: false
       matrix:
@@ -27,56 +27,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Lint (blocking)
+        run: python -m pyflakes src tests
       - name: Tests (blocking)
         run: pytest -q -m "not live"
-
-  discord-bridge:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: discord-bridge
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"   # required: pandas-ta 0.4.x needs >=3.12, and the code uses 3.12 f-string features
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-          pip install -r requirements-dev.txt
-
-      # --- Blocking gate: the eval suite must stay green ---
-      # run_evals.py auto-skips the LLM-backed evals when no backend is reachable
-      # (CI has none), so this runs the deterministic offline evals and returns a
-      # real exit code.
-      - name: Eval suite (blocking)
-        run: python run_evals.py --no-llm
-
-      # --- Blocking gate: unit tests. Network/LLM "live" tests are excluded. ---
-      # The suite is green (97 passed); this is now a hard gate.
-      - name: Unit tests (blocking)
-        run: pytest -k "not live" --cov=bot --cov-report=term-missing tests/
-
-  agent-gateway:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: agent-gateway
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e .
-          pip install -r requirements-dev.txt
-
-      - name: Gateway tests (blocking)
-        run: pytest tests/
