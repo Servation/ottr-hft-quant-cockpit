@@ -44,6 +44,53 @@ def test_portfolio_load_exceptions(tmp_path):
     finally:
         bot.portfolio._PORTFOLIO_FILE = original_state_file
 
+def test_load_of_intact_file_does_not_write(tmp_path, monkeypatch):
+    # Regression: load() used to save() on every load, so merely importing bot.portfolio
+    # (evals, host scripts) rewrote the live state file behind the bridge's back.
+    f = tmp_path / "portfolio_state.json"
+    monkeypatch.setattr(bot.portfolio, "_PORTFOLIO_FILE", f)
+    monkeypatch.setattr(bot.portfolio, "_DATA_DIR", tmp_path)
+    Portfolio().save()
+    before = (f.read_bytes(), f.stat().st_mtime_ns)
+    saves = []
+    monkeypatch.setattr(Portfolio, "save", lambda self: saves.append(1))
+    Portfolio()
+    assert saves == []
+    assert (f.read_bytes(), f.stat().st_mtime_ns) == before
+
+
+def test_load_saves_only_when_healing(tmp_path, monkeypatch):
+    f = tmp_path / "portfolio_state.json"
+    monkeypatch.setattr(bot.portfolio, "_PORTFOLIO_FILE", f)
+    monkeypatch.setattr(bot.portfolio, "_DATA_DIR", tmp_path)
+    f.write_text(json.dumps({"cash": 500.0, "holdings": {}}))
+    Portfolio()
+    assert "orders" in json.loads(f.read_text())
+
+
+def test_corrupt_file_is_quarantined_not_overwritten(tmp_path, monkeypatch):
+    f = tmp_path / "portfolio_state.json"
+    monkeypatch.setattr(bot.portfolio, "_PORTFOLIO_FILE", f)
+    monkeypatch.setattr(bot.portfolio, "_DATA_DIR", tmp_path)
+    f.write_text("{not json")
+    p = Portfolio()
+    assert p._state["cash"] == 10000.0
+    kept = list(tmp_path.glob("portfolio_state.json.corrupt-*"))
+    assert len(kept) == 1 and kept[0].read_text() == "{not json"
+
+
+def test_unreadable_file_raises_instead_of_resetting(tmp_path, monkeypatch, mocker):
+    f = tmp_path / "portfolio_state.json"
+    monkeypatch.setattr(bot.portfolio, "_PORTFOLIO_FILE", f)
+    monkeypatch.setattr(bot.portfolio, "_DATA_DIR", tmp_path)
+    f.write_text(json.dumps({"cash": 1.0, "holdings": {}}))
+    mocker.patch("builtins.open", side_effect=PermissionError("locked"))
+    with pytest.raises(PermissionError):
+        Portfolio()
+    mocker.stopall()
+    assert json.loads(f.read_text())["cash"] == 1.0  # real book untouched
+
+
 def test_portfolio_save_exception(temp_portfolio, mocker):
     mocker.patch("os.fdopen", side_effect=OSError("Disk Full"))
     temp_portfolio.save() # should catch exception and not crash
