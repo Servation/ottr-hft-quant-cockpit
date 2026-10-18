@@ -12,7 +12,8 @@ A paper-trading engine where three models analyze and code acts. Design and rati
   SQLite ledger.
 - **Operations:** a supervisor restarts the engine, a watchdog raises alarms on stale
   heartbeats, a blind risk monitor or a ledger mismatch, Discord gets rate-limited
-  notifications, and a loopback-only JSON API serves the book and holds the kill switch.
+  notifications (and a live view of each council meeting), and a loopback-only JSON API
+  serves the book and holds the kill switch.
 - **Chat:** an optional Discord bot (`ottr chat`) answers slash commands from you: status,
   positions, the last meeting, questions to one model, and the kill switch. It reads
   through the API and can't place a trade.
@@ -107,6 +108,37 @@ The engine can't report its own death. Restarts are covered by the supervisor (p
 run didn't shut down cleanly). A machine that is simply off shows up as exit code 3 from
 `ottr status`.
 
+## Watching a council meeting
+
+A meeting takes a minute or two (the analysts in parallel, about 30s for Claude and GPT
+and up to 90s for Gemini, then about 20s for the chair). When it starts, the webhook
+posts one message to the channel and then edits it as the meeting moves:
+
+```
+Council in session (m-20261018T233852-bbfc83, started 2 minutes ago)
+- claude: done in 34s: BUY ETH 0.80
+> Risk-on but careful: ETH reclaimed its 50-day EMA while BTC ranges...
+- gpt: done in 28s: HOLD on every asset
+> Momentum favors preserving cash...
+- gemini: thinking
+- chair (claude): waits for the analysts
+```
+
+Then the chair's decision, the trades code dropped, and once the meeting is recorded
+the risk gate's answer per trade (filled, dry run, rejected and why). The usual summary
+post still follows, since an edit doesn't notify you, and so do fill posts. An analyst
+that drops out says why; a meeting cut short (no market data, or the engine stopping)
+says so instead of showing "thinking" forever.
+
+It can't slow a meeting down: the message is updated by its own sender, coalesced to the
+newest state and edited at most every `live_edit_sec` (3s). The first post costs one
+event from the notification budget; edits cost none. A failed edit just leaves the last
+state showing. `/status` in the chat bot reads the same progress from `GET /api/council`
+("in session: claude and gpt done, gemini thinking").
+
+`[alerts]` in config.toml: `live_meeting = false` turns the live message off (the summary
+post stays), and `live_edit_sec` (1 to 60) sets the spacing between edits.
+
 ## HTTP API (for the dashboard)
 
 Read-only JSON on `http://127.0.0.1:8765/api` (loopback only, enforced). It reads through
@@ -123,7 +155,7 @@ its own `mode=ro` SQLite connection, so it can't write to the ledger.
 | `GET /api/meetings?limit=&before=` | meetings with every analyst's stance and the gate's verdicts |
 | `GET /api/meetings/{id}` | one meeting in full, including the packet the models saw |
 | `GET /api/audit?kind=&since=&limit=` | the audit log |
-| `GET /api/council` | whether a meeting is running now, the next and the last meeting |
+| `GET /api/council` | whether a meeting is running now and how far it has got, the next and the last meeting |
 | `GET/POST /api/kill-switch` | read, or engage/release the runtime dry run |
 
 The kill switch needs `Authorization: Bearer $OTTR_API_KEY`. An empty POST engages it:
@@ -147,7 +179,7 @@ trade endpoint, and its only write is the kill switch, so **no chat command can 
 
 | Command | Who | What it does |
 |---|---|---|
-| `/status` | owner, allow-list | health, alarms, kill switch, equity and P&L, benchmarks, risk, council schedule |
+| `/status` | owner, allow-list | health, alarms, kill switch, equity and P&L, benchmarks, risk, council schedule (or how far a running meeting has got) |
 | `/positions` | owner, allow-list | holdings marked at the bid, weight, unrealized P&L, distance to the trailing stop |
 | `/meeting` | owner, allow-list | the latest council meeting: the chair's decision, each order's result, every analyst's stances and theses |
 | `/ask <question>` | owner, allow-list | one model call over the book, positions, the last meeting, recent fills and health, plus the channel's last few exchanges |

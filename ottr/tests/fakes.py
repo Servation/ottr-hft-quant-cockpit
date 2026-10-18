@@ -69,11 +69,19 @@ class FakeMarket:
 
 
 class ScriptedModel(ModelAdapter):
-    def __init__(self, name: str, replies) -> None:
+    """Answers from a script. `delay` makes it slow; with `gate` it answers only once the
+    event is set (a model held mid-call, so a test can look at a meeting in progress)."""
+
+    def __init__(self, name: str, replies, delay: float = 0.0, gate: Optional[asyncio.Event] = None) -> None:
         self.name, self.replies, self.prompts = name, list(replies), []
+        self.delay, self.gate = delay, gate
 
     async def complete(self, prompt: str, timeout: float = 240.0) -> str:
         self.prompts.append(prompt)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.gate is not None:
+            await self.gate.wait()
         r = self.replies.pop(0)
         if isinstance(r, Exception):
             raise r
@@ -101,6 +109,50 @@ def eth_buy_council(cfg):
     chair = {"summary": "buy eth", "dissent_notes": "",
              "trades": [{"action": "BUY", "asset": "ETH", "conviction": 0.7, "reasoning": "trend"}]}
     return council_for(cfg, reps, chair)
+
+
+class LiveRecorder:
+    """A Discord webhook stand-in: plain posts, plus the create/edit pair live messages use.
+
+    Records every call with the loop time it started, so tests can count posts vs edits
+    and measure edit spacing. `fail_edits` / `fail_create` make Discord refuse, and
+    `hold` (an Event) makes edits hang until it is set (Discord very slow)."""
+
+    def __init__(self) -> None:
+        self.posts: List[str] = []
+        self.calls: List[Tuple[str, float, str]] = []   # (create | edit, loop time, text)
+        self.fail_edits = False
+        self.fail_create = False
+        self.raise_on_edit = False
+        self.hold: Optional[asyncio.Event] = None
+        self.shown: Optional[str] = None  # what Discord shows now: the last text that landed
+        self._next = 1000
+
+    async def __call__(self, text: str) -> bool:
+        self.posts.append(text)
+        return True
+
+    async def create(self, text: str) -> Optional[str]:
+        self.calls.append(("create", asyncio.get_running_loop().time(), text))
+        if self.fail_create:
+            return None
+        self._next += 1
+        self.shown = text
+        return str(self._next)
+
+    async def edit(self, message_id: str, text: str) -> bool:
+        self.calls.append(("edit", asyncio.get_running_loop().time(), text))
+        if self.hold is not None:
+            await self.hold.wait()
+        if self.raise_on_edit:
+            raise RuntimeError("transport bug")
+        if self.fail_edits:
+            return False
+        self.shown = text
+        return True
+
+    def kinds(self) -> List[str]:
+        return [k for k, _, _ in self.calls]
 
 
 # -- chat bot fakes --------------------------------------------------------------------------

@@ -189,10 +189,11 @@ class ChatService:
                                     render.api_error(e) + " I won't answer without current desk data.")
             if council.get("running"):
                 started = council.get("started_at") or now
+                where = render.meeting_progress(council.get("progress"))
                 return self._refuse(asker, question, "meeting", (
-                    f"The council is in session right now (started {fmt_age(now - started)} ago), so I'm "
-                    "staying quiet while the models work on it. Ask again once it ends; /meeting will "
-                    "show what it decided."))
+                    f"The council is in session right now (started {fmt_age(now - started)} ago"
+                    f"{'; ' + where if where else ''}), so I'm staying quiet while the models work on it. "
+                    "Ask again once it ends; /meeting will show what it decided."))
             await defer()
             return await self._answer(asker, question)
         finally:
