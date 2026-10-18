@@ -17,11 +17,14 @@ import time
 from typing import Any, Dict, List, Optional
 
 from ottr.chat.client import ApiError, ApiUnreachable
+from ottr.notify import clip, no_em_dash
 
 DISCORD_LIMIT = 2000
 MAX_CHUNKS = 4            # a reply longer than ~8000 characters is cut, with a note
-EM_DASH = "\u2014"
 VERDICTS = {0: "OK", 1: "DEGRADED", 2: "LEDGER PROBLEM", 3: "ENGINE DOWN"}
+# How /status words an analyst's state in a running meeting, in this order.
+ANALYST_STATES = (("done", "done"), ("dropped", "dropped out"), ("thinking", "thinking"),
+                  ("waiting", "waiting"), ("stopped", "stopped"))
 
 
 # -- small formatters ----------------------------------------------------------------------
@@ -51,14 +54,9 @@ def utc(ts: Optional[float]) -> str:
     return "n/a" if ts is None else time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
 
 
-def clip(text: Optional[str], n: int) -> str:
-    text = " ".join((text or "").split())
-    return text if len(text) <= n else text[:n - 3].rstrip() + "..."
-
-
-def no_em_dash(text: str) -> str:
-    # The owner's house style; models drift into em dashes no matter what the prompt says.
-    return text.replace(f" {EM_DASH} ", ", ").replace(EM_DASH, ", ")
+def names(items: List[str]) -> str:
+    """claude / claude and gpt / claude, gpt and gemini"""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
 
 
 # -- views ---------------------------------------------------------------------------------
@@ -89,11 +87,29 @@ def kill_line(k: Optional[dict]) -> str:
     return f"{'; '.join(bits)}. Nothing fills"
 
 
+def meeting_progress(p: Optional[dict]) -> str:
+    """How far a running meeting has got, e.g. "claude and gpt done, gemini thinking".
+
+    Empty when the engine sent no progress (an engine older than the bot)."""
+    if not p:
+        return ""
+    if p.get("phase") == "market":
+        return "reading the market"
+    by_state: Dict[str, List[str]] = {}
+    for a in p.get("analysts") or []:
+        by_state.setdefault(str(a.get("status")), []).append(str(a.get("name")))
+    parts = [f"{names(by_state[s])} {word}" for s, word in ANALYST_STATES if by_state.get(s)]
+    chair = {"thinking": "chair deliberating", "done": "chair decided",
+             "failed": "chair failed"}.get((p.get("chair") or {}).get("status"))
+    return ", ".join(parts + ([chair] if chair else []))
+
+
 def council_line(c: Optional[dict]) -> str:
     if not c:
         return "Council: unknown"
     if c.get("running"):
-        return f"Council: **in session** (started {when(c.get('started_at'))})"
+        where = meeting_progress(c.get("progress"))
+        return f"Council: **in session** (started {when(c.get('started_at'))})" + (f": {where}" if where else "")
     last = c.get("last_meeting")
     tail = f" | last {when(last['ts'])} ({last['status']})" if last else " | no meeting yet"
     return f"Council: next meeting {when(c.get('next_meeting_at'))}{tail}"
@@ -202,7 +218,7 @@ def meeting(m: Optional[dict], now: float) -> str:
             if s.get("stance") != "HOLD":
                 out.append(f"> {s['asset']} {s['stance']}: {clip(s.get('thesis'), 220)} "
                            f"Risk: {clip(s.get('key_risk'), 140)}")
-    return "\n".join(out)
+    return no_em_dash("\n".join(out))  # most of this view is model text
 
 
 def screen(d: Optional[dict], now: float) -> str:

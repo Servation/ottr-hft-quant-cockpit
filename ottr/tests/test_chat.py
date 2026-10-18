@@ -218,6 +218,14 @@ async def test_ask_stays_quiet_while_the_council_meets(make, engine_api, clock):
     assert svc.log.recent(1)[0]["detail"] == "meeting"
 
 
+async def test_ask_refusal_says_how_far_the_meeting_has_got(make, engine_api, clock):
+    engine_api.council.update(running=True, started_at=clock.t - 130, progress={
+        "phase": "analysts", "chair": {"status": "waiting"},
+        "analysts": [{"name": "claude", "status": "done"}, {"name": "gemini", "status": "thinking"}]})
+    out = await make(model=RecordingModel()).ask(ME, "what's happening?", Deferral())
+    assert "(started 2m ago; claude done, gemini thinking), so I'm staying quiet" in out.text
+
+
 async def test_ask_refuses_without_the_engine(make, engine_api):
     engine_api.down = True
     model = RecordingModel()
@@ -384,6 +392,8 @@ def test_rendered_views_have_no_em_dashes(engine_api):
              render.kill_result({"effective_dry_run": True}, False, "Jeff")]
     assert all("\u2014" not in t for t in texts)
     assert render.no_em_dash("a \u2014 b\u2014c") == "a, b, c"
+    m = dict(d["/api/meetings"]["meetings"][0], summary="Buy ETH \u2014 the trend holds.")  # model text
+    assert "Buy ETH, the trend holds." in render.meeting(m, now)
 
 
 def test_status_shows_an_engaged_kill_switch_and_alarms(engine_api):

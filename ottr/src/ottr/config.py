@@ -91,6 +91,8 @@ class Alerts:
     per_hour: float = 30.0             # sustained rate after the burst is spent
     alarm_repeat_sec: float = 1800.0   # a flapping alarm re-posts at most this often
     alarm_remind_sec: float = 21600.0  # reminder while an alarm stays active
+    live_meeting: bool = True          # one message, edited as a council meeting runs
+    live_edit_sec: float = 3.0         # at least this long between edits of a live message
 
 
 LOOPBACK = ("127.0.0.1", "localhost", "::1")
@@ -287,6 +289,9 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
             raise ConfigError(f"engine.{name} must be positive")
     if cfg.alerts.burst < 1 or cfg.alerts.per_hour <= 0:
         raise ConfigError("alerts.burst must be >= 1 and alerts.per_hour > 0")
+    if not 1.0 <= cfg.alerts.live_edit_sec <= 60.0:
+        # Discord allows a webhook about 5 requests per 2s, shared with every other post.
+        raise ConfigError("alerts.live_edit_sec must be in [1, 60]")
     ch = cfg.chat
     if ch.model not in MODEL_EFFORTS:
         raise ConfigError(f"chat.model must be one of {sorted(MODEL_EFFORTS)}, got {ch.model!r}")

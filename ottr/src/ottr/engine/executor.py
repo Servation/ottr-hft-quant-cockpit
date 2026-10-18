@@ -35,6 +35,9 @@ TRANSIENT = ("no_quote", "stale_quote", "book_unmarkable", "market_data_error")
 REFRESH_IF_OLDER_SEC = 10.0
 
 Notifier = Callable[[str, dict], Awaitable[None]]
+# on_outcome(intent, status, verdict) after every decision, once it is committed. Status:
+# filled | dry_run | rejected | deferred | duplicate | error.
+OutcomeHook = Callable[[Intent, str, Verdict], None]
 
 
 class Executor:
@@ -42,6 +45,7 @@ class Executor:
                  notify: Optional[Notifier] = None, kill: Optional[KillSwitch] = None) -> None:
         self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
         self.notify = notify
+        self.on_outcome: Optional[OutcomeHook] = None
         # Read at every decision, so engaging the switch stops the very next fill.
         self.kill = kill or KillSwitch(cfg, store)
         self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
@@ -55,9 +59,10 @@ class Executor:
             _, _, intent = await self.queue.get()
             try:
                 await self.process(intent)
-            except Exception:
+            except Exception as e:
                 logger.exception("executor failed on %s", intent.idem_key)
                 self.store.audit("executor_error", idem_key=intent.idem_key)
+                self._outcome(intent, "error", Verdict.reject(intent, "executor_error", f"{type(e).__name__}: {e}"))
             finally:
                 self.queue.task_done()
 
@@ -93,6 +98,16 @@ class Executor:
         self.store.conn.execute("UPDATE orders SET status=?, verdict=?, updated_ts=? WHERE idem_key=?",
                                 (status, dumps(verdict.to_dict()), time.time(), intent.idem_key))
 
+    def _outcome(self, intent: Intent, status: str, verdict: Verdict) -> None:
+        # Called after the commit, and guarded: a watcher (the live meeting view) can see
+        # what happened but can never undo or break it.
+        if self.on_outcome is None:
+            return
+        try:
+            self.on_outcome(intent, status, verdict)
+        except Exception:
+            logger.warning("order outcome hook failed for %s", intent.idem_key, exc_info=True)
+
     async def _context(self, intent: Intent) -> gate.GateContext:
         quotes = await self.market.quotes()
         q = quotes.get(intent.asset)
@@ -124,6 +139,7 @@ class Executor:
     async def process(self, intent: Intent) -> Verdict:
         dup = self._claim(intent)
         if dup:
+            self._outcome(intent, "duplicate", dup)
             return dup
         try:
             ctx = await self._context(intent)
@@ -140,6 +156,7 @@ class Executor:
                                  notes=list(verdict.notes), status=status)
             logger.info("%s %s %s rejected: %s %s", intent.origin, intent.side, intent.asset,
                         verdict.reason, "; ".join(verdict.notes))
+            self._outcome(intent, status, verdict)
             return verdict
 
         if self.kill.engaged:
@@ -149,6 +166,7 @@ class Executor:
                                  **{k: v for k, v in verdict.to_dict().items() if k != "approved"})
             logger.info("DRY RUN would %s %s %s @ %.6g ($%.2f)", verdict.side, verdict.quantity,
                         verdict.asset, verdict.price, verdict.notional)
+            self._outcome(intent, "dry_run", verdict)
             return verdict
 
         with self.store.tx():
@@ -164,6 +182,7 @@ class Executor:
                 self.store.set_state("risk", st.to_dict())
         logger.info("FILLED %s %s %s @ %s ($%s, fee $%s, pnl $%s) [%s]", fill.side, fill.qty,
                     fill.asset, fill.price, fill.notional, fill.fee, fill.realized_pnl, intent.origin)
+        self._outcome(intent, "filled", verdict)
         if self.notify:
             try:
                 await self.notify("fill", {"origin": intent.origin, "side": fill.side,

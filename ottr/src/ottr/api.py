@@ -60,7 +60,7 @@ ENDPOINTS = [
     "GET  /api/meetings         council meetings with analyst stances (?limit=&before=<ts>)",
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
-    "GET  /api/council          whether a meeting is running now, the next and the last meeting",
+    "GET  /api/council          whether a meeting is running now and how far it has got, the next and the last meeting",
     "GET  /api/screen           the latest screener run: other Kraken pairs ranked (advisory, never traded)",
     "GET  /api/kill-switch      kill switch state",
     "POST /api/kill-switch      {\"engaged\": true|false, \"reason\": \"...\", \"by\": \"...\"}; empty body engages. Bearer auth.",
@@ -77,6 +77,7 @@ class ApiContext:
     health: Callable[[Store], dict]
     api_key: Optional[str]
     meeting_started: Callable[[], Optional[float]] = lambda: None
+    meeting_progress: Callable[[], Optional[dict]] = lambda: None
 
     @classmethod
     def from_engine(cls, engine: Engine, reader: Store) -> "ApiContext":
@@ -99,9 +100,13 @@ class ApiContext:
                                                 "effective": state["effective_dry_run"]})
             return state
 
+        def progress_view() -> Optional[dict]:
+            p = engine.progress
+            return p.to_dict() if p is not None else None
+
         return cls(cfg=engine.cfg, reader=reader, quotes=engine.market.quotes, kill=engine.kill,
                    set_kill=set_kill, health=health_view, api_key=engine.cfg.api_key,
-                   meeting_started=lambda: engine.meeting_started)
+                   meeting_started=lambda: engine.meeting_started, meeting_progress=progress_view)
 
 
 CTX: web.AppKey = web.AppKey("ctx", ApiContext)
@@ -391,16 +396,19 @@ async def get_audit(request: web.Request) -> web.Response:
 
 
 async def get_council(request: web.Request) -> web.Response:
-    # `running` comes from the engine's memory, not the ledger: a meeting writes its record
-    # only when it ends, and the chat bot needs to know one is under way (it stays quiet then).
+    # `running` and `progress` come from the engine's memory, not the ledger: a meeting
+    # writes its record only when it ends, and the chat bot needs to know one is under way
+    # (it stays quiet then) and how far it has got.
     ctx = request.app[CTX]
     now = time.time()
     started = ctx.meeting_started()
+    progress = ctx.meeting_progress() if started is not None else None
     with ctx.reader.snapshot():
         nxt = ctx.reader.get_state("next_meeting_at")
         last = ctx.reader.conn.execute("SELECT id, ts, status FROM meetings ORDER BY ts DESC LIMIT 1").fetchone()
     return ok({"as_of": now, "running": started is not None, "started_at": started,
                "running_sec": round(now - started, 1) if started is not None else None,
+               "progress": progress,
                "interval_hours": ctx.cfg.council.interval_hours, "timeout_sec": ctx.cfg.council.timeout_sec,
                "next_meeting_at": nxt,
                "last_meeting": dict(zip(("id", "ts", "status"), last)) if last else None})

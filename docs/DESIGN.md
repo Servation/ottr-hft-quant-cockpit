@@ -41,9 +41,10 @@ ottr/src/ottr/
   risk/            gate (pre-trade checks + sizing), monitor (trailing stop, trim,
                    drawdown breaker), Intent/Verdict types
   ledger/          SQLite store (WAL, single writer via OS lock) and Decimal ledger
-  engine/          executor (the only path to a fill), engine loop, kill switch
+  engine/          executor (the only path to a fill), engine loop, kill switch, meeting
+                   progress (what a running meeting has done so far)
   health.py        alarms and status exit codes shared by watchdog, CLI and API
-  notify.py        rate-limited Discord webhook posts
+  notify.py        rate-limited Discord webhook posts, and the live message edited in place
   api.py           read-only JSON API on 127.0.0.1 + authenticated kill switch
   supervisor.py    restarts `ottr run` (and `ottr chat`) with backoff
   service.py       Windows Task Scheduler registration for the supervisor
@@ -71,6 +72,20 @@ meetings open the database read-only or work on a scratch copy.
 5. Code enforces the rules: no BUY unless at least one analyst rated the asset BUY, and
    no SELL of an asset that isn't held (the desk is long-only spot).
 6. Each surviving trade becomes an Intent for the executor.
+
+**Watching it happen.** The council reports progress through a synchronous callback as
+each step finishes: an analyst done (with its stances) or dropped out, the chair
+deliberating, decided or failed. The engine folds those events, and then the executor's
+verdict on each trade, into one `MeetingProgress` state. `GET /api/council` serves it,
+and one Discord message shows it, posted when the meeting starts and edited as it moves.
+The council never learns who is watching, and the callback swallows its own errors and
+does no I/O, so a slow reader or a Discord outage can't delay or fail a meeting. Edits go
+through their own sender, coalesced to the newest state and spaced at least
+`live_edit_sec` apart (Discord allows a webhook about 5 requests per 2 seconds). Only
+the first post costs an event token, so a meeting can't starve the fill and alarm posts.
+A failed edit just leaves the last state showing. The summary post still goes out at
+the end, because an edit notifies no one. If the engine stops mid-meeting, the message
+says the meeting was cut short instead of showing "thinking" forever.
 
 ### From Intent to fill
 
@@ -132,7 +147,9 @@ buy-and-hold from day 0, so performance is never judged in a vacuum.
   interval, the risk monitor is blind (a held asset has no fresh quote), the ledger
   doesn't balance, or the API can't bind. An alarm needs 5 minutes clear to resolve.
 - **Notifications.** Discord webhook posts are queued and rate-limited, with alarms on a
-  separate budget so a burst of fills can't hide one.
+  separate budget so a burst of fills can't hide one. Each council meeting also gets one
+  live message, edited as analysts finish, the chair decides and the risk gate answers
+  (`[alerts] live_meeting` turns it off).
 - **Kill switch.** Set with `OTTR_DRY_RUN=1`, in config, or via
   `POST /api/kill-switch`. It's persisted, so it survives a restart, and the API can't
   release a dry run that config imposes.
@@ -145,9 +162,10 @@ buy-and-hold from day 0, so performance is never judged in a vacuum.
 - **Discord chat.** `ottr chat` is a slash-command bot (outbound only, no privileged
   intents) that the supervisor runs as a second child with its own restart loop, so a chat
   crash never touches the engine. /status, /positions and /meeting are plain code over the
-  API. /ask is one model call with guardrails: one call at a time, a rolling-hour budget
-  kept in chat.db (a restart can't reset it), and silence while a council meeting runs
-  (`GET /api/council`). /kill and /release (owner only, button confirmation) use the
+  API, and /status says how far a running meeting has got. /ask is one model call with
+  guardrails: one call at a time, a rolling-hour budget kept in chat.db (a restart can't
+  reset it), and silence while a council meeting runs (`GET /api/council`).
+  /kill and /release (owner only, button confirmation) use the
   API's kill switch, the bot's only write, so no chat command can trade. Alerts stay on
   the webhook, because they must still arrive when the bot is down.
 
@@ -187,7 +205,8 @@ The first draft of this design was critiqued by GPT and Gemini. The adopted poin
 
 - **Done:** core engine and council (P1). Unattended operation: supervisor, alarms,
   notifications, API (P2). Discord chat, first slice: /status, /positions, /meeting,
-  /ask, /kill, /release. Removing the previous version (P5).
+  /ask, /kill, /release. A live view of each council meeting in Discord and the API.
+  Removing the previous version (P5).
 - **Next:**
   - **P3 measure:** a per-model scorecard grading each analyst's stances at +24h and +7d,
     chair vs analysts, and a backtest of the sizing and risk policy on Kraken candles.

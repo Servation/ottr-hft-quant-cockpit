@@ -74,6 +74,8 @@ burst = 10
 per_hour = 30
 alarm_repeat_sec = 1800    # one alarm re-posts at most every 30 min while it flaps
 alarm_remind_sec = 21600   # reminder every 6h while an alarm stays active
+live_meeting = true        # watch a council meeting in one message edited as it runs
+live_edit_sec = 3          # at least 3s between edits of that message
 
 [api]                      # read-only JSON API for the dashboard + kill switch
 enabled = true
