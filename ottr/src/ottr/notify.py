@@ -198,6 +198,9 @@ def format_event(kind: str, d: dict) -> str:
             return f"**{label} failed to start** ({d['error']}); the supervisor retries in {d['delay']}."
         return (f"**{label} exited** with code {d['rc']} after {d['runtime']}; the supervisor "
                 f"restarts it in {d['delay']}.{tail}")
+    if kind == "screen":
+        from ottr.market.screen import digest
+        return digest(d, d.get("settings", {}).get("top_n", 5))
     if kind == "kill_switch":
         why = f" ({d['reason']})" if d.get("reason") else ""
         if d["engaged"]:

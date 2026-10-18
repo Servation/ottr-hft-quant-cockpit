@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple
 
 from ottr import health
 from ottr.config import Config
@@ -31,6 +31,7 @@ from ottr.engine.killswitch import KillSwitch
 from ottr.engine.progress import MeetingProgress
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store, dumps
+from ottr.market import screen
 from ottr.market.service import MarketData, MarketSnapshot
 from ottr.market.types import MarketDataError
 from ottr.notify import Alerts
@@ -43,6 +44,8 @@ logger = logging.getLogger(__name__)
 # Kraken stamps a daily candle with its 00:00 UTC open and only closed candles are kept,
 # so the newest is normally 24-48h old. Older than 3 days means closes stopped updating.
 CANDLE_STALE_SEC = 3 * 86400
+SCREEN_FIRST_DELAY = 120.0   # let the first market and risk ticks land before a minute of screening
+SCREEN_RETRY_SEC = 1800.0    # a failed screen is retried after 30 min, not at once
 
 
 def build_council(cfg: Config) -> Council:
@@ -66,8 +69,10 @@ def benchmarks(base: Optional[dict], quotes) -> Tuple[Optional[float], Optional[
 
 class Engine:
     def __init__(self, cfg: Config, store: Store, market: MarketData,
-                 council: Optional[Council] = None, alerts: Optional[Alerts] = None) -> None:
+                 council: Optional[Council] = None, alerts: Optional[Alerts] = None,
+                 screener: Optional[Callable[[], Awaitable[screen.ScreenResult]]] = None) -> None:
         self.cfg, self.store, self.market = cfg, store, market
+        self.screener = screener or (lambda: screen.run(market.kraken, cfg))
         self.ledger = Ledger(store)
         self.council = council or build_council(cfg)
         self.alerts = alerts or Alerts(None, cfg.alerts)
@@ -365,6 +370,41 @@ class Engine:
                 self._beat("watchdog", False, f"{type(e).__name__}: {e}")
             await asyncio.sleep(iv)
 
+    # -- screener (advisory) ---------------------------------------------------------------
+    async def screen_tick(self) -> screen.ScreenResult:
+        """One screen: store it (history for P3), audit it, and post the digest."""
+        res = await self.screener()
+        d = res.to_dict()
+        top = res.candidates(self.cfg.screen.top_n)
+        with self.store.tx():
+            self.store.save_screen(d)
+            self.store.audit("screen", id=res.id, ranked=len(res.rows), errors=len(res.errors),
+                             candidates=[r.symbol for r in top])
+        if self.cfg.screen.post_to_discord:
+            self.alerts.event("screen", d)
+        return res
+
+    async def _screen_loop(self) -> None:
+        # Auxiliary: it never trades, so a failure only marks its heartbeat (a warning after
+        # 3 missed intervals) and can't take the engine down the way a core task would.
+        interval = self.cfg.screen.interval_hours * 3600
+        retry_at = 0.0
+        await asyncio.sleep(SCREEN_FIRST_DELAY)
+        while True:
+            last = (self.store.latest_screen() or {}).get("ts", 0.0)
+            due = max(last + interval, retry_at)
+            if time.time() < due:
+                await asyncio.sleep(min(due - time.time(), 600))
+                continue
+            try:
+                res = await self.screen_tick()
+                self._beat("screen", True, f"{len(res.rows)} ranked, "
+                                           f"{len(res.candidates(self.cfg.screen.top_n))} candidate(s)")
+            except Exception as e:
+                logger.warning("screen failed: %s", e, exc_info=not isinstance(e, MarketDataError))
+                self._beat("screen", False, f"{type(e).__name__}: {e}")
+                retry_at = time.time() + SCREEN_RETRY_SEC
+
     async def _watch_stop_file(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             if stop_requested(self.cfg.data_dir, self.started or 0.0):
@@ -468,6 +508,8 @@ class Engine:
                     asyncio.create_task(self._watchdog_loop(), name="watchdog"),
                 ]
                 aux = [asyncio.create_task(self._watch_stop_file(stop), name="stopfile")]
+                if self.cfg.screen.enabled:
+                    aux.append(asyncio.create_task(self._screen_loop(), name="screen"))
                 stopper = asyncio.create_task(stop.wait(), name="stop")
                 logger.info("engine running (dry_run=%s)", self.kill.engaged)
                 done, _ = await asyncio.wait({stopper, *core}, return_when=asyncio.FIRST_COMPLETED)

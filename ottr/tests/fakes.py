@@ -178,6 +178,7 @@ class FakeEngineApi:
                         "last_meeting": {"id": "m-1", "ts": now - 3600, "status": "ok"}}
         self.kill = {"effective_dry_run": False, "config_dry_run": False, "operator_engaged": False,
                      "since": None, "by": None, "reason": None}
+        self.screen: Optional[dict] = None  # the latest screener run (None: 404 "no screen yet")
         self.data = {
             "/api/health": {"ts": now, "ok": True, "exit_code": 0, "engine_alive": None, "alarms": [],
                             "tasks": [], "ledger_problems": [], "blind": {}},
@@ -232,6 +233,10 @@ class FakeEngineApi:
             return httpx.Response(404, json={"error": f"no route {path}", "status": 404})
         if path == "/api/council":
             return httpx.Response(200, json=self.council)
+        if path == "/api/screen":
+            if self.screen is None:
+                return httpx.Response(404, json={"error": "no screen yet: the engine runs one a day", "status": 404})
+            return httpx.Response(200, json=self.screen)
         if path == "/api/kill-switch":
             if request.method == "POST":
                 if not self.key or request.headers.get("authorization") != f"Bearer {self.key}":
@@ -277,3 +282,41 @@ class RecordingModel(ModelAdapter):
         if isinstance(r, Exception):
             raise r
         return r
+
+
+# -- screener fakes --------------------------------------------------------------------------
+def trend_rows(n: int = 200, drift: float = 0.004, noise: float = 0.01, start: float = 100.0,
+               usd: float = 5e6, phase: int = 0, end_ts: Optional[int] = None):
+    """Closed daily candles [(ts, close, usd_volume)] with a deterministic zig-zag around a
+    drift: `drift` per day, +/- `noise` alternating (`phase` flips the zig-zag, which sets
+    the correlation with another series)."""
+    import math
+    now = int(time.time())
+    last = end_ts if end_ts is not None else now - now % DAY - DAY
+    t0 = last - (n - 1) * DAY
+    out, px = [], start
+    for i in range(n):
+        px *= math.exp(drift + (noise if (i + phase) % 2 else -noise))
+        out.append((t0 + i * DAY, px, usd))
+    return out
+
+
+def sample_screen(cfg, qualifying: bool = True) -> dict:
+    """A real screener result (dict form, as stored and served) built from synthetic candles."""
+    return sample_screen_result(cfg, qualifying).to_dict()
+
+
+def sample_screen_result(cfg, qualifying: bool = True):
+    """The same, as the ScreenResult the engine gets from screen.run."""
+    from ottr.market import screen
+    btc = trend_rows(drift=0.001, noise=0.02)
+    rows = [screen.measure("BTC", "XBTUSD", btc, btc, cfg, in_universe=True),
+            screen.measure("ETH", "ETHUSD", trend_rows(drift=-0.002, noise=0.025), btc, cfg, in_universe=True),
+            screen.measure("NEAR", "NEARUSD", trend_rows(drift=0.006 if qualifying else -0.003, noise=0.01,
+                                                          phase=1), btc, cfg, in_universe=False),
+            screen.measure("XMR", "XMRUSD", trend_rows(drift=0.003 if qualifying else -0.001, noise=0.012),
+                           btc, cfg, in_universe=False)]
+    res = screen.ScreenResult(id="s-test", ts=time.time(), rows=tuple(screen.score(rows)), rejected=(),
+                              excluded={"stablecoin or fiat": 2}, listed=40,
+                              settings={"top_n": 5})
+    return res

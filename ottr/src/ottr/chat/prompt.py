@@ -176,6 +176,30 @@ def _fills(ctx: DeskContext) -> List[str]:
     return lines
 
 
+def _screen(ctx: DeskContext, now: float) -> List[str]:
+    from ottr.market import screen as sc
+    d = ctx.screen
+    if not d:
+        why = ctx.errors.get("screen")
+        return [f"SCREENER: unavailable ({why})" if why else "SCREENER: no run yet"]
+    lines = [f"SCREENER (code ranks liquid Kraken pairs OUTSIDE the universe, {fmt_age(now - d['ts'])} ago; "
+             "advisory: the desk cannot trade them unless the owner adds one to the universe). Score 0-100 "
+             "ranks trend, vs BTC, sizable, smoothness, diversification and volume. trend and vs BTC are "
+             "volatility-adjusted drift (0 flat, +1 a strong steady climb). sizable is the MOST the risk model "
+             "would hold at full conviction, a ceiling, not a recommended size:"]
+    top = sc.candidates(d, (d.get("settings") or {}).get("top_n", 5))
+    if top:
+        lines += [f"  qualifying: {sc.line(r)}" for r in top]
+    else:
+        lines.append("  none qualifies (up over 14, 30 and 90 days, ahead of BTC, near the 30-day high); "
+                     "strongest: " + "; ".join(f"{r['symbol']} score {r['score']:.0f} ({sc.why_not(r)})"
+                                                for r in sc.closest(d, 3)))
+    rows = d.get("rows", [])
+    lines.append("  universe ranks: " + ", ".join(f"{r['symbol']} #{r['rank']}" for r in rows if r["in_universe"])
+                 + f" of {len(rows)}")
+    return lines
+
+
 def desk_data(ctx: DeskContext, now: float) -> str:
     lines: List[str] = []
     lines += _health(ctx, now)
@@ -185,6 +209,7 @@ def desk_data(ctx: DeskContext, now: float) -> str:
     lines.append(_council(ctx, now))
     lines += _meeting(ctx, now)
     lines += _fills(ctx)
+    lines += _screen(ctx, now)
     return "\n".join(lines)
 
 

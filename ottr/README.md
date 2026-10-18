@@ -49,6 +49,7 @@ and real environment variables take precedence:
 | `ottr chat` | no (its own `chat.db`) | the Discord slash-command bot; reads the API, can only flip the kill switch |
 | `ottr chat --check` | no | checks the chat config, secrets, engine API and model CLI without connecting to Discord |
 | `ottr chat --standby` | no | like `ottr chat`, but waits for a running bot to exit instead of quitting (the supervisor runs this) |
+| `ottr screen [--json]` | no | ranks other Kraken coins now (see [Screener](#screener)); prints, stores nothing |
 | `ottr service install` | Task Scheduler | registers the supervisor to run at logon (see below); `--dry-run` prints the XML |
 | `ottr service status\|start\|stop\|restart\|uninstall` | Task Scheduler | manage that task; `stop` lets queued orders finish first |
 | `ottr meeting` | no | one council meeting on a scratch copy; prints dry-run verdicts |
@@ -156,6 +157,7 @@ its own `mode=ro` SQLite connection, so it can't write to the ledger.
 | `GET /api/meetings/{id}` | one meeting in full, including the packet the models saw |
 | `GET /api/audit?kind=&since=&limit=` | the audit log |
 | `GET /api/council` | whether a meeting is running now and how far it has got, the next and the last meeting |
+| `GET /api/screen` | the latest screener run: other Kraken pairs ranked, with every measure |
 | `GET/POST /api/kill-switch` | read, or engage/release the runtime dry run |
 
 The kill switch needs `Authorization: Bearer $OTTR_API_KEY`. An empty POST engages it:
@@ -170,6 +172,43 @@ bot sends `"by": "discord"`. It is stored in the ledger, so it survives a restar
 config or `OTTR_DRY_RUN` imposes. Money fields from the ledger are exact decimal strings;
 marks and weights are numbers.
 
+## Screener
+
+Once a day the engine ranks the other liquid Kraken USD pairs, so you can see what else
+might be worth trading. It is **advisory**: nothing it finds is traded until you add the
+coin to `universe` yourself. Results go to Discord as a short digest, to `/screen`, to
+`GET /api/screen`, and into `/ask` answers; every run is kept in the ledger.
+
+**Eligible pairs:** online USD spot pairs, no stablecoins, fiat or pegs (90-day
+volatility under 10%), at least 120 days of daily candles without gaps (no fresh
+listings), a 30-day median volume of at least $1M a day and a spread under 0.30%. About 50
+of Kraken's ~600 USD pairs pass.
+
+**Score (0-100):** percentile ranks among the eligible pairs and your universe together:
+trend 30% (14/30/90-day log return divided by volatility, so a steady climb beats a violent
+one), strength vs BTC 20% (the same measure on the price ratio to BTC, since alts move
+with BTC), sizable 20% (what the risk model would let the desk hold at full conviction),
+smoothness 15% (efficiency ratio), diversification 10% (low correlation with BTC) and
+rising volume 5%.
+
+**A candidate qualifies** only when it is up over 14, 30 and 90 days, ahead of BTC, and
+within 20% of its 30-day high. "Pulling back" (more than 20% off that high) and
+"overextended" (a 7-day spike above 3 sigma, or RSI above 80) each halve a score. When
+nothing qualifies, the screen says so. Why not "trending" coins: attention lists track
+hype, peak with the price, are full of memecoins and new listings, and would need a
+second data source. Everything here comes from Kraken, the venue the desk trades on.
+
+**To trade a candidate**, `/screen` and `ottr screen` print the exact config lines: add
+the coin to `universe`, give it a cap under `[caps]` (10% is a sensible start) and, if the
+built-in table lacks it, its Kraken pair under `[pairs]`, then `ottr service restart`. A
+universe asset without a known pair is a config error at start-up, not a silent gap.
+
+`[screen]` in config.toml: `enabled`, `interval_hours`, `min_usd_volume`,
+`max_spread_pct`, `min_history_days`, `max_pairs` (pairs scanned, one Kraken request each),
+`top_n` and `post_to_discord`. A scan takes about two minutes at Kraken's public rate limit
+and runs beside the engine's tasks; a failed one is retried after 30 minutes and only
+raises a warning after three missed days.
+
 ## Discord chat
 
 `ottr chat` is a separate process that talks to you through slash commands. It connects
@@ -182,6 +221,7 @@ trade endpoint, and its only write is the kill switch, so **no chat command can 
 | `/status` | owner, allow-list | health, alarms, kill switch, equity and P&L, benchmarks, risk, council schedule (or how far a running meeting has got) |
 | `/positions` | owner, allow-list | holdings marked at the bid, weight, unrealized P&L, distance to the trailing stop |
 | `/meeting` | owner, allow-list | the latest council meeting: the chair's decision, each order's result, every analyst's stances and theses |
+| `/screen` | owner, allow-list | the latest screener run: candidates outside the universe and where the universe ranks |
 | `/ask <question>` | owner, allow-list | one model call over the book, positions, the last meeting, recent fills and health, plus the channel's last few exchanges |
 | `/kill [reason]` | owner, allow-list | engages the kill switch at once (the safe direction) |
 | `/release` | owner only | releases it, after a button confirmation |

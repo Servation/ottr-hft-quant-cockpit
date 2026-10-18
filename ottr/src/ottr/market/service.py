@@ -21,7 +21,7 @@ import httpx
 
 from ottr.config import Config
 from ottr.market import coinbase, indicators as ind
-from ottr.market.kraken import PAIRS, Kraken, KrakenError
+from ottr.market.kraken import Kraken, KrakenError
 from ottr.market.types import MarketDataError, Quote
 
 logger = logging.getLogger(__name__)
@@ -170,7 +170,7 @@ class MarketData:
             now = time.time()
             if not force and self._quotes and now - self._quotes_ts < self.cfg.market.spot_ttl_sec:
                 return dict(self._quotes)
-            pairs = {a: PAIRS[a] for a in self.cfg.universe if a in PAIRS}
+            pairs = {a: p for a in self.cfg.universe if (p := self.cfg.kraken_pair(a))}
             fresh: Dict[str, Quote] = {}
             try:
                 fresh = await self.kraken.quotes(pairs)
@@ -194,7 +194,7 @@ class MarketData:
         if not force and self._candles and now - self._candles_ts < self.cfg.market.candles_ttl_sec:
             return dict(self._candles)
         for asset in self.cfg.universe:
-            pair = PAIRS.get(asset)
+            pair = self.cfg.kraken_pair(asset)
             if not pair:
                 continue
             rows = self.archive.load_candles(asset) if self.archive and asset not in self._candles else self._candles.get(asset, [])

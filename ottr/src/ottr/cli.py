@@ -7,6 +7,7 @@
   ottr service install|uninstall|status|start|stop|restart
                                            the Windows scheduled task that runs `supervise`
   ottr chat [--check]                      the Discord slash-command bot (reads the API; can't trade)
+  ottr screen [--json]                     rank other Kraken coins now (advisory; stores nothing)
   ottr meeting [--execute]                 one council meeting now (propose-only by default)
   ottr status [--json]                     read-only health + book; exit code says what's wrong
   ottr check                               replay the fill log and verify the books balance
@@ -306,6 +307,42 @@ async def cmd_supervise(cfg, args) -> int:
     return await sup.run()
 
 
+async def cmd_screen(cfg, args) -> int:
+    from ottr.market import screen
+    from ottr.market.kraken import Kraken
+    if not args.json:  # one candle request per pair at Kraken's public rate: say why it's slow
+        print(f"Scanning Kraken USD pairs (up to {cfg.screen.max_pairs}, about 1-2 minutes)...", flush=True)
+    try:
+        d = (await screen.run(Kraken(), cfg)).to_dict()
+    except MarketDataError as e:
+        print(f"screen failed: {e}")
+        return 1
+    if args.json:
+        print(json.dumps(d, default=str))
+        return 0
+    rows = d["rows"]
+    print(f"OTTR screener, live (not stored: the engine keeps its own daily runs). {d['listed']} Kraken USD "
+          f"pairs listed, {len(rows)} ranked. * = in your universe. Advisory: nothing here is traded.")
+    for r in rows:
+        mark = "*" if r["in_universe"] else " "
+        status = "QUALIFIES" if r["qualifies"] else screen.why_not(r)
+        print(f" {mark}#{r['rank']:<3} {screen.line(r)} | {status}")
+    top = screen.candidates(d, cfg.screen.top_n)
+    print("\ncandidates: " + (", ".join(r["symbol"] for r in top) or "none qualifies right now"))
+    if top:
+        print(screen.promote_hint(top[0]))
+    print("dropped before scoring: " + ", ".join(f"{k} {v}" for k, v in sorted(d["excluded"].items())))
+    reasons: dict = {}
+    for r in d["rejected"]:
+        key = r["reason"].split(" (")[0]
+        reasons[key] = reasons.get(key, 0) + 1
+    if reasons:
+        print("measured but ineligible: " + ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())))
+    for e in d["errors"]:
+        print(f"  ! {e}")
+    return 0
+
+
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
     return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
@@ -385,6 +422,8 @@ def main(argv=None) -> int:
     p.add_argument("--execute", action="store_true", help="act on the decision (else propose-only)")
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true", help="machine-readable health report")
+    p = sub.add_parser("screen", help="rank other Kraken coins now (advisory; prints, stores nothing)")
+    p.add_argument("--json", action="store_true", help="the full result as JSON")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)
@@ -399,7 +438,7 @@ def main(argv=None) -> int:
     _setup_logging(args.verbose, log_file, console=log_file is None or args.cmd == "supervise",
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
-          "chat": cmd_chat, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
+          "chat": cmd_chat, "screen": cmd_screen, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
           "resume": cmd_resume}[args.cmd]
     return asyncio.run(fn(cfg, args))
 

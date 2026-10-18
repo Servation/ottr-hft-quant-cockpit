@@ -65,7 +65,12 @@ CREATE TABLE IF NOT EXISTS candles (
     asset TEXT NOT NULL, ts INTEGER NOT NULL, close REAL NOT NULL, PRIMARY KEY (asset, ts));
 CREATE TABLE IF NOT EXISTS heartbeats (
     task TEXT PRIMARY KEY, ts REAL NOT NULL, ok INTEGER NOT NULL, detail TEXT, ok_ts REAL);
+CREATE TABLE IF NOT EXISTS screens (
+    id TEXT PRIMARY KEY, ts REAL NOT NULL, result TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS screens_ts ON screens (ts);
 """
+# `screens` is additive: the writer's SCHEMA run creates it on an existing book, and an older
+# engine simply ignores it, so it needs no schema-version bump (which would refuse a rollback).
 
 # version -> statements that upgrade a database from version-1. SCHEMA above is always
 # the latest shape, so a fresh database is created current and skips these.
@@ -299,3 +304,16 @@ class Store:
     def equity_series(self, limit: int = 5000) -> List[Tuple[float, float]]:
         rows = self.conn.execute("SELECT ts,equity FROM equity ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
         return [(r[0], r[1]) for r in reversed(rows)]
+
+    # -- screener (advisory; kept for history so P3 can grade the picks) -----------------
+    def save_screen(self, result: Dict[str, Any]) -> None:
+        with self.tx() as c:
+            c.execute("INSERT OR REPLACE INTO screens(id,ts,result) VALUES(?,?,?)",
+                      (result["id"], result["ts"], dumps(result)))
+
+    def latest_screen(self) -> Optional[Dict[str, Any]]:
+        try:
+            r = self.conn.execute("SELECT result FROM screens ORDER BY ts DESC LIMIT 1").fetchone()
+        except sqlite3.OperationalError:  # a reader on a book an older engine still holds
+            return None
+        return json.loads(r[0]) if r else None

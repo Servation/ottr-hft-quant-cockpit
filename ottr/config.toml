@@ -82,6 +82,19 @@ enabled = true
 host = "127.0.0.1"         # loopback only (enforced)
 port = 8765
 
+[screen]                   # daily scan of other Kraken USD pairs: advisory, never traded
+enabled = true
+interval_hours = 24        # daily candles change once a day
+min_usd_volume = 1000000   # 30-day median daily volume, in USD
+max_spread_pct = 0.30      # live bid/ask spread
+min_history_days = 120     # skips fresh listings and their launch pumps
+max_pairs = 60             # most liquid pairs scored (one Kraken request each, about 1/s)
+top_n = 5                  # candidates shown in /screen and the Discord digest
+post_to_discord = true     # a short digest after each scan
+
+# [pairs]                  # Kraken pair for a universe asset the built-in table lacks, e.g.
+# NEAR = "NEARUSD"         # (`ottr screen` prints the exact line for each candidate)
+
 [chat]                     # Discord slash-command bot (`ottr chat`); setup in README.md
 enabled = true             # `ottr supervise` runs it once DISCORD_BOT_TOKEN and CEO_DISCORD_ID are set
 model = "claude"           # which model answers /ask: claude | gpt | gemini

@@ -106,7 +106,7 @@ async def client():
 
 
 # -- the command set -----------------------------------------------------------------------
-async def test_tree_registers_exactly_the_six_commands(rig, client):
+async def test_tree_registers_exactly_the_commands(rig, client):
     tree = build_tree(client, rig.h)
     cmds = {c.name: c.to_dict(tree) for c in tree.get_commands()}
     assert set(cmds) == set(COMMANDS)

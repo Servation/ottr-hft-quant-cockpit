@@ -173,6 +173,7 @@ def test_every_event_kind_formats():
         ("chat_crash", {"rc": None, "error": "FileNotFoundError: python.exe", "delay": "5s"}),
         ("chat_stable", {"uptime": "10m", "crashes": 2}),
         ("chat_gave_up", {"rc": 78, "tail": "Discord rejected DISCORD_BOT_TOKEN"}),
+        ("screen", {"rows": [], "settings": {"top_n": 5}}),
         ("kill_switch", {"engaged": True, "by": "api", "reason": "test", "effective": True}),
         ("risk_halt", {"drawdown": 0.16}),
         ("risk_resume", {"why": "recovered"}),
