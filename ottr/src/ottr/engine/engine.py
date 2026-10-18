@@ -24,10 +24,11 @@ from ottr import health
 from ottr.config import Config
 from ottr.control import (STOP_FILE, clear_stale_stop, install_stop_signals, restore_signals,
                           stop_requested)
-from ottr.council.council import Council
+from ottr.council.council import Council, new_meeting_id
 from ottr.council.models import make_adapter
 from ottr.engine.executor import Executor
 from ottr.engine.killswitch import KillSwitch
+from ottr.engine.progress import MeetingProgress
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store, dumps
 from ottr.market.service import MarketData, MarketSnapshot
@@ -35,7 +36,7 @@ from ottr.market.types import MarketDataError
 from ottr.notify import Alerts
 from ottr.risk import gate, monitor
 from ottr.risk.monitor import RiskState
-from ottr.risk.types import Intent
+from ottr.risk.types import Intent, Verdict
 
 logger = logging.getLogger(__name__)
 
@@ -72,15 +73,21 @@ class Engine:
         self.alerts = alerts or Alerts(None, cfg.alerts)
         self.kill = KillSwitch(cfg, store)
         self.executor = Executor(cfg, store, self.ledger, market, self.alerts, kill=self.kill)
+        self.executor.on_outcome = self._order_outcome
         self.watchdog = health.Watchdog(cfg.engine.alarm_clear_sec)
         self.problems: Dict[str, health.Alarm] = {}  # engine-internal alarms (e.g. API bind)
         self.started: Optional[float] = None
         self.epoch: Optional[float] = None  # start, or resume from a system sleep
         self._last_watch: Optional[float] = None
         self.api = None
-        # When the meeting in progress began (None: no meeting). In memory on purpose: a
-        # persisted flag would outlive a crash and claim a meeting that is no longer running.
+        # When the meeting in progress began (None: no meeting), and how far it has got. In
+        # memory on purpose: a persisted flag would outlive a crash and claim a meeting that
+        # is no longer running.
         self.meeting_started: Optional[float] = None
+        self.progress: Optional[MeetingProgress] = None
+        # Adjourned meetings whose trades the risk gate hasn't decided yet, by meeting id:
+        # their live message keeps updating until every order has an outcome.
+        self._awaiting_orders: Dict[str, MeetingProgress] = {}
 
     # -- risk ------------------------------------------------------------------------------
     def _blind_state(self, assets: Set[str], now: float) -> Dict[str, float]:
@@ -200,20 +207,75 @@ class Engine:
         return "\n".join(lines)
 
     async def meeting(self, execute: bool = True) -> Dict[str, Any]:
-        """One council meeting; `meeting_started` is set while it runs (GET /api/council)."""
-        self.meeting_started = time.time()
+        """One council meeting. While it runs, `meeting_started` and `progress` say so (GET
+        /api/council) and the live Discord message follows it."""
+        for stale in list(self._awaiting_orders.values()):
+            stale.close("the next meeting started first")
+            self._publish(stale)
+        self._awaiting_orders.clear()
+        prog = MeetingProgress(new_meeting_id(), list(self.council.analysts), self.council.chair.name)
+        self.meeting_started, self.progress = prog.started, prog
+        self._publish(prog)
         try:
-            return await self._meeting(execute)
+            return await self._meeting(execute, prog)
+        except asyncio.CancelledError:
+            prog.abort("cancelled, the engine is stopping")
+            self._publish(prog)
+            raise
+        except Exception as e:
+            prog.abort(str(e) if isinstance(e, MarketDataError) else f"{type(e).__name__}: {e}")
+            self._publish(prog)
+            raise
         finally:
-            self.meeting_started = None
+            self.meeting_started = self.progress = None
 
-    async def _meeting(self, execute: bool) -> Dict[str, Any]:
+    def _publish(self, prog: MeetingProgress) -> None:
+        """Hand the meeting's current state to the live Discord message (never raises)."""
+        if not self.cfg.alerts.live_meeting:
+            return
+        try:
+            self.alerts.live(f"meeting:{prog.id}", "meeting_live", prog.to_dict(), final=prog.final)
+        except Exception:  # a display bug must not cost a meeting
+            logger.warning("live meeting view failed", exc_info=True)
+
+    def _on_council(self, prog: MeetingProgress, kind: str, d: Dict[str, Any]) -> None:
+        prog.apply(kind, d)
+        if kind == "analyst_done":
+            leans = ", ".join(f"{s['stance']} {s['asset']} {s['conviction']:.2f}"
+                              for s in prog.analysts[d["name"]]["stances"])
+            logger.info("council %s: %s done in %.0fs (%s)", prog.id, d["name"], d["latency"], leans or "all HOLD")
+        elif kind == "chair_started":
+            logger.info("council %s: chair deliberating on %d reports", prog.id, d["reports"])
+        elif kind == "chair_done":
+            logger.info("council %s: chair decided in %.0fs (%d trade(s))", prog.id, d["latency"], len(d["trades"]))
+        elif kind == "chair_failed":
+            logger.warning("council %s: chair failed after %.0fs: %s", prog.id, d["latency"], d["error"])
+        self._publish(prog)
+
+    def _order_outcome(self, intent: Intent, status: str, verdict: Verdict) -> None:
+        """Executor hook: the risk gate's answer to a council trade goes into its live message."""
+        prog = self._awaiting_orders.get(intent.ref) if intent.origin == "council" else None
+        if prog is None or not prog.order(intent.asset, status, verdict.reason, verdict.notional,
+                                          verdict.price, verdict.notes):
+            return
+        if prog.final:
+            del self._awaiting_orders[prog.id]
+        self._publish(prog)
+
+    def _close_awaiting(self, why: str) -> None:
+        for prog in self._awaiting_orders.values():
+            prog.close(why)
+            self._publish(prog)
+        self._awaiting_orders.clear()
+
+    async def _meeting(self, execute: bool, prog: MeetingProgress) -> Dict[str, Any]:
         snap = await self.market.snapshot()
         if all(v.quote is None for v in snap.assets.values()):
-            raise MarketDataError("no quotes: meeting aborted")
+            raise MarketDataError("no quotes for any asset")
         context = snap.packet() + "\n\n" + self.book_context(snap)
         held = set(self.ledger.positions())
-        rec = await self.council.run(context, held)
+        rec = await self.council.run(context, held, meeting_id=prog.id,
+                                     observe=lambda kind, d: self._on_council(prog, kind, d))
         rec["context"] = context
         with self.store.tx() as c:
             c.execute("INSERT INTO meetings(id,ts,status,packet,record) VALUES(?,?,?,?,?)",
@@ -226,6 +288,10 @@ class Engine:
                                q.mid if q else None, snap.as_of))
             self.store.audit("meeting", id=rec["id"], status=rec["status"], trades=rec["trades"],
                              dropped=rec["dropped"], errors=rec["errors"], latency=rec["latency"])
+        prog.adjourn(rec, executing=execute)
+        if prog.phase == "orders":  # registered before submitting, so no outcome can slip past
+            self._awaiting_orders[prog.id] = prog
+        self._publish(prog)
         if execute:
             for t in rec["trades"]:
                 await self.executor.submit(Intent(
@@ -421,6 +487,7 @@ class Engine:
                     t.cancel()
                 await asyncio.gather(*core, *aux, stopper, return_exceptions=True)
                 await self._stop_api()
+                self._close_awaiting("the engine stopped before the risk gate decided")
                 self._save_engine_state(running=False, stopped_at=time.time(), exit_code=code)
                 self.store.audit("engine_stop", code=code, why=why)
                 self.alerts.event("engine_stop", {"code": code, "why": why})

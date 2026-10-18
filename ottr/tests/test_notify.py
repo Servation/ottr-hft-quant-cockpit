@@ -9,6 +9,7 @@ import logging
 import httpx
 
 from ottr.config import Alerts as Limits
+from ottr.engine.progress import MeetingProgress
 from ottr.health import Alarm
 from ottr.notify import Alerts, DiscordWebhook, TokenBucket, format_event
 
@@ -175,6 +176,8 @@ def test_every_event_kind_formats():
         ("kill_switch", {"engaged": True, "by": "api", "reason": "test", "effective": True}),
         ("risk_halt", {"drawdown": 0.16}),
         ("risk_resume", {"why": "recovered"}),
+        ("meeting", {"id": "m-1", "status": "ok", "trades": [], "summary": "Hold \u2014 nothing clean."}),
+        ("meeting_live", MeetingProgress("m-1", ["claude"], "claude").to_dict()),
     ]:
         text = format_event(kind, d)
         assert text.startswith("**") and "\u2014" not in text  # no em dashes, per house style

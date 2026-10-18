@@ -6,6 +6,11 @@ tallies their stances in code, asks the chair to decide on anonymized reports, t
 applies code-side rules to the decision (no BUY without analyst support, no SELL of an
 asset not held). Returns a record; it never trades. Why: models judge, code counts and
 enforces, and the record keeps every raw input/output for audit and the scorecard.
+
+While it runs it can report progress to an `observe(kind, data)` callback (an analyst
+done or dropped out, the chair deliberating or decided). The callback is synchronous and
+its errors are swallowed, so whoever watches (the live Discord message, the API) can
+never slow down or fail a meeting, and the council knows nothing about who is watching.
 """
 
 from __future__ import annotations
@@ -15,12 +20,21 @@ import logging
 import time
 import uuid
 from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 from ottr.council.models import ModelAdapter, ModelError, ask_json
 from ottr.council.schemas import ANALYST_SHAPE, CHAIR_SHAPE, analyst_validator, chair_validator
 
 logger = logging.getLogger(__name__)
+
+# observe(kind, data). Kinds: analysts_started {analysts}, analyst_done {name, report,
+# latency}, analyst_dropped {name, error, latency}, chair_started {reports},
+# chair_done {decision, trades, dropped, latency}, chair_failed {error, latency}.
+Observer = Callable[[str, Dict[str, Any]], None]
+
+
+def new_meeting_id() -> str:
+    return f"m-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:6]}"
 
 LENSES = {
     "claude": "Your lens: risk and regime. Weigh drawdown risk, trending vs choppy regimes, "
@@ -115,19 +129,24 @@ class Council:
         self.universe, self.min_analysts = list(universe), min_analysts
         self.max_trades, self.timeout = max_trades, timeout
 
-    async def _analyst(self, name: str, adapter: ModelAdapter, context: str):
+    async def _analyst(self, name: str, adapter: ModelAdapter, context: str, observe: Optional[Observer]):
         t0 = time.time()
         try:
             rep = await ask_json(adapter, analyst_prompt(context, LENSES.get(name, ""), self.universe),
                                  analyst_validator(self.universe), timeout=self.timeout)
-            return name, rep, None, time.time() - t0
         except ModelError as e:
             logger.warning("analyst %s dropped: %s", name, e)
+            _emit(observe, "analyst_dropped", name=name, error=str(e), latency=time.time() - t0)
             return name, None, str(e), time.time() - t0
+        # Reported as each analyst finishes, not when the slowest one does.
+        _emit(observe, "analyst_done", name=name, report=rep, latency=time.time() - t0)
+        return name, rep, None, time.time() - t0
 
-    async def run(self, context: str, held: Set[str], meeting_id: Optional[str] = None) -> Dict[str, Any]:
-        mid = meeting_id or f"m-{time.strftime('%Y%m%dT%H%M%S', time.gmtime())}-{uuid.uuid4().hex[:6]}"
-        results = await asyncio.gather(*(self._analyst(n, a, context) for n, a in self.analysts.items()))
+    async def run(self, context: str, held: Set[str], meeting_id: Optional[str] = None,
+                  observe: Optional[Observer] = None) -> Dict[str, Any]:
+        mid = meeting_id or new_meeting_id()
+        _emit(observe, "analysts_started", analysts=list(self.analysts))
+        results = await asyncio.gather(*(self._analyst(n, a, context, observe) for n, a in self.analysts.items()))
         reports = {n: r for n, r, _, _ in results if r is not None}
         rec: Dict[str, Any] = {
             "id": mid, "started": time.time(), "analysts": reports,
@@ -143,15 +162,28 @@ class Council:
         labels = {n: chr(ord("A") + i) for i, n in enumerate(sorted(reports))}
         anon = {labels[n]: reports[n] for n in sorted(reports)}
         rec.update(tally=tally, labels=labels)
+        _emit(observe, "chair_started", reports=len(reports))
         t0 = time.time()
         try:
             decision = await ask_json(self.chair, chair_prompt(context, anon, tally, self.universe, self.max_trades),
                                       chair_validator(self.universe, self.max_trades), timeout=self.timeout)
         except ModelError as e:
             rec["status"] = f"abstain: chair failed ({e})"
+            _emit(observe, "chair_failed", error=str(e), latency=time.time() - t0)
             return rec
         rec["latency"]["chair"] = round(time.time() - t0, 1)
         kept, dropped = enforce_rules(decision, reports, held)
         rec.update(decision=decision, trades=kept,
                    dropped=[{"trade": t, "why": why} for t, why in dropped])
+        _emit(observe, "chair_done", decision=decision, trades=kept, dropped=rec["dropped"],
+              latency=time.time() - t0)
         return rec
+
+
+def _emit(observe: Optional[Observer], kind: str, **data: Any) -> None:
+    if observe is None:
+        return
+    try:
+        observe(kind, data)
+    except Exception:  # a broken watcher must never cost us a meeting
+        logger.warning("council observer failed on %s", kind, exc_info=True)
