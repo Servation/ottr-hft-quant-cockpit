@@ -1,0 +1,66 @@
+# OTTR v2 configuration. Env overrides: OTTR_DRY_RUN, MAX_TRADE_USD, OTTR_DATA_DIR,
+# DISCORD_WEBHOOK_URL. Values here mirror the v1 settings the backtests validated.
+
+universe = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"]
+
+[trading]
+dry_run = false            # true: record "would trade" verdicts, never fill
+starting_cash = 10000.0
+slippage_pct = 0.05        # on top of the bid/ask spread
+fee_pct = 0.40             # Kraken's lowest taker tier
+min_trade_usd = 100.0
+max_trade_usd = 2500.0     # ceiling per BUY (code sizes BUYs, so this clamps); 0 = none
+max_gross_pct = 90.0       # total invested never exceeds this % of equity
+cash_reserve_pct = 2.0     # never spend the last 2% of equity on a BUY
+max_trades_per_meeting = 3
+max_data_age_sec = 180     # refuse to fill on a quote older than this
+decision_ttl_sec = 900     # drop council decisions older than this
+
+[sizing]
+target_risk_pct = 2.0      # risk budget per position, % of equity / annualized vol
+choppy_regime_factor = 0.25
+max_position_pct = 50.0
+missing_vol = 1.5          # assumed annualized vol when unknown: shrinks size
+min_vol = 0.05
+
+[caps]                     # max % of equity per asset; default for unlisted assets
+default = 35.0
+SOL = 20.0
+XRP = 15.0
+ADA = 15.0
+DOGE = 15.0
+LINK = 15.0
+AVAX = 15.0
+
+[risk]
+enabled = true
+trailing_stop_pct = 10.0
+drawdown_halt_pct = 15.0
+drawdown_resume_pct = 10.0
+drawdown_derisk = true
+drawdown_derisk_pct = 25.0
+halt_max_hours = 72        # auto-resume (with re-baselined peak) after this long
+trim_band_pct = 5.0
+cooldown_sec = 900
+min_equity_points = 24     # equity snapshots needed before the breaker may trip
+
+[market]
+vol_window_days = 30
+regime_er_window = 20
+regime_er_threshold = 0.30
+spot_ttl_sec = 60
+candles_ttl_sec = 3600
+
+[council]
+analysts = ["claude", "gpt", "gemini"]
+chair = "claude"
+min_analysts = 2
+timeout_sec = 300
+interval_hours = 4
+claude_model = "opus"
+gemini_model = "gemini-3.8-flash-high"
+reasoning_effort = "high"
+
+[engine]
+risk_interval_sec = 60
+equity_interval_sec = 900

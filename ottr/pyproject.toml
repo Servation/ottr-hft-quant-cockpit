@@ -1,0 +1,26 @@
+# OTTR v2: council-driven paper-trading engine (see ../V2_PLAN.md).
+[project]
+name = "ottr"
+version = "2.0.0a1"
+description = "Three-model council paper-trading engine with deterministic risk and accounting"
+requires-python = ">=3.11"
+dependencies = ["httpx>=0.27"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+ottr = "ottr.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+markers = ["live: needs network or model CLIs (skipped with -m 'not live')"]
