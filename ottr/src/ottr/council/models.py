@@ -4,7 +4,8 @@ Model adapters: one async `complete(prompt)` per provider, all via their local C
 What it does: runs Claude (`claude -p`), GPT (`codex exec`) and Gemini (`agy -p`) as
 subprocesses and returns raw text; `ask_json` extracts + validates JSON with one repair
 retry. Why CLIs: they use the user's existing subscriptions (no API keys in this repo)
-and the three share one tiny interface, so tests can swap in a fake.
+and the three share one tiny interface, so tests can swap in a fake. `make_adapter` builds
+one by name; the council passes its own effort, `ottr chat` a lower one so replies are quick.
 """
 
 import asyncio
@@ -16,6 +17,7 @@ import shutil
 import tempfile
 from typing import Any, Callable, Optional
 
+from ottr.config import Council as CouncilConfig
 from ottr.proc import NO_WINDOW, kill_tree
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,10 @@ class ModelAdapter:
     """Base interface. `name` is the provider id used in logs and the council record."""
 
     name = "model"
+
+    def locate(self) -> Optional[str]:
+        """Path of the CLI this adapter runs, or None if it isn't installed."""
+        return None
 
     async def complete(self, prompt: str, timeout: float = 240.0) -> str:
         raise NotImplementedError
@@ -72,8 +78,11 @@ class ClaudeCLI(ModelAdapter):
     def __init__(self, model: str = "opus", effort: str = "high") -> None:
         self.model, self.effort = model, effort
 
+    def locate(self) -> Optional[str]:
+        return shutil.which("claude")
+
     async def complete(self, prompt: str, timeout: float = 240.0) -> str:
-        exe = shutil.which("claude")
+        exe = self.locate()
         if not exe:
             raise ModelError("claude CLI not found on PATH")
         # --tools "" + --disable-slash-commands: pure text in/out, no file or shell access.
@@ -97,6 +106,9 @@ class CodexCLI(ModelAdapter):
         base = os.path.join(os.environ.get("LOCALAPPDATA", ""), "OpenAI", "Codex", "bin")
         hits = sorted(glob.glob(os.path.join(base, "*", "codex.exe")))
         return hits[0] if hits else shutil.which("codex")
+
+    def locate(self) -> Optional[str]:
+        return self._find()
 
     async def complete(self, prompt: str, timeout: float = 240.0) -> str:
         exe = self._find()
@@ -124,18 +136,37 @@ class CodexCLI(ModelAdapter):
 class GeminiCLI(ModelAdapter):
     name = "gemini"
 
-    def __init__(self, model: str = "gemini-3.8-flash-high") -> None:
-        self.model = model
+    def __init__(self, model: str = "gemini-3.8-flash-high", effort: Optional[str] = None) -> None:
+        # None keeps the effort the model name implies (the council's setting); a value
+        # adds agy's --effort flag.
+        self.model, self.effort = model, effort
+
+    def locate(self) -> Optional[str]:
+        return shutil.which("agy")
 
     async def complete(self, prompt: str, timeout: float = 240.0) -> str:
-        exe = shutil.which("agy")
+        exe = self.locate()
         if not exe:
             raise ModelError("agy (Antigravity CLI) not found on PATH")
         argv = [exe, "-p", prompt, "--model", self.model, "--sandbox"]
+        if self.effort:
+            argv += ["--effort", self.effort]
         rc, out, err = await _run(argv, None, timeout, tempfile.gettempdir())
         if rc != 0 or not out.strip():
             raise ModelError(f"agy exit {rc}: {err.strip()[:300]}")
         return _normalize(out)
+
+
+def make_adapter(name: str, council: CouncilConfig, effort: Optional[str] = None) -> ModelAdapter:
+    """The adapter for provider `name` ("claude" | "gpt" | "gemini") with the council's model
+    choices. `effort` overrides the council's reasoning effort (chat runs lower)."""
+    if name == "claude":
+        return ClaudeCLI(model=council.claude_model, effort=effort or council.reasoning_effort)
+    if name == "gpt":
+        return CodexCLI(effort=effort or council.reasoning_effort)
+    if name == "gemini":
+        return GeminiCLI(model=council.gemini_model, effort=effort)
+    raise ValueError(f"unknown model {name!r} (expected claude, gpt or gemini)")
 
 
 def extract_json(text: str) -> Any:

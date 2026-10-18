@@ -119,3 +119,50 @@ def test_service_install_dry_run_prints_the_task(capsys):
     out = capsys.readouterr().out
     assert "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>" in out and "supervise" in out
     assert "would run: schtasks /Create" in out
+
+
+def test_supervise_adds_the_chat_bot_only_when_it_can_run(tmp_path, monkeypatch):
+    cfg = cfgmod.load(data_dir=tmp_path)
+    engine, companions, notes = cli.supervised(cfg, cfgmod.DEFAULT_CONFIG)
+    assert engine[-1] == "run" and companions == [] and "DISCORD_BOT_TOKEN" in notes[0]
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+    monkeypatch.setenv("CEO_DISCORD_ID", "111111111111111111")
+    cfg = cfgmod.load(data_dir=tmp_path)
+    engine, (chat,), notes = cli.supervised(cfg, cfgmod.DEFAULT_CONFIG, verbose=True)
+    assert notes == [] and chat.name == "chat" and chat.argv[-2:] == ["-v", "chat"]
+    assert str(tmp_path / "logs" / "chat.log") in chat.argv and chat.give_up_codes == {78}
+    assert chat.out_log == tmp_path / "logs" / "chat.out.log"
+    assert "tok" not in " ".join(chat.argv)  # the token reaches the child through ottr/.env, not argv
+
+
+def _closed_port() -> int:
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_chat_check_reports_without_connecting(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+    p = tmp_path / "c.toml"  # a port nothing listens on, so a live engine on 8765 is never touched
+    p.write_text(cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8").replace("port = 8765", f"port = {_closed_port()}"),
+                 encoding="utf-8")
+    assert cli.main(["--config", str(p), "chat", "--check"]) == 78
+    out = capsys.readouterr().out
+    assert "DISCORD_BOT_TOKEN: MISSING" in out and "Can't reach the OTTR engine" in out and "not ready" in out
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+    monkeypatch.setenv("CEO_DISCORD_ID", "111111111111111111")
+    assert cli.main(["--config", str(p), "chat", "--check"]) == 0
+    out = capsys.readouterr().out
+    assert "ready: `ottr chat` connects" in out and "tok" not in out.replace("token", "")
+
+
+def test_chat_refuses_to_start_when_disabled(tmp_path, monkeypatch):
+    monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "tok")
+    monkeypatch.setenv("CEO_DISCORD_ID", "111111111111111111")
+    p = tmp_path / "off.toml"
+    p.write_text(cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8").replace(
+        "enabled = true             # `ottr supervise` runs it", "enabled = false            # `ottr supervise` runs it"),
+        encoding="utf-8")
+    assert cli.main(["--config", str(p), "chat"]) == 78

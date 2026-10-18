@@ -14,6 +14,7 @@ import pytest
 from ottr.api import ApiServer
 from ottr.engine.engine import Engine
 from ottr.engine.killswitch import KillSwitch
+from ottr.market.types import MarketDataError
 from ottr.risk.types import Intent
 from tests.fakes import PRICES, FakeMarket, eth_buy_council
 
@@ -228,3 +229,39 @@ async def test_kill_switch_disabled_without_a_key(cfg, store, ledger):
             assert "OTTR_API_KEY" in d["error"]
     finally:
         await server.stop()
+
+
+async def test_council_says_when_a_meeting_is_running(api):
+    eng, s, rec = api
+    d = await get(s, "/api/council")
+    assert d["running"] is False and d["started_at"] is None and d["interval_hours"] == 4.0
+    assert d["last_meeting"]["id"] == rec["id"] and d["last_meeting"]["status"] == "ok"
+    eng.meeting_started = time.time() - 30
+    d = await get(s, "/api/council")
+    assert d["running"] is True and d["running_sec"] >= 30
+
+
+async def test_a_meeting_flags_itself_only_while_it_runs(cfg, store, ledger):
+    eng = Engine(cfg, store, FakeMarket(cfg, PRICES), council=eth_buy_council(cfg))
+    seen = []
+    real = eng.council.run
+
+    async def spy(*a, **kw):
+        seen.append(eng.meeting_started)
+        return await real(*a, **kw)
+
+    eng.council.run = spy
+    await eng.meeting(execute=False)
+    assert seen and seen[0] is not None and eng.meeting_started is None
+    eng.market.fail = True
+    with pytest.raises(MarketDataError):
+        await eng.meeting(execute=False)
+    assert eng.meeting_started is None  # cleared on failure too
+
+
+async def test_kill_switch_records_who_asked(api, store):
+    _, s, _ = api
+    d = await post_kill(s, {"engaged": True, "reason": "bed", "by": "discord"})
+    assert d["by"] == "discord" and store.audits("kill_switch")[0]["by"] == "discord"
+    await post_kill(s, {"engaged": True, "by": "not allowed!"}, status=400)
+    await post_kill(s, {"engaged": True, "by": 7}, status=400)

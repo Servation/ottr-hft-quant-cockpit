@@ -44,11 +44,13 @@ ottr/src/ottr/
   health.py        alarms and status exit codes shared by watchdog, CLI and API
   notify.py        rate-limited Discord webhook posts
   api.py           read-only JSON API on 127.0.0.1 + authenticated kill switch
-  supervisor.py    restarts `ottr run` with backoff
+  supervisor.py    restarts `ottr run` (and `ottr chat`) with backoff
   service.py       Windows Task Scheduler registration for the supervisor
   control.py       stop-request file (graceful stop for a windowless process)
   proc.py          hidden subprocesses, process-tree kills, kill-on-close Job Object
-  cli.py           ottr init | run | supervise | service | meeting | status | check | resume
+  chat/            `ottr chat`: Discord slash-command bot in its own process; reads the API,
+                   one model per /ask, can only flip the kill switch; own record in chat.db
+  cli.py           ottr init | run | supervise | service | chat | meeting | status | check | resume
 ```
 
 One engine process is the only writer. Read-only commands, the API and propose-only
@@ -133,6 +135,14 @@ buy-and-hold from day 0, so performance is never judged in a vacuum.
 - **Kill switch.** Set with `OTTR_DRY_RUN=1`, in config, or via
   `POST /api/kill-switch`. It's persisted, so it survives a restart, and the API can't
   release a dry run that config imposes.
+- **Discord chat.** `ottr chat` is a slash-command bot (outbound only, no privileged
+  intents) that the supervisor runs as a second child with its own restart loop, so a chat
+  crash never touches the engine. /status, /positions and /meeting are plain code over the
+  API. /ask is one model call with guardrails: one call at a time, a rolling-hour budget
+  kept in chat.db (a restart can't reset it), and silence while a council meeting runs
+  (`GET /api/council`). /kill and /release (owner only, button confirmation) use the
+  API's kill switch, the bot's only write, so no chat command can trade. Alerts stay on
+  the webhook, because they must still arrive when the bot is down.
 
 ## Lessons carried over from the previous version
 
@@ -169,11 +179,24 @@ The first draft of this design was critiqued by GPT and Gemini. The adopted poin
 ## Status and roadmap
 
 - **Done:** core engine and council (P1). Unattended operation: supervisor, alarms,
-  notifications, API (P2). Removing the previous version (P5).
+  notifications, API (P2). Discord chat, first slice: /status, /positions, /meeting,
+  /ask, /kill, /release. Removing the previous version (P5).
 - **Next:**
   - **P3 measure:** a per-model scorecard grading each analyst's stances at +24h and +7d,
     chair vs analysts, and a backtest of the sizing and risk policy on Kraken candles.
   - **P4 dashboard:** a web UI on the API.
-  - **Discord chat:** slash commands that read the API and can never trade.
+  - **Chat follow-ups:**
+    - CEO directives: owner free text ("stay out of DOGE this week") stored through an
+      authenticated API endpoint and shown to the analysts and the chair as context. Code
+      still enforces every rule, so a directive can never size or force a trade.
+    - /council: all three models answer the same question side by side (three CLI calls,
+      so it gets its own budget).
+    - Adaptive cadence: the chair proposes when to meet next; code clamps it to a range,
+      hard triggers (a stop-out, the drawdown breaker, a large move) pull a meeting
+      earlier, and an invalid value falls back to the fixed interval.
+    - Proactive check-ins: the bot posts on its own when something is worth a look, with
+      its own rate limit.
+    - Chat health in `ottr status` (a heartbeat in chat.db) and a retention policy for
+      chat.db.
 - **Open question:** sizing is conservative. Targets are roughly 0.4% to 4% per asset at
   full conviction, so the desk mostly holds cash. `sizing.target_risk_pct` is the knob.
