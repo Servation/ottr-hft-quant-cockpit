@@ -1,5 +1,6 @@
 # OTTR v2 configuration. Env overrides: OTTR_DRY_RUN, MAX_TRADE_USD, OTTR_DATA_DIR,
-# DISCORD_WEBHOOK_URL. Values here mirror the v1 settings the backtests validated.
+# DISCORD_WEBHOOK_URL, OTTR_API_KEY (the CLI also reads them from a gitignored ottr/.env).
+# Values here mirror the v1 settings the backtests validated.
 
 universe = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"]
 
@@ -64,3 +65,16 @@ reasoning_effort = "high"
 [engine]
 risk_interval_sec = 60
 equity_interval_sec = 900
+watchdog_interval_sec = 60 # health check cadence; a task is stale after 3x its interval
+alarm_clear_sec = 300      # an alarm must stay clear this long before it resolves
+
+[alerts]                   # Discord rate limits, so a flapping feed can't spam
+burst = 10
+per_hour = 30
+alarm_repeat_sec = 1800    # one alarm re-posts at most every 30 min while it flaps
+alarm_remind_sec = 21600   # reminder every 6h while an alarm stays active
+
+[api]                      # read-only JSON API for the dashboard + kill switch
+enabled = true
+host = "127.0.0.1"         # loopback only (enforced)
+port = 8765

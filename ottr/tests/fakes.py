@@ -7,19 +7,26 @@ snapshot) from in-memory prices, so pipeline tests run offline and deterministic
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from typing import Dict, List, Optional, Tuple
 
+from ottr.council.council import Council
 from ottr.council.models import ModelAdapter
 from ottr.market.service import MarketSnapshot, build_view
 from ottr.market.types import MarketDataError, Quote
 
 DAY = 86400
+PRICES = {"BTC": 80000.0, "ETH": 2400.0, "SOL": 100.0, "XRP": 1.3, "ADA": 0.22,
+          "DOGE": 0.08, "LINK": 12.0, "AVAX": 9.8}
 
 
 def trending_closes(start: float, n: int = 120, step: float = 0.004) -> List[Tuple[int, float]]:
-    t0 = 1_700_000_000 - (1_700_000_000 % DAY)
+    # Ends at yesterday's 00:00 UTC open, like Kraken's newest closed daily candle, so
+    # the engine's market heartbeat sees fresh closes.
+    now = int(time.time())
+    t0 = now - now % DAY - n * DAY
     out, px = [], start
     for i in range(n):
         px *= 1 + step + (0.01 if i % 2 else -0.01)
@@ -34,6 +41,7 @@ class FakeMarket:
         self.spread_pct = spread_pct
         self.fail = False
         self.age = 0.0
+        self.delay = 0.0  # seconds a quotes() call takes (a slow exchange)
         self.candle_rows = {a: trending_closes(p / 1.6) for a, p in prices.items()}
         self.quote_calls = 0
 
@@ -43,6 +51,8 @@ class FakeMarket:
 
     async def quotes(self, force: bool = False) -> Dict[str, Quote]:
         self.quote_calls += 1
+        if self.delay:
+            await asyncio.sleep(self.delay)
         if self.fail:
             raise MarketDataError("scripted outage")
         return {a: self._q(a, p) for a, p in self.prices.items()}
@@ -76,3 +86,18 @@ def analyst_reply(universe, overrides: Optional[Dict[str, Tuple[str, float]]] = 
         {"asset": a, "stance": overrides.get(a, ("HOLD", 0.5))[0],
          "conviction": overrides.get(a, ("HOLD", 0.5))[1], "thesis": "t", "key_risk": "r"}
         for a in universe]}
+
+
+def council_for(cfg, analyst_replies, chair_reply):
+    analysts = {n: ScriptedModel(n, [r]) for n, r in zip(("claude", "gpt", "gemini"), analyst_replies)}
+    return Council(analysts, ScriptedModel("chair", [chair_reply]), cfg.universe,
+                   min_analysts=2, max_trades=3)
+
+
+def eth_buy_council(cfg):
+    """A council whose analysts back ETH and whose chair buys it."""
+    u = cfg.universe
+    reps = [analyst_reply(u, {"ETH": ("BUY", 0.8)}), analyst_reply(u, {"ETH": ("BUY", 0.6)}), analyst_reply(u)]
+    chair = {"summary": "buy eth", "dissent_notes": "",
+             "trades": [{"action": "BUY", "asset": "ETH", "conviction": 0.7, "reasoning": "trend"}]}
+    return council_for(cfg, reps, chair)

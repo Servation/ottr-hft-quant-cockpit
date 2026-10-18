@@ -60,7 +60,10 @@ class Kraken:
             return None, f"HTTP {resp.status_code}", True
         if resp.status_code >= 400:
             return None, f"HTTP {resp.status_code}", False
-        body = resp.json()
+        try:
+            body = resp.json()
+        except ValueError:  # an HTML error page from a proxy/CDN: treat as an outage, not a crash
+            return None, "non-JSON response", True
         errs = body.get("error") or []
         if errs:
             msg = "; ".join(errs)

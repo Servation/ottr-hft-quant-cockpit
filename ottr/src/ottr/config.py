@@ -81,6 +81,26 @@ class Council:
 class Engine:
     risk_interval_sec: float = 60.0
     equity_interval_sec: float = 900.0
+    watchdog_interval_sec: float = 60.0
+    alarm_clear_sec: float = 300.0     # an alarm must stay clear this long to resolve
+
+
+@dataclass(frozen=True)
+class Alerts:
+    burst: int = 10                    # notifications that may go out back to back
+    per_hour: float = 30.0             # sustained rate after the burst is spent
+    alarm_repeat_sec: float = 1800.0   # a flapping alarm re-posts at most this often
+    alarm_remind_sec: float = 21600.0  # reminder while an alarm stays active
+
+
+LOOPBACK = ("127.0.0.1", "localhost", "::1")
+
+
+@dataclass(frozen=True)
+class Api:
+    enabled: bool = True
+    host: str = "127.0.0.1"
+    port: int = 8765
 
 
 @dataclass(frozen=True)
@@ -94,7 +114,10 @@ class Config:
     council: Council
     engine: Engine
     data_dir: Path
+    alerts: Alerts = field(default_factory=Alerts)
+    api: Api = field(default_factory=Api)
     discord_webhook_url: Optional[str] = None
+    api_key: Optional[str] = None      # OTTR_API_KEY: guards the API's kill switch
 
     def cap_pct(self, asset: str) -> float:
         return self.caps.get(asset.upper(), self.caps.get("default", 35.0))
@@ -117,6 +140,35 @@ def _env_bool(name: str) -> Optional[bool]:
     if v is None or v == "":
         return None
     return v.strip().lower() in ("1", "true", "yes", "on")
+
+
+def load_env_file(path: Path) -> List[str]:
+    """Read KEY=VALUE lines into os.environ without overriding variables already set.
+
+    Why: the scheduled task gets the user's registry environment, not a shell's, so
+    secrets (DISCORD_WEBHOOK_URL, OTTR_API_KEY) live in a gitignored ottr/.env instead.
+    Only the CLI entry point calls this; tests and library code never read the file.
+    Returns the keys it set.
+    """
+    if not path.is_file():
+        return []
+    set_keys = []
+    for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):]
+        key, sep, value = line.partition("=")
+        key, value = key.strip(), value.strip()
+        if not sep or not key.replace("_", "").isalnum():
+            raise ConfigError(f"{path}:{n}: expected KEY=VALUE")
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+            value = value[1:-1]
+        if key not in os.environ:
+            os.environ[key] = value
+            set_keys.append(key)
+    return set_keys
 
 
 def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config:
@@ -149,9 +201,24 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
         market=_section(Market, raw.get("market", {}), "market"),
         council=_section(Council, raw.get("council", {}), "council"),
         engine=_section(Engine, raw.get("engine", {}), "engine"),
+        alerts=_section(Alerts, raw.get("alerts", {}), "alerts"),
+        api=_section(Api, raw.get("api", {}), "api"),
         data_dir=Path(data_dir or os.getenv("OTTR_DATA_DIR") or (ROOT / "data")),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL") or None,
+        api_key=os.getenv("OTTR_API_KEY") or None,
     )
+    if cfg.api.host not in LOOPBACK:
+        # The API has no TLS and its reads are unauthenticated: it must never face a network.
+        raise ConfigError(f"api.host must be a loopback address {LOOPBACK}, got {cfg.api.host!r}")
+    if not 0 <= cfg.api.port <= 65535:
+        raise ConfigError("api.port must be in 0..65535")
+    if cfg.api_key is not None and len(cfg.api_key) < 16:
+        raise ConfigError("OTTR_API_KEY must be at least 16 characters")
+    for name in ("risk_interval_sec", "equity_interval_sec", "watchdog_interval_sec"):
+        if getattr(cfg.engine, name) <= 0:
+            raise ConfigError(f"engine.{name} must be positive")
+    if cfg.alerts.burst < 1 or cfg.alerts.per_hour <= 0:
+        raise ConfigError("alerts.burst must be >= 1 and alerts.per_hour > 0")
     if cfg.risk.drawdown_resume_pct >= cfg.risk.drawdown_halt_pct:
         raise ConfigError("risk.drawdown_resume_pct must be below drawdown_halt_pct")
     if cfg.council.min_analysts < 1 or cfg.council.min_analysts > len(cfg.council.analysts):

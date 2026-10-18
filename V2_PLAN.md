@@ -53,9 +53,13 @@ ottr/src/ottr/
   council/         CLI model adapters, schemas, prompts, Council runner
   engine/          executor (decision -> gate -> broker -> ledger -> audit) and the
                    async loop (spot 60s, candles 1h, risk 60s, equity 15m, council on a
-                   schedule), graceful shutdown, single-instance lock
-  notify.py        optional Discord webhook posts (meeting summary, fills, risk actions)
-  cli.py           ottr run | meeting [--execute] | status | import-legacy
+                   schedule, watchdog 60s), graceful shutdown, single-instance lock,
+                   persisted kill switch
+  health.py        heartbeat staleness, blind-monitor and ledger alarms, status exit codes
+  notify.py        Discord webhook posts (meetings, fills, risk, alarms), rate-limited
+  api.py           read-only JSON API on 127.0.0.1 + authenticated kill switch
+  supervisor.py    restarts `ottr run` with backoff; service.py registers it with Task Scheduler
+  cli.py           ottr run | supervise | service | meeting [--execute] | status | check | resume
 ```
 
 ### Council contract
@@ -128,8 +132,18 @@ Both models critiqued the first draft of this plan. These changes were adopted:
   engine smoke both passed on real data and real models. config, market, ledger, risk, council (ported from C0, chair
   without sizing), executor, engine loop, CLI, legacy import of the v1 book. Tests with
   fake models and fake market. Live dry run against real data and real models.
-- **P2: operate.** Host supervisor (Task Scheduler at logon, auto-restart), heartbeat and
-  staleness alarms, Discord webhook notifications, read-only HTTP API + kill switch.
+- **P2: operate (BUILT 2026-10-18).** 159 tests. A supervisor process owns restarts
+  (backoff 5s to 5 min, a kill-on-close Job Object so an engine can't outlive it), and a
+  Task Scheduler task keeps one supervisor running (logon trigger + 5 min keepalive, as
+  the user, no time limit). Task Scheduler's own "restart on failure" doesn't cover a
+  program that starts and later exits, which is why restarts live in code. Watchdog
+  alarms: a task's last success older than 3x its interval, a blind risk monitor, a
+  ledger mismatch, an API that can't bind; clear-hysteresis 5 min; `ottr status` exit
+  codes 0/1/2/3. Discord posts are queued (never block a tick) and rate-limited per alarm
+  and per budget. Read-only aiohttp API on its own `mode=ro` connection, with a Host check
+  against DNS rebinding and a Bearer-key kill switch persisted in the ledger. Schema v2
+  migrates the P1 book in place. E2E on a copy of the live book: supervisor under
+  pythonw, hard kill and restart, graceful stop, alarms through a local webhook.
 - **P3: measure.** Per-model scorecard (each analyst's stances graded at +24h and +7d),
   chair-vs-analyst comparison, deterministic backtest of the risk/sizing policy on Kraken
   candles.
