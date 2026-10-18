@@ -5,6 +5,7 @@ PowerShell commands, the graceful stop sequence, and the install preflight.
 """
 
 import json
+import os
 import subprocess
 import xml.etree.ElementTree as ET
 
@@ -170,11 +171,22 @@ def test_preflight_warns_about_missing_clis_and_webhook(tmp_path, monkeypatch):
     assert any("`agy`" in w for w in warns)
     assert any("codex CLI not found" in w for w in warns)
     assert any("DISCORD_WEBHOOK_URL" in w for w in warns)
-    (tmp_path / "claude.exe").write_bytes(b"")
-    (tmp_path / "agy.exe").write_bytes(b"")
+    for name in ("claude", "agy"):
+        fake_executable(tmp_path, name)
     monkeypatch.setattr(models.CodexCLI, "_find", staticmethod(lambda: "codex.exe"))
     monkeypatch.setenv("PATHEXT", ".EXE")
     assert service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path)) == []
+
+
+def fake_executable(folder, name):
+    """A stub `shutil.which` finds: name.exe on Windows (via PATHEXT), an executable
+    bit and no extension elsewhere (CI runs this suite on Linux too)."""
+    if os.name == "nt":
+        (folder / f"{name}.exe").write_bytes(b"")
+    else:
+        p = folder / name
+        p.write_text("#!/bin/sh\n", encoding="utf-8")
+        p.chmod(0o755)
 
 
 def test_xml_declares_utf16_for_schtasks():
