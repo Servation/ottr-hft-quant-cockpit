@@ -1,7 +1,7 @@
 # OTTR v2
 
 A paper-trading engine where three models analyze and code acts. Design and rationale:
-[`../V2_PLAN.md`](../V2_PLAN.md).
+[`../docs/DESIGN.md`](../docs/DESIGN.md).
 
 - **Council:** Claude, GPT (Codex CLI) and Gemini (Antigravity CLI) each give a stance per
   asset as validated JSON. A Claude chair decides on anonymized reports. The chair never
@@ -20,7 +20,7 @@ A paper-trading engine where three models analyze and code acts. Design and rati
 cd ottr
 python -m venv .venv          # Python 3.11+
 .venv/Scripts/pip install -e ".[dev]"
-.venv/Scripts/ottr init --import-v1 ../discord-bridge/data/portfolio_state.json   # or: init --fresh
+.venv/Scripts/ottr init --fresh   # or: init --import-v1 PATH (a v1 portfolio_state.json, marked at today's prices)
 ```
 
 Secrets go in `ottr/.env` (gitignored; copy `.env.example`). The CLI reads it at start-up,

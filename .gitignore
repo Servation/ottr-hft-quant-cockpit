@@ -1,56 +1,29 @@
-# General IDEs and OS files
+# Agent tooling and app worktrees (local only)
+.claude/
+CLAUDE.md
+.agent/
+.agents/
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# OTTR runtime state: SQLite ledger, locks, logs
+ottr/data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+
+# Editors and OS
 .idea/
 .vscode/
 .DS_Store
 Thumbs.db
 *.log
-.env
-.env.*
-!.env.example
-
-# AI Agent State & Testing Caches
-.agent/
-.agents/
-.pytest_cache/
-.coverage
-
-# AI Tool Config (not project code)
-CLAUDE.md
-CONTEXT.md
-
-# AI-generated agent docs (keep RUNBOOK.md, TEST_BASELINE.md)
-discord-bridge/docs/agent_*.md
-
-# Node.js
-node_modules/
-dist/
-build/
-npm-debug.log*
-
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.venv/
-venv/
-env/
-*.egg-info/
-.eggs/
-
-# Project Specific Data
-agent-gateway/portfolio_state.json
-agent-gateway/trade_journal.json
-discord-bridge/data/*
-!discord-bridge/data/.gitkeep
-# Stray repo-root data dir: the canonical data dir is discord-bridge/data, but a
-# CWD-relative write in bot/main.py drops last_startup_meeting.txt into ./data when
-# the bot/tests run from the repo root. Leading slash anchors this to the root so it
-# never matches discord-bridge/data.
-/data/
-
-# Scratch Scripts
-test_funding.py
-
-# OTTR v2 runtime state (SQLite ledger, lock file)
-ottr/data/
