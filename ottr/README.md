@@ -47,6 +47,7 @@ and real environment variables take precedence:
 | `ottr supervise` | no (its child does) | runs `ottr run` (and `ottr chat` when it's set up), restarts each with backoff (5s doubling to 5 min) |
 | `ottr chat` | no (its own `chat.db`) | the Discord slash-command bot; reads the API, can only flip the kill switch |
 | `ottr chat --check` | no | checks the chat config, secrets, engine API and model CLI without connecting to Discord |
+| `ottr chat --standby` | no | like `ottr chat`, but waits for a running bot to exit instead of quitting (the supervisor runs this) |
 | `ottr service install` | Task Scheduler | registers the supervisor to run at logon (see below); `--dry-run` prints the XML |
 | `ottr service status\|start\|stop\|restart\|uninstall` | Task Scheduler | manage that task; `stop` lets queued orders finish first |
 | `ottr meeting` | no | one council meeting on a scratch copy; prints dry-run verdicts |
@@ -199,6 +200,12 @@ A chat crash restarts only the chat bot, never the engine. A problem a restart c
 (a rejected token, a missing `applications.commands` scope) exits with code 78. The
 supervisor then stops restarting the bot, posts one alert with the reason, and keeps the
 engine running. Fix it, then `ottr service restart`.
+
+Only one bot may run at a time (two on one token would both answer every command). If
+you start `ottr chat` in a terminal while the service runs, whichever started first keeps
+the token: a bot started by hand says another one is running and exits, while the
+supervised bot (`ottr chat --standby`) waits quietly and takes over within a few seconds of
+the hand-started one exiting. Waiting is not a crash, so it costs no restarts or alerts.
 
 `[chat]` in config.toml: `enabled`, `model` (claude | gpt | gemini), `effort` (checked
 against what that model's CLI accepts), `per_hour`, `history_turns` (earlier exchanges in

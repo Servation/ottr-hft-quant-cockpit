@@ -5,9 +5,10 @@ What it does: registers /status, /positions, /meeting, /ask, /kill and /release,
 every interaction against the owner and allow-list before any command runs (strangers get
 a private refusal), defers anything that reads the API so Discord's 3-second deadline
 can't expire, asks for a button confirmation before /release, and splits long replies
-across messages. `run_chat` is the process: a single-instance lock, a stop-file watcher
-(so `ottr service stop` ends it cleanly), and exit code 78 for problems a restart can't
-fix, which tells the supervisor to stop restarting it.
+across messages. `run_chat` is the process: a single-instance lock (the supervised bot
+stands by while one started by hand holds it), a stop-file watcher (so `ottr service
+stop` ends it cleanly), and exit code 78 for problems a restart can't fix, which tells
+the supervisor to stop restarting it.
 
 Why a gateway bot with slash commands: it connects outbound only (no public URL or
 port), needs no privileged intents (no Message Content: commands arrive as structured
@@ -39,6 +40,7 @@ from ottr.ledger.store import LockError, _FileLock
 logger = logging.getLogger(__name__)
 
 RELEASE_TIMEOUT = 60.0
+STANDBY_POLL = 5.0    # how often a standing-by bot retries the single-instance lock
 COMMANDS = ("status", "positions", "meeting", "ask", "kill", "release")
 
 
@@ -282,31 +284,47 @@ def _service(cfg: Config, log: ChatLog) -> ChatService:
     return ChatService(cfg, api, model, log)
 
 
-async def run_chat(cfg: Config) -> int:
-    """Run the bot until a stop is requested. 0: stopped on request; 1: a fault worth a
-    restart (network, Discord outage); 2: another chat bot holds the lock; 78: config."""
-    why = unavailable(cfg)
-    if why:
-        logger.error("chat bot can't start: %s", why)
-        return EXIT_CONFIG
-    cfg.data_dir.mkdir(parents=True, exist_ok=True)
-    lock = _FileLock(cfg.data_dir / "chat.lock")
+async def _acquire(lock: _FileLock, standby: bool, stop: asyncio.Event) -> Optional[int]:
+    """Take the single-instance lock: None once it is held, else the exit code to return.
+
+    Why a standby: two bots on one token would both answer every command, so only one may
+    run. A bot started by hand while another runs is told so and exits (2). The supervised
+    bot (`--standby`) instead waits quietly and takes over when the other one exits: a
+    held lock is not a crash, so it must not cost restarts, backoff or crash alerts.
+    """
     try:
         lock.acquire()
+        return None
     except LockError:
-        # Two bots on one token would both answer every command.
-        logger.error("another `ottr chat` is already running for %s", cfg.data_dir)
-        return 2
-    started = time.time()
+        if not standby:
+            logger.error("another `ottr chat` is already running for %s (the service's, or one in another "
+                         "terminal); stop that one first", lock.path.parent)
+            return 2
+    logger.warning("another `ottr chat` holds %s (probably one started by hand); standing by until it exits",
+                   lock.path)
+    while True:
+        try:
+            await asyncio.wait_for(stop.wait(), timeout=STANDBY_POLL)
+            logger.info("stop requested while standing by")
+            return 0
+        except asyncio.TimeoutError:
+            pass
+        try:
+            lock.acquire()
+        except LockError:
+            continue
+        logger.info("the other chat bot exited; taking over")
+        return None
+
+
+async def _serve(cfg: Config, stop: asyncio.Event) -> int:
+    """Connect and answer commands until `stop` is set or the connection fails for good."""
     log = ChatLog(cfg.data_dir / "chat.db")
     service = _service(cfg, log)
     bot = OttrBot(service, cfg.chat_guild_id)
-    stop = asyncio.Event()
-    undo = install_stop_signals(stop.set)
     code = 0
     try:
         bot_task = asyncio.create_task(bot.start(cfg.discord_bot_token or ""), name="discord")
-        watcher = asyncio.create_task(_watch_stop_file(cfg, started, stop), name="stopfile")
         stopper = asyncio.create_task(stop.wait(), name="stop")
         logger.info("chat bot starting: model %s (%s effort), %d asks/hour, API %s", cfg.chat.model,
                     cfg.chat.effort, cfg.chat.per_hour, api_base_url(cfg))
@@ -327,14 +345,39 @@ async def run_chat(cfg: Config) -> int:
                 logger.error("the Discord client stopped on its own")
                 code = 1
         await bot.close()
-        for t in (bot_task, watcher, stopper):
+        for t in (bot_task, stopper):
             t.cancel()
-        await asyncio.gather(bot_task, watcher, stopper, return_exceptions=True)
+        await asyncio.gather(bot_task, stopper, return_exceptions=True)
     finally:
-        restore_signals(undo)
         await service.api.aclose()
         log.close()
-        lock.release()
+    return code
+
+
+async def run_chat(cfg: Config, standby: bool = False) -> int:
+    """Run the bot until a stop is requested. 0: stopped on request; 1: a fault worth a
+    restart (network, Discord outage); 2: another chat bot holds the lock (only without
+    `standby`, which waits for it instead); 78: config."""
+    why = unavailable(cfg)
+    if why:
+        logger.error("chat bot can't start: %s", why)
+        return EXIT_CONFIG
+    cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    # Stop handling comes first, so a bot standing by can be stopped cleanly too.
+    started = time.time()
+    stop = asyncio.Event()
+    undo = install_stop_signals(stop.set)
+    watcher = asyncio.create_task(_watch_stop_file(cfg, started, stop), name="stopfile")
+    lock = _FileLock(cfg.data_dir / "chat.lock")
+    try:
+        code = await _acquire(lock, standby, stop)
+        if code is None:
+            code = await _serve(cfg, stop)
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+        restore_signals(undo)
+        lock.release()  # a no-op when it was never taken
     logger.info("chat bot stopped (exit %s)", code)
     return code
 

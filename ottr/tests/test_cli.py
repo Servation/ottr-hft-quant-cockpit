@@ -129,7 +129,8 @@ def test_supervise_adds_the_chat_bot_only_when_it_can_run(tmp_path, monkeypatch)
     monkeypatch.setenv("CEO_DISCORD_ID", "111111111111111111")
     cfg = cfgmod.load(data_dir=tmp_path)
     engine, (chat,), notes = cli.supervised(cfg, cfgmod.DEFAULT_CONFIG, verbose=True)
-    assert notes == [] and chat.name == "chat" and chat.argv[-2:] == ["-v", "chat"]
+    # --standby: a bot started by hand keeps the token; the supervised one waits for it.
+    assert notes == [] and chat.name == "chat" and chat.argv[-3:] == ["-v", "chat", "--standby"]
     assert str(tmp_path / "logs" / "chat.log") in chat.argv and chat.give_up_codes == {78}
     assert chat.out_log == tmp_path / "logs" / "chat.out.log"
     assert "tok" not in " ".join(chat.argv)  # the token reaches the child through ottr/.env, not argv
