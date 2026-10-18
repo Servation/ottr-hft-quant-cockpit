@@ -3,9 +3,10 @@
 
   ottr init [--fresh | --import-v1 PATH]   open the book (once)
   ottr run                                 start the engine (the single writer)
-  ottr supervise                           run the engine and restart it if it exits
+  ottr supervise                           run the engine (and the chat bot) and restart them if they exit
   ottr service install|uninstall|status|start|stop|restart
                                            the Windows scheduled task that runs `supervise`
+  ottr chat [--check]                      the Discord slash-command bot (reads the API; can't trade)
   ottr meeting [--execute]                 one council meeting now (propose-only by default)
   ottr status [--json]                     read-only health + book; exit code says what's wrong
   ottr check                               replay the fill log and verify the books balance
@@ -266,16 +267,47 @@ def _console_python() -> str:
     return str(exe)
 
 
+def supervised(cfg, config_path: Path, verbose: bool = False):
+    """(engine argv, companion children, notes) for `ottr supervise`.
+
+    The chat bot joins only when it can run (enabled, token and owner set); otherwise a
+    note says why, so a missing token is one log line rather than a crash loop.
+    """
+    from ottr.chat import EXIT_CONFIG, unavailable
+    from ottr.supervisor import Child
+
+    logs = cfg.data_dir / "logs"
+
+    def argv(cmd: str, log_name: str) -> list:
+        a = [_console_python(), "-m", "ottr.cli", "--config", str(Path(config_path).resolve()),
+             "--log-file", str(logs / log_name)]
+        return a + (["-v"] if verbose else []) + [cmd]
+
+    companions, notes = [], []
+    why = unavailable(cfg)
+    if why:
+        notes.append(f"chat bot not started: {why}")
+    else:
+        companions.append(Child("chat", argv("chat", "chat.log"), logs / "chat.out.log",
+                                give_up_codes=frozenset({EXIT_CONFIG})))
+    return argv("run", "engine.log"), companions, notes
+
+
 async def cmd_supervise(cfg, args) -> int:
     from ottr.supervisor import Supervisor
-    child = [_console_python(), "-m", "ottr.cli", "--config", str(Path(args.config).resolve()),
-             "--log-file", str(cfg.data_dir / "logs" / "engine.log")]
-    if args.verbose:
-        child.append("-v")
-    child.append("run")
-    sup = Supervisor(child, cfg.data_dir, make_alerts(cfg.discord_webhook_url, cfg.alerts))
-    logger.info("supervisor starting for %s", cfg.data_dir)
+    engine, companions, notes = supervised(cfg, args.config, args.verbose)
+    for n in notes:
+        logger.info(n)
+    sup = Supervisor(engine, cfg.data_dir, make_alerts(cfg.discord_webhook_url, cfg.alerts),
+                     companions=companions)
+    logger.info("supervisor starting for %s (%s)", cfg.data_dir,
+                ", ".join(c.name for c in sup.children))
     return await sup.run()
+
+
+async def cmd_chat(cfg, args) -> int:
+    from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
+    return await (check_chat(cfg) if args.check else run_chat(cfg))
 
 
 async def cmd_service(cfg, args) -> int:
@@ -305,7 +337,8 @@ async def cmd_service(cfg, args) -> int:
     return rc or service.start(name)
 
 
-def _setup_logging(verbose: bool, log_file: Optional[Path], console: bool) -> None:
+def _setup_logging(verbose: bool, log_file: Optional[Path], console: bool,
+                   errors_to_stderr: bool = False) -> None:
     handlers: list = []
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -313,6 +346,13 @@ def _setup_logging(verbose: bool, log_file: Optional[Path], console: bool) -> No
             log_file, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"))
     if console and sys.stderr is not None:  # None under pythonw.exe
         handlers.append(logging.StreamHandler())
+    elif errors_to_stderr and sys.stderr is not None:
+        # Under the supervisor stderr is <name>.out.log, whose last line becomes the crash
+        # alert: errors only, so the alert says why without the capture file growing.
+        h = logging.StreamHandler()
+        h.setLevel(logging.ERROR)
+        h.setFormatter(logging.Formatter("%(message)s"))  # read on a phone: no timestamp noise
+        handlers.append(h)
     if not handlers:
         handlers.append(logging.NullHandler())
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=handlers, force=True,
@@ -331,7 +371,9 @@ def main(argv=None) -> int:
     g.add_argument("--fresh", action="store_true")
     g.add_argument("--import-v1", metavar="PATH")
     sub.add_parser("run")
-    sub.add_parser("supervise", help="run the engine and restart it whenever it exits")
+    sub.add_parser("supervise", help="run the engine (and the chat bot) and restart them whenever they exit")
+    p = sub.add_parser("chat", help="the Discord slash-command bot (reads the engine API, can't trade)")
+    p.add_argument("--check", action="store_true", help="check config, secrets, API and model CLI; don't connect")
     p = sub.add_parser("service", help="manage the Windows scheduled task that runs `supervise`")
     p.add_argument("action", choices=["install", "uninstall", "status", "start", "stop", "restart"])
     p.add_argument("--name", default="OTTR Engine")
@@ -351,9 +393,11 @@ def main(argv=None) -> int:
         log_file = cfg.data_dir / "logs" / "supervisor.log"
     # Under the supervisor the engine's stderr is a non-rotating capture file, so a
     # --log-file run logs to the rotating file only; `supervise` also echoes to a console.
-    _setup_logging(args.verbose, log_file, console=log_file is None or args.cmd == "supervise")
+    _setup_logging(args.verbose, log_file, console=log_file is None or args.cmd == "supervise",
+                   errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
-          "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check, "resume": cmd_resume}[args.cmd]
+          "chat": cmd_chat, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
+          "resume": cmd_resume}[args.cmd]
     return asyncio.run(fn(cfg, args))
 
 

@@ -17,7 +17,7 @@ import pytest
 from ottr.config import Alerts as Limits
 from ottr.control import request_stop, stop_path
 from ottr.notify import Alerts
-from ottr.supervisor import Backoff, Supervisor, _last_line, _rotate
+from ottr.supervisor import Backoff, Child, Supervisor, _last_line, _rotate
 
 FAST = Backoff(initial=0.05, maximum=0.2, stable_after=30.0)
 
@@ -198,3 +198,72 @@ async def test_spawn_failure_backs_off_instead_of_killing_the_supervisor(tmp_pat
     assert await asyncio.wait_for(sup.run(), timeout=30) == 0
     (post,) = [p for p in rec.posts if p.startswith("**Engine failed to start**")]
     assert "FileNotFoundError" in post and "retries in" in post
+
+
+# -- companions (the chat bot) ---------------------------------------------------------------
+def waits_for_stop(data_dir) -> list:
+    """A child that behaves like the engine or the chat bot: runs until a stop request."""
+    return py(f"""
+        import os, sys, time
+        start = time.time()
+        p = {str(data_dir / 'stop.request')!r}
+        while not (os.path.exists(p) and os.path.getmtime(p) >= start - 1):
+            time.sleep(0.05)
+        sys.exit(0)
+    """)
+
+
+async def test_a_crashing_chat_bot_never_restarts_the_engine(tmp_path):
+    rec = Recorder()
+    chat = Child("chat", py("import sys; print('discord down'); sys.exit(1)"), tmp_path / "logs" / "chat.out.log")
+    sup = Supervisor(waits_for_stop(tmp_path), tmp_path, Alerts(rec, Limits()), backoff=FAST, poll=0.05,
+                     companions=[chat])
+    asyncio.get_running_loop().create_task(stop_when(lambda: sup.state["chat"].restarts >= 3, tmp_path))
+    assert await asyncio.wait_for(sup.run(), timeout=30) == 0
+    assert sup.spawns == 1 and sup.restarts == 0  # the engine ran once, start to stop
+    assert sup.state["chat"].spawns >= 3
+    crashes = [p for p in rec.posts if p.startswith("**Chat bot exited**")]
+    assert len(crashes) == 1 and "discord down" in crashes[0]
+    assert not any(p.startswith("**Engine") for p in rec.posts)
+    assert (tmp_path / "logs" / "chat.out.log").read_text().count("supervisor starting chat") >= 3
+
+
+async def test_a_config_exit_stops_restarting_the_chat_bot_but_not_the_engine(tmp_path):
+    rec = Recorder()
+    chat = Child("chat", py("import sys; print('Discord rejected DISCORD_BOT_TOKEN'); sys.exit(78)"),
+                 tmp_path / "logs" / "chat.out.log", give_up_codes=frozenset({78}))
+    sup = Supervisor(waits_for_stop(tmp_path), tmp_path, Alerts(rec, Limits()), backoff=FAST, poll=0.05,
+                     companions=[chat])
+    task = asyncio.get_running_loop().create_task(sup.run())
+
+    async def gave_up():
+        while not sup.state["chat"].gave_up:
+            await asyncio.sleep(0.05)
+
+    await asyncio.wait_for(gave_up(), 20)
+    await asyncio.sleep(0.5)
+    assert not task.done()  # the supervisor (and the engine) keep running
+    assert sup.state["chat"].spawns == 1 and sup.state["chat"].restarts == 0 and sup.spawns == 1
+    request_stop(tmp_path)
+    assert await asyncio.wait_for(task, 30) == 0
+    (post,) = [p for p in rec.posts if p.startswith("**Chat bot stopped**")]
+    assert "code 78" in post and "DISCORD_BOT_TOKEN" in post and "engine keeps running" in post
+
+
+async def test_a_stop_request_ends_every_child_cleanly(tmp_path):
+    chat = Child("chat", waits_for_stop(tmp_path), tmp_path / "logs" / "chat.out.log")
+    sup = Supervisor(waits_for_stop(tmp_path), tmp_path, backoff=FAST, poll=0.05, grace=10, companions=[chat])
+
+    async def later():
+        await asyncio.sleep(1.0)
+        request_stop(tmp_path)
+
+    asyncio.get_running_loop().create_task(later())
+    assert await asyncio.wait_for(sup.run(), timeout=30) == 0
+    assert sup.restarts == 0 and sup.state["chat"].restarts == 0
+    assert sup.spawns == 1 and sup.state["chat"].spawns == 1
+
+
+def test_child_names_must_be_unique(tmp_path):
+    with pytest.raises(ValueError, match="unique"):
+        Supervisor(["x"], tmp_path, companions=[Child("engine", ["y"], tmp_path / "y.log")])

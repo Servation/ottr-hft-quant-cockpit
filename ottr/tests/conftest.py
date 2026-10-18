@@ -19,7 +19,8 @@ from ottr.market.types import Quote
 @pytest.fixture(autouse=True)
 def isolated_env(tmp_path, monkeypatch):
     """No test may read the developer's ottr/.env or real secrets (a webhook would post)."""
-    for var in ("OTTR_DRY_RUN", "MAX_TRADE_USD", "OTTR_DATA_DIR", "DISCORD_WEBHOOK_URL", "OTTR_API_KEY"):
+    for var in ("OTTR_DRY_RUN", "MAX_TRADE_USD", "OTTR_DATA_DIR", "DISCORD_WEBHOOK_URL", "OTTR_API_KEY",
+                "DISCORD_BOT_TOKEN", "CEO_DISCORD_ID", "OTTR_CHAT_ALLOWED_IDS", "DISCORD_GUILD_ID"):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OTTR_ENV_FILE", str(tmp_path / "no-such.env"))
 

@@ -18,14 +18,14 @@ import json
 import logging
 import os
 import time
-from typing import Any, Callable, Dict, Optional, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 from ottr import health
 from ottr.config import Config
 from ottr.control import (STOP_FILE, clear_stale_stop, install_stop_signals, restore_signals,
                           stop_requested)
 from ottr.council.council import Council
-from ottr.council.models import ClaudeCLI, CodexCLI, GeminiCLI, ModelAdapter
+from ottr.council.models import make_adapter
 from ottr.engine.executor import Executor
 from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
@@ -46,12 +46,7 @@ CANDLE_STALE_SEC = 3 * 86400
 
 def build_council(cfg: Config) -> Council:
     c = cfg.council
-    make: Dict[str, Callable[[], ModelAdapter]] = {
-        "claude": lambda: ClaudeCLI(model=c.claude_model, effort=c.reasoning_effort),
-        "gpt": lambda: CodexCLI(effort=c.reasoning_effort),
-        "gemini": lambda: GeminiCLI(model=c.gemini_model),
-    }
-    return Council(analysts={n: make[n]() for n in c.analysts}, chair=make[c.chair](),
+    return Council(analysts={n: make_adapter(n, c) for n in c.analysts}, chair=make_adapter(c.chair, c),
                    universe=cfg.universe, min_analysts=c.min_analysts,
                    max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec)
 
@@ -83,6 +78,9 @@ class Engine:
         self.epoch: Optional[float] = None  # start, or resume from a system sleep
         self._last_watch: Optional[float] = None
         self.api = None
+        # When the meeting in progress began (None: no meeting). In memory on purpose: a
+        # persisted flag would outlive a crash and claim a meeting that is no longer running.
+        self.meeting_started: Optional[float] = None
 
     # -- risk ------------------------------------------------------------------------------
     def _blind_state(self, assets: Set[str], now: float) -> Dict[str, float]:
@@ -202,6 +200,14 @@ class Engine:
         return "\n".join(lines)
 
     async def meeting(self, execute: bool = True) -> Dict[str, Any]:
+        """One council meeting; `meeting_started` is set while it runs (GET /api/council)."""
+        self.meeting_started = time.time()
+        try:
+            return await self._meeting(execute)
+        finally:
+            self.meeting_started = None
+
+    async def _meeting(self, execute: bool) -> Dict[str, Any]:
         snap = await self.market.snapshot()
         if all(v.quote is None for v in snap.assets.values()):
             raise MarketDataError("no quotes: meeting aborted")

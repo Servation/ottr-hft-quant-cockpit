@@ -168,6 +168,10 @@ def test_every_event_kind_formats():
         ("engine_resumed", {"gap": "2.0h"}),
         ("engine_crash", {"rc": 1, "runtime": "3s", "delay": "5s", "tail": "x"}),
         ("engine_stable", {"uptime": "10m", "crashes": 2}),
+        ("chat_crash", {"rc": 1, "runtime": "3s", "delay": "5s", "tail": "x"}),
+        ("chat_crash", {"rc": None, "error": "FileNotFoundError: python.exe", "delay": "5s"}),
+        ("chat_stable", {"uptime": "10m", "crashes": 2}),
+        ("chat_gave_up", {"rc": 78, "tail": "Discord rejected DISCORD_BOT_TOKEN"}),
         ("kill_switch", {"engaged": True, "by": "api", "reason": "test", "effective": True}),
         ("risk_halt", {"drawdown": 0.16}),
         ("risk_resume", {"why": "recovered"}),
@@ -175,6 +179,8 @@ def test_every_event_kind_formats():
         text = format_event(kind, d)
         assert text.startswith("**") and "\u2014" not in text  # no em dashes, per house style
     assert "did not shut down cleanly" in format_event("engine_start", {"unclean_previous_exit": True})
+    assert format_event("chat_crash", {"rc": 1, "runtime": "3s", "delay": "5s"}).startswith("**Chat bot exited**")
+    assert "logs/chat.log" in format_event("chat_gave_up", {"rc": 78})
 
 
 SECRET_URL = "https://discord.com/api/webhooks/123/SECRET-TOKEN"

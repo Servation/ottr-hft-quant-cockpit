@@ -58,8 +58,11 @@ ottr/src/ottr/
   health.py        heartbeat staleness, blind-monitor and ledger alarms, status exit codes
   notify.py        Discord webhook posts (meetings, fills, risk, alarms), rate-limited
   api.py           read-only JSON API on 127.0.0.1 + authenticated kill switch
-  supervisor.py    restarts `ottr run` with backoff; service.py registers it with Task Scheduler
-  cli.py           ottr run | supervise | service | meeting [--execute] | status | check | resume
+  supervisor.py    restarts `ottr run` (and `ottr chat`) with backoff; service.py registers it
+                   with Task Scheduler
+  chat/            `ottr chat`: Discord slash-command bot in its own process; reads the API,
+                   one model per /ask, can only flip the kill switch; own record in chat.db
+  cli.py           ottr run | supervise | service | chat | meeting [--execute] | status | check | resume
 ```
 
 ### Council contract
@@ -144,6 +147,20 @@ Both models critiqued the first draft of this plan. These changes were adopted:
   against DNS rebinding and a Bearer-key kill switch persisted in the ledger. Schema v2
   migrates the P1 book in place. E2E on a copy of the live book: supervisor under
   pythonw, hard kill and restart, graceful stop, alarms through a local webhook.
+- **P2.5: chat, first slice (BUILT 2026-10-18).** `ottr chat`, a gateway bot with slash
+  commands (outbound only, no privileged intents) in its own process. /status, /positions
+  and /meeting render API reads as plain code. /ask makes one model call (`[chat]` model
+  and a lower effort) over the book, positions, the latest meeting's theses, recent fills,
+  health and the channel's last few exchanges. /kill and /release (owner only, button
+  confirmation) go through the API's Bearer kill switch, the bot's only write: no chat
+  command can trade. Owner (CEO_DISCORD_ID) plus an optional allow-list; strangers get a
+  private refusal. Guardrails: one model call at a time, a rolling-hour budget stored in
+  chat.db (so a restart can't reset it), and silence while a council meeting runs (new
+  `GET /api/council`, from the engine's memory). Every exchange is recorded in chat.db
+  (SQLite, not a log file, because history replay and the budget are queries). The
+  supervisor runs the bot as a second child with its own restart loop, so a chat crash
+  never touches the engine; exit 78 (bad token, missing scope) stops its restarts with one
+  alert that carries the reason.
 - **P3: measure.** Per-model scorecard (each analyst's stances graded at +24h and +7d),
   chair-vs-analyst comparison, deterministic backtest of the risk/sizing policy on Kraken
   candles.
@@ -156,4 +173,22 @@ Both models critiqued the first draft of this plan. These changes were adopted:
 - Starting book: import the v1 positions as the opening state (default) or start fresh
   at $10k.
 - Cadence: a council every 4h. That is 24 CLI calls a day across three subscriptions.
-- Discord: webhook notifications only, with no chat bot. CEO directives move to the CLI/API.
+- Discord: alerts stay on the webhook (they must work when the bot is down); the chat bot
+  (P2.5) is for talking to OTTR.
+
+## Chat follow-ups (not built yet)
+
+- **CEO directives into meetings.** Free text from the owner ("stay out of DOGE this
+  week") stored through an authenticated API endpoint and shown to the analysts and the
+  chair as context. Code still enforces every rule; a directive can never size or force a
+  trade.
+- **/council.** Ask all three models the same question and show the answers side by side
+  (three CLI calls, so its own budget).
+- **Adaptive cadence.** Let the chair propose when the council should meet next
+  (`next_meeting_hours` plus a reason in its JSON). Code clamps it to a configured range,
+  hard triggers (a stop-out, the drawdown breaker, a large move since the last meeting)
+  pull a meeting earlier, and a missing or invalid value falls back to the fixed interval.
+- **Proactive check-ins.** The bot posts on its own when something is worth a look (a
+  meeting decided a trade, an alarm raised), with its own rate limit.
+- **Chat in `ottr status`.** Show whether the chat bot is up (a heartbeat in chat.db),
+  plus a retention policy for chat.db.

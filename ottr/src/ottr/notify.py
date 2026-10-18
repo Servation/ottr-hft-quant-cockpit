@@ -8,9 +8,10 @@ watchdog hands over the full set of active alarms every tick and `sync_alarms` r
 what the user has been told with the truth, so a lost post is retried and a flapping
 alarm posts at most once per `alarm_repeat_sec` (with a flap count) instead of every tick.
 
-Why a webhook and not a bot: v2 only reports; it has no chat commands, so it needs no
-gateway connection, token or intents. Failures are logged and never raised, and posting
-never blocks the caller: a Discord outage must not slow down a risk tick.
+Why a webhook even though `ottr chat` runs a bot: alerts must reach Discord when the bot
+is down, misconfigured or crash-looping, so the engine and supervisor post through a
+webhook that needs no gateway connection, token or intents. Failures are logged and never
+raised, and posting never blocks the caller: a Discord outage must not slow down a risk tick.
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ logger = logging.getLogger(__name__)
 LIMIT = 1900          # Discord allows 2000 chars per message
 QUEUE_MAX = 200
 MAX_RETRY_AFTER = 30.0
+# Supervised processes: "<name>_crash", "<name>_stable" and "<name>_gave_up" events.
+PROCESS_LABELS = {"engine": "Engine", "chat": "Chat bot"}
 
 Send = Callable[[str], Awaitable[bool]]
 
@@ -73,14 +76,20 @@ def format_event(kind: str, d: dict) -> str:
     if kind == "engine_resumed":
         return (f"**Engine was suspended for {d['gap']}** (system sleep or a blocked loop). "
                 "Heartbeat checks restart their grace period now.")
-    if kind == "engine_crash":
+    proc, _, what = kind.partition("_")
+    if proc in PROCESS_LABELS and what in ("crash", "stable", "gave_up"):
+        label = PROCESS_LABELS[proc]
         tail = f"\n> {d['tail']}" if d.get("tail") else ""
+        if what == "stable":
+            return f"**{label} stable again** (up {d['uptime']} after {d['crashes']} crash(es))."
+        if what == "gave_up":
+            return (f"**{label} stopped** with code {d['rc']}: a configuration problem a restart can't "
+                    f"fix (see logs/{proc}.log). Fix it, then `ottr service restart`. The engine keeps "
+                    f"running.{tail}")
         if d.get("error"):
-            return f"**Engine failed to start** ({d['error']}); the supervisor retries in {d['delay']}."
-        return (f"**Engine exited** with code {d['rc']} after {d['runtime']}; the supervisor "
+            return f"**{label} failed to start** ({d['error']}); the supervisor retries in {d['delay']}."
+        return (f"**{label} exited** with code {d['rc']} after {d['runtime']}; the supervisor "
                 f"restarts it in {d['delay']}.{tail}")
-    if kind == "engine_stable":
-        return f"**Engine stable again** (up {d['uptime']} after {d['crashes']} crash(es))."
     if kind == "kill_switch":
         why = f" ({d['reason']})" if d.get("reason") else ""
         if d["engaged"]:
