@@ -323,6 +323,51 @@ async def test_run_chat_refuses_a_second_instance(chat_cfg):
         held.release()
 
 
+async def test_a_standby_bot_waits_for_the_lock_then_takes_over(chat_cfg, monkeypatch):
+    # Found live: a bot started by hand held the lock, and the supervised one exited 2 every
+    # few seconds, backing off and posting crash alerts. With --standby it waits instead.
+    monkeypatch.setattr(chatbot, "STANDBY_POLL", 0.05)
+    connected = asyncio.Event()
+
+    async def online(self, token, *, reconnect=True):
+        connected.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(OttrBot, "start", online)
+    chat_cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    by_hand = _FileLock(chat_cfg.data_dir / "chat.lock")
+    by_hand.acquire()
+    task = asyncio.create_task(chatbot.run_chat(chat_cfg, standby=True))
+    try:
+        await asyncio.sleep(0.5)
+        assert not task.done() and not connected.is_set()  # waiting quietly, not exiting
+    finally:
+        by_hand.release()  # the bot started by hand exits
+    await asyncio.wait_for(connected.wait(), 5)  # the standby takes over
+    request_stop(chat_cfg.data_dir, "test")
+    assert await asyncio.wait_for(task, 10) == 0
+
+
+async def test_a_standby_bot_can_be_stopped_while_it_waits(chat_cfg, monkeypatch):
+    monkeypatch.setattr(chatbot, "STANDBY_POLL", 0.05)
+
+    async def never(self, token, *, reconnect=True):
+        raise AssertionError("a bot standing by must not connect")
+
+    monkeypatch.setattr(OttrBot, "start", never)
+    chat_cfg.data_dir.mkdir(parents=True, exist_ok=True)
+    by_hand = _FileLock(chat_cfg.data_dir / "chat.lock")
+    by_hand.acquire()
+    try:
+        task = asyncio.create_task(chatbot.run_chat(chat_cfg, standby=True))
+        await asyncio.sleep(0.3)
+        request_stop(chat_cfg.data_dir, "test")  # `ottr service stop`
+        assert await asyncio.wait_for(task, 10) == 0
+        assert not (chat_cfg.data_dir / "chat.db").exists()  # it never opened its record
+    finally:
+        by_hand.release()
+
+
 async def test_run_chat_stops_cleanly_on_the_stop_file(chat_cfg, monkeypatch):
     connected = asyncio.Event()
 

@@ -271,24 +271,25 @@ def supervised(cfg, config_path: Path, verbose: bool = False):
     """(engine argv, companion children, notes) for `ottr supervise`.
 
     The chat bot joins only when it can run (enabled, token and owner set); otherwise a
-    note says why, so a missing token is one log line rather than a crash loop.
+    note says why, so a missing token is one log line rather than a crash loop. It runs
+    with --standby, so a bot started by hand keeps the token until it exits.
     """
     from ottr.chat import EXIT_CONFIG, unavailable
     from ottr.supervisor import Child
 
     logs = cfg.data_dir / "logs"
 
-    def argv(cmd: str, log_name: str) -> list:
+    def argv(cmd: str, log_name: str, *extra: str) -> list:
         a = [_console_python(), "-m", "ottr.cli", "--config", str(Path(config_path).resolve()),
              "--log-file", str(logs / log_name)]
-        return a + (["-v"] if verbose else []) + [cmd]
+        return a + (["-v"] if verbose else []) + [cmd, *extra]
 
     companions, notes = [], []
     why = unavailable(cfg)
     if why:
         notes.append(f"chat bot not started: {why}")
     else:
-        companions.append(Child("chat", argv("chat", "chat.log"), logs / "chat.out.log",
+        companions.append(Child("chat", argv("chat", "chat.log", "--standby"), logs / "chat.out.log",
                                 give_up_codes=frozenset({EXIT_CONFIG})))
     return argv("run", "engine.log"), companions, notes
 
@@ -307,7 +308,7 @@ async def cmd_supervise(cfg, args) -> int:
 
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
-    return await (check_chat(cfg) if args.check else run_chat(cfg))
+    return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
 
 
 async def cmd_service(cfg, args) -> int:
@@ -374,6 +375,8 @@ def main(argv=None) -> int:
     sub.add_parser("supervise", help="run the engine (and the chat bot) and restart them whenever they exit")
     p = sub.add_parser("chat", help="the Discord slash-command bot (reads the engine API, can't trade)")
     p.add_argument("--check", action="store_true", help="check config, secrets, API and model CLI; don't connect")
+    p.add_argument("--standby", action="store_true",
+                   help="if another chat bot is running, wait for it to exit instead of quitting (the supervisor uses this)")
     p = sub.add_parser("service", help="manage the Windows scheduled task that runs `supervise`")
     p.add_argument("action", choices=["install", "uninstall", "status", "start", "stop", "restart"])
     p.add_argument("--name", default="OTTR Engine")
