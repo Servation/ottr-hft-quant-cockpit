@@ -3,13 +3,17 @@
 
   ottr init [--fresh | --import-v1 PATH]   open the book (once)
   ottr run                                 start the engine (the single writer)
+  ottr supervise                           run the engine and restart it if it exits
+  ottr service install|uninstall|status|start|stop|restart
+                                           the Windows scheduled task that runs `supervise`
   ottr meeting [--execute]                 one council meeting now (propose-only by default)
-  ottr status                              read-only snapshot: book, risk, heartbeats
+  ottr status [--json]                     read-only health + book; exit code says what's wrong
   ottr check                               replay the fill log and verify the books balance
   ottr resume                              clear the drawdown halt and re-baseline the peak
 
 Read-only commands work while the engine runs. Writing commands need the writer lock,
-so they refuse to run alongside the engine instead of racing it.
+so they refuse to run alongside the engine instead of racing it. Secrets can live in a
+gitignored ottr/.env (KEY=VALUE lines); real environment variables take precedence.
 """
 
 from __future__ import annotations
@@ -18,20 +22,29 @@ import argparse
 import asyncio
 import dataclasses
 import json
-import tempfile
 import logging
+import logging.handlers
+import os
 import sys
+import tempfile
 import time
 from decimal import Decimal
 from pathlib import Path
+from typing import Optional
 
 from ottr import config as cfgmod
+from ottr import health
 from ottr.engine.engine import Engine
+from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import LockError, Store
 from ottr.market.service import MarketData
-from ottr.notify import make_discord_notifier
+from ottr.market.types import MarketDataError
+from ottr.notify import make_alerts
 from ottr.risk.monitor import RiskState
+
+logger = logging.getLogger("ottr")
+LOG_MAX_BYTES, LOG_BACKUPS = 5 * 1024 * 1024, 5
 
 
 def _db(cfg) -> Path:
@@ -82,6 +95,9 @@ def _print_book(store: Store, quotes) -> None:
     if v:
         print(f"equity ${v.equity:,.2f}  cash ${v.cash:,.2f}  invested ${v.invested:,.2f}  "
               f"realized ${float(acct['realized_pnl']):+,.2f}  fees ${float(acct['fees']):,.2f}")
+    else:
+        print(f"equity unknown (a holding has no quote)  cash ${float(acct['cash']):,.2f}  "
+              f"realized ${float(acct['realized_pnl']):+,.2f}  fees ${float(acct['fees']):,.2f}")
     for a, p in lg.positions().items():
         q = quotes.get(a)
         mark = f"bid {q.bid:,.6g}  {(v.weights.get(a, 0) * 100 if v else 0):5.1f}%" if q else "no quote"
@@ -89,10 +105,36 @@ def _print_book(store: Store, quotes) -> None:
 
 
 async def cmd_status(cfg, args) -> int:
-    store = Store(_db(cfg), writer=False)
     try:
-        market = MarketData(cfg)
-        quotes = await market.quotes()
+        store = Store(_db(cfg), writer=False)
+    except FileNotFoundError as e:
+        print(json.dumps({"ok": False, "exit_code": health.EXIT_DOWN, "error": str(e)}) if args.json else e)
+        return health.EXIT_DOWN
+    try:
+        with store.snapshot():
+            report = health.evaluate(cfg, store, inside_engine=False)
+            kill = KillSwitch(cfg, store).state()
+            engine_state = store.get_state("engine") or {}
+        if args.json:
+            print(json.dumps(dict(report.to_dict(), kill_switch=kill, engine=engine_state), default=str))
+            return report.exit_code
+
+        verdict = {health.EXIT_OK: "OK", health.EXIT_DEGRADED: "DEGRADED", health.EXIT_LEDGER: "LEDGER PROBLEM",
+                   health.EXIT_DOWN: "ENGINE DOWN"}[report.exit_code]
+        print(f"OTTR {verdict} (exit {report.exit_code})")
+        for a in report.alarms:
+            print(f"  ! [{a.severity}] {a.message}")
+        if kill["effective_dry_run"]:
+            src = "config/OTTR_DRY_RUN" if kill["config_dry_run"] else f"operator via {kill['by']}"
+            print(f"kill switch ENGAGED ({src}): verdicts are recorded as dry run, nothing fills")
+        if not Ledger(store).initialized():
+            print("ledger not initialized (run `ottr init`)")
+            return report.exit_code
+        try:
+            quotes = await MarketData(cfg).quotes()
+        except MarketDataError as e:
+            print(f"(live quotes unavailable here: {e})")
+            quotes = {}
         _print_book(store, quotes)
         st = RiskState.from_dict(store.get_state("risk"))
         print(f"risk: {'HALTED since ' + time.ctime(st.halted_since) if st.halted else 'normal'}  "
@@ -102,14 +144,15 @@ async def cmd_status(cfg, args) -> int:
         if eq:
             print(f"last equity point {time.ctime(eq[0])}: ${eq[1]:,.2f}  vs BTC-hold ${eq[2] or 0:,.2f}  "
                   f"vs equal-weight-hold ${eq[3] or 0:,.2f}")
-        now = time.time()
-        for task, hb in sorted(store.heartbeats().items()):
-            age = now - hb["ts"]
-            print(f"  task {task:8} {'ok ' if hb['ok'] else 'ERR'} {age:7.0f}s ago  {hb['detail'] or ''}")
+        for t in report.tasks:
+            age = f"{health.fmt_age(report.ts - t.last_ts):>6} ago" if t.last_ts else "   never"
+            state = "BAD" if not t.healthy else "ok" if t.last_ts else "wait"  # wait: still in its grace period
+            print(f"  task {t.task:8} {state:4} {age}  (stale after {health.fmt_age(t.interval * health.STALE_FACTOR)})"
+                  f"  {t.detail}")
         nxt = store.get_state("next_meeting_at")
         if nxt:
             print(f"next council meeting: {time.ctime(nxt)}")
-        return 0
+        return report.exit_code
     finally:
         store.close()
 
@@ -140,14 +183,15 @@ def _scratch_copy(cfg) -> Store:
 
 async def cmd_meeting(cfg, args) -> int:
     if args.execute:
-        store, notify = _writer(cfg), make_discord_notifier(cfg.discord_webhook_url)
+        store, alerts = _writer(cfg), make_alerts(cfg.discord_webhook_url, cfg.alerts)
     else:
-        store, notify = _scratch_copy(cfg), None
+        store, alerts = _scratch_copy(cfg), make_alerts(None)
         cfg = dataclasses.replace(cfg, trading=dataclasses.replace(cfg.trading, dry_run=True))
     try:
-        engine = Engine(cfg, store, MarketData(cfg, archive=store), notify=notify)
-        rec = await engine.meeting(execute=True)
-        await engine.executor.drain()
+        async with alerts.running():
+            engine = Engine(cfg, store, MarketData(cfg, archive=store), alerts=alerts)
+            rec = await engine.meeting(execute=True)
+            await engine.executor.drain()
         _print_meeting(rec, store)
         if not args.execute:
             print(f"\n(propose-only: verdicts are dry-run; scratch copy at {store.path})")
@@ -201,16 +245,85 @@ async def cmd_run(cfg, args) -> int:
         if not Ledger(store).initialized():
             sys.exit("ledger not initialized: run `ottr init` first")
         market = MarketData(cfg, archive=store)
-        engine = Engine(cfg, store, market, notify=make_discord_notifier(cfg.discord_webhook_url))
-        await engine.run()
-        return 0
+        engine = Engine(cfg, store, market, alerts=make_alerts(cfg.discord_webhook_url, cfg.alerts))
+        return await engine.run()
+    except Exception:
+        logger.exception("engine crashed")  # into the log file; the supervisor restarts us
+        raise
     finally:
         store.close()
+
+
+def _console_python() -> str:
+    """python.exe for the engine child even when the supervisor runs under pythonw.exe.
+
+    A console-subsystem engine started with CREATE_NO_WINDOW owns a hidden console that
+    the model CLIs inherit; under pythonw each CLI would open a visible window instead.
+    """
+    exe = Path(sys.executable)
+    if exe.name.lower() == "pythonw.exe" and exe.with_name("python.exe").exists():
+        return str(exe.with_name("python.exe"))
+    return str(exe)
+
+
+async def cmd_supervise(cfg, args) -> int:
+    from ottr.supervisor import Supervisor
+    child = [_console_python(), "-m", "ottr.cli", "--config", str(Path(args.config).resolve()),
+             "--log-file", str(cfg.data_dir / "logs" / "engine.log")]
+    if args.verbose:
+        child.append("-v")
+    child.append("run")
+    sup = Supervisor(child, cfg.data_dir, make_alerts(cfg.discord_webhook_url, cfg.alerts))
+    logger.info("supervisor starting for %s", cfg.data_dir)
+    return await sup.run()
+
+
+async def cmd_service(cfg, args) -> int:
+    from ottr import service
+    name = args.name
+    if args.action == "install":
+        spec = service.default_spec(args.config, name)
+        warns = service.preflight(cfg.council.analysts, cfg.discord_webhook_url)
+        if os.name != "nt" and not args.dry_run:
+            print("Task Scheduler is Windows-only; use --dry-run to see the task XML")
+            return 2
+        return service.install(spec, cfg.data_dir, dry_run=args.dry_run, warnings=warns)
+    if os.name != "nt":
+        print("Task Scheduler is Windows-only")
+        return 2
+    if args.action == "uninstall":
+        return service.uninstall(name, cfg.data_dir)
+    if args.action == "status":
+        rc = service.status(name)
+        print("engine health: `ottr status`")
+        return rc
+    if args.action == "start":
+        return service.start(name)
+    if args.action == "stop":
+        return service.stop(name, cfg.data_dir)
+    rc = service.stop(name, cfg.data_dir)  # restart
+    return rc or service.start(name)
+
+
+def _setup_logging(verbose: bool, log_file: Optional[Path], console: bool) -> None:
+    handlers: list = []
+    if log_file:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handlers.append(logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=LOG_MAX_BYTES, backupCount=LOG_BACKUPS, encoding="utf-8"))
+    if console and sys.stderr is not None:  # None under pythonw.exe
+        handlers.append(logging.StreamHandler())
+    if not handlers:
+        handlers.append(logging.NullHandler())
+    logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=handlers, force=True,
+                        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="ottr")
     ap.add_argument("--config", type=Path, default=cfgmod.DEFAULT_CONFIG)
+    ap.add_argument("--log-file", type=Path, help="log to this rotating file instead of stderr")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
     p = sub.add_parser("init")
@@ -218,18 +331,29 @@ def main(argv=None) -> int:
     g.add_argument("--fresh", action="store_true")
     g.add_argument("--import-v1", metavar="PATH")
     sub.add_parser("run")
+    sub.add_parser("supervise", help="run the engine and restart it whenever it exits")
+    p = sub.add_parser("service", help="manage the Windows scheduled task that runs `supervise`")
+    p.add_argument("action", choices=["install", "uninstall", "status", "start", "stop", "restart"])
+    p.add_argument("--name", default="OTTR Engine")
+    p.add_argument("--dry-run", action="store_true", help="install: print the task XML, register nothing")
     p = sub.add_parser("meeting")
     p.add_argument("--execute", action="store_true", help="act on the decision (else propose-only)")
-    sub.add_parser("status")
+    p = sub.add_parser("status")
+    p.add_argument("--json", action="store_true", help="machine-readable health report")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)
-    logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
-                        format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+
+    cfgmod.load_env_file(Path(os.environ.get("OTTR_ENV_FILE") or cfgmod.ROOT / ".env"))
     cfg = cfgmod.load(args.config)
-    fn = {"init": cmd_init, "run": cmd_run, "meeting": cmd_meeting, "status": cmd_status,
-          "check": cmd_check, "resume": cmd_resume}[args.cmd]
+    log_file = args.log_file
+    if args.cmd == "supervise" and log_file is None:
+        log_file = cfg.data_dir / "logs" / "supervisor.log"
+    # Under the supervisor the engine's stderr is a non-rotating capture file, so a
+    # --log-file run logs to the rotating file only; `supervise` also echoes to a console.
+    _setup_logging(args.verbose, log_file, console=log_file is None or args.cmd == "supervise")
+    fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
+          "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check, "resume": cmd_resume}[args.cmd]
     return asyncio.run(fn(cfg, args))
 
 

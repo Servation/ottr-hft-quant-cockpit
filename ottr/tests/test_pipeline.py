@@ -17,21 +17,12 @@ from ottr.engine.engine import Engine
 from ottr.engine.executor import Executor
 from ottr.ledger.book import Ledger
 from ottr.risk.types import Intent
-from tests.fakes import FakeMarket, ScriptedModel, analyst_reply
-
-PRICES = {"BTC": 80000.0, "ETH": 2400.0, "SOL": 100.0, "XRP": 1.3, "ADA": 0.22,
-          "DOGE": 0.08, "LINK": 12.0, "AVAX": 9.8}
+from tests.fakes import PRICES, FakeMarket, ScriptedModel, analyst_reply, council_for
 
 
 @pytest.fixture
 def market(cfg):
     return FakeMarket(cfg, PRICES)
-
-
-def council_for(cfg, analyst_replies, chair_reply):
-    analysts = {n: ScriptedModel(n, [r]) for n, r in zip(("claude", "gpt", "gemini"), analyst_replies)}
-    return Council(analysts, ScriptedModel("chair", [chair_reply]), cfg.universe,
-                   min_analysts=2, max_trades=3)
 
 
 def engine(cfg, store, market, council=None):

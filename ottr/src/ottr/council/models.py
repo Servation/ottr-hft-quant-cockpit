@@ -16,6 +16,8 @@ import shutil
 import tempfile
 from typing import Any, Callable, Optional
 
+from ottr.proc import NO_WINDOW, kill_tree
+
 logger = logging.getLogger(__name__)
 
 
@@ -33,12 +35,15 @@ class ModelAdapter:
 
 
 async def _run(argv, stdin_text: Optional[str], timeout: float, cwd: str) -> tuple:
+    # No console window: under the supervisor the engine runs hidden, and a console
+    # child would otherwise pop a window on the desktop at every meeting.
     proc = await asyncio.create_subprocess_exec(
         *argv,
         stdin=asyncio.subprocess.PIPE if stdin_text is not None else asyncio.subprocess.DEVNULL,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
         cwd=cwd,
+        creationflags=NO_WINDOW,
     )
     try:
         out, err = await asyncio.wait_for(
@@ -46,9 +51,13 @@ async def _run(argv, stdin_text: Optional[str], timeout: float, cwd: str) -> tup
             timeout=timeout,
         )
     except asyncio.TimeoutError:
-        proc.kill()
+        kill_tree(proc)
         await proc.wait()
         raise ModelError(f"timed out after {timeout:.0f}s: {argv[0]}")
+    except asyncio.CancelledError:
+        # Engine shutdown mid-meeting: don't leave a model CLI running on its own.
+        kill_tree(proc)
+        raise
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 

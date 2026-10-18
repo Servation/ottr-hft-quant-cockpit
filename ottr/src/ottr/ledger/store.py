@@ -7,6 +7,10 @@ for its whole life; any other process can only open the DB read-only. Why: v1 ke
 in JSON files that any importer could rewrite (and did), and a corrupt file was silently
 replaced by a fresh book. SQLite transactions make a fill + position + cash + order
 status + audit row commit together or not at all.
+
+Schema changes ship as numbered MIGRATIONS so an existing book upgrades in place (the
+live ledger is never recreated), and a reader tolerates a not-yet-migrated file so
+`ottr status` keeps working while an older engine still runs.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -60,12 +64,25 @@ CREATE INDEX IF NOT EXISTS audit_kind_ts ON audit (kind, ts);
 CREATE TABLE IF NOT EXISTS candles (
     asset TEXT NOT NULL, ts INTEGER NOT NULL, close REAL NOT NULL, PRIMARY KEY (asset, ts));
 CREATE TABLE IF NOT EXISTS heartbeats (
-    task TEXT PRIMARY KEY, ts REAL NOT NULL, ok INTEGER NOT NULL, detail TEXT);
+    task TEXT PRIMARY KEY, ts REAL NOT NULL, ok INTEGER NOT NULL, detail TEXT, ok_ts REAL);
 """
+
+# version -> statements that upgrade a database from version-1. SCHEMA above is always
+# the latest shape, so a fresh database is created current and skips these.
+MIGRATIONS: Dict[int, Tuple[str, ...]] = {
+    # ok_ts = last time the task SUCCEEDED. `ts` alone can't tell "running but failing
+    # every tick" from healthy, because a failing tick still writes a heartbeat.
+    2: ("ALTER TABLE heartbeats ADD COLUMN ok_ts REAL",
+        "UPDATE heartbeats SET ok_ts = ts WHERE ok = 1"),
+}
 
 
 class LockError(RuntimeError):
     """Another process already holds the writer lock."""
+
+
+class SchemaError(RuntimeError):
+    """The database was written by a newer OTTR than this code understands."""
 
 
 class _FileLock:
@@ -132,8 +149,7 @@ class Store:
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=FULL")  # a fill must survive a power cut
             self.conn.executescript(SCHEMA)
-            if self.meta("schema_version") is None:
-                self.set_meta("schema_version", str(SCHEMA_VERSION))
+            self._migrate()
         else:
             if not self.path.exists():
                 raise FileNotFoundError(f"no OTTR database at {self.path} (run `ottr init`)")
@@ -141,6 +157,24 @@ class Store:
                                         isolation_level=None)
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=5000")
+
+    def _migrate(self) -> None:
+        raw = self.meta("schema_version")
+        if raw is None:  # fresh database: SCHEMA already created the latest shape
+            self.set_meta("schema_version", str(SCHEMA_VERSION))
+            return
+        have = int(raw)
+        if have > SCHEMA_VERSION:
+            self.close()
+            raise SchemaError(f"{self.path} is schema v{have}; this OTTR only knows v{SCHEMA_VERSION}")
+        if have == SCHEMA_VERSION:
+            return
+        with self.tx() as c:
+            for v in range(have + 1, SCHEMA_VERSION + 1):
+                for stmt in MIGRATIONS.get(v, ()):
+                    c.execute(stmt)
+            c.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(SCHEMA_VERSION),))
+        self.audit("schema_migrated", from_version=have, to_version=SCHEMA_VERSION)
 
     def close(self) -> None:
         self.conn.close()
@@ -177,6 +211,21 @@ class Store:
         finally:
             self._depth = 0
 
+    @contextmanager
+    def snapshot(self) -> Iterator[sqlite3.Connection]:
+        """Consistent multi-query read on a read-only connection (one WAL snapshot).
+
+        Without it each SELECT sees the latest commit, so e.g. cash and positions read a
+        moment apart could straddle a fill and show a book that never existed.
+        """
+        if self.writer:
+            raise PermissionError("snapshot() is for read-only stores; the writer uses tx()")
+        self.conn.execute("BEGIN")
+        try:
+            yield self.conn
+        finally:
+            self.conn.execute("COMMIT")
+
     # -- small helpers ------------------------------------------------------------------
     def meta(self, key: str) -> Optional[str]:
         r = self.conn.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
@@ -211,14 +260,21 @@ class Store:
                       "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, dumps(value)))
 
     def heartbeat(self, task: str, ok: bool = True, detail: str = "") -> None:
+        now = time.time()
         with self.tx() as c:
-            c.execute("INSERT INTO heartbeats(task,ts,ok,detail) VALUES(?,?,?,?) "
-                      "ON CONFLICT(task) DO UPDATE SET ts=excluded.ts, ok=excluded.ok, detail=excluded.detail",
-                      (task, time.time(), int(ok), detail[:500]))
+            c.execute("INSERT INTO heartbeats(task,ts,ok,detail,ok_ts) VALUES(?,?,?,?,?) "
+                      "ON CONFLICT(task) DO UPDATE SET ts=excluded.ts, ok=excluded.ok, "
+                      "detail=excluded.detail, ok_ts=COALESCE(excluded.ok_ts, heartbeats.ok_ts)",
+                      (task, now, int(ok), detail[:500], now if ok else None))
 
     def heartbeats(self) -> Dict[str, Dict[str, Any]]:
-        return {r[0]: {"ts": r[1], "ok": bool(r[2]), "detail": r[3]}
-                for r in self.conn.execute("SELECT task,ts,ok,detail FROM heartbeats")}
+        """task -> {ts (last report), ok, detail, ok_ts (last success, None if never)}."""
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(heartbeats)")}
+        if "ok_ts" not in cols:  # a v1 file an older engine still holds: best effort
+            return {r[0]: {"ts": r[1], "ok": bool(r[2]), "detail": r[3], "ok_ts": r[1] if r[2] else None}
+                    for r in self.conn.execute("SELECT task,ts,ok,detail FROM heartbeats")}
+        return {r[0]: {"ts": r[1], "ok": bool(r[2]), "detail": r[3], "ok_ts": r[4]}
+                for r in self.conn.execute("SELECT task,ts,ok,detail,ok_ts FROM heartbeats")}
 
     # -- candles (CandleArchive) ----------------------------------------------------------
     def load_candles(self, asset: str) -> List[Tuple[int, float]]:

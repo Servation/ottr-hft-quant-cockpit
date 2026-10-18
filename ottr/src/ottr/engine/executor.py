@@ -19,6 +19,7 @@ import time
 from typing import Awaitable, Callable, Optional
 
 from ottr.config import Config
+from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store, dumps
 from ottr.market.service import MarketData, build_view
@@ -38,9 +39,11 @@ Notifier = Callable[[str, dict], Awaitable[None]]
 
 class Executor:
     def __init__(self, cfg: Config, store: Store, ledger: Ledger, market: MarketData,
-                 notify: Optional[Notifier] = None) -> None:
+                 notify: Optional[Notifier] = None, kill: Optional[KillSwitch] = None) -> None:
         self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
         self.notify = notify
+        # Read at every decision, so engaging the switch stops the very next fill.
+        self.kill = kill or KillSwitch(cfg, store)
         self.queue: asyncio.PriorityQueue = asyncio.PriorityQueue()
         self._seq = itertools.count()
 
@@ -72,7 +75,7 @@ class Executor:
                                       (intent.idem_key,)).fetchone()
         # A dry-run verdict is only final while we are still in dry run; otherwise a stop
         # first seen in dry run could never execute for real once trading is switched on.
-        final = ("filled", "rejected", "dry_run") if self.cfg.trading.dry_run else ("filled", "rejected")
+        final = ("filled", "rejected", "dry_run") if self.kill.engaged else ("filled", "rejected")
         if row and row[0] in final:
             v = json.loads(row[1]) if row[1] else {}
             return Verdict(False, intent.asset, intent.side, f"duplicate:{row[0]}",
@@ -139,7 +142,7 @@ class Executor:
                         verdict.reason, "; ".join(verdict.notes))
             return verdict
 
-        if self.cfg.trading.dry_run:
+        if self.kill.engaged:
             with self.store.tx():
                 self._finish(intent, "dry_run", verdict)
                 self.store.audit("would_fill", idem_key=intent.idem_key, origin=intent.origin,
