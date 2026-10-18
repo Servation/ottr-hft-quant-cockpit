@@ -67,30 +67,56 @@ class Portfolio:
     # ── Persistence ──────────────────────────────────────────────
 
     def load(self) -> None:
-        """Load portfolio state from disk, creating default if missing."""
+        """Load portfolio state from disk, creating default if missing.
+
+        Loading is read-only unless something actually needs fixing. WHY: this module
+        builds a singleton at import time, so a save-on-every-load meant ANY process
+        importing bot.portfolio (evals, host scripts, the council prototype) rewrote the
+        live file, racing the bridge, which is supposed to be the only writer.
+        """
         if _PORTFOLIO_FILE.exists():
+            # An OSError here (lock, permissions) propagates on purpose: the file exists,
+            # so resetting to a fresh book and saving would destroy the real portfolio.
+            with open(_PORTFOLIO_FILE, "r", encoding="utf-8") as f:
+                raw = f.read()
             try:
-                with open(_PORTFOLIO_FILE, "r", encoding="utf-8") as f:
-                    self._state = json.load(f)
-                # Healing/upgrade check
-                if "total_pnl" not in self._state:
-                    self._state["total_pnl"] = 0.0
-                if "trade_history" not in self._state:
-                    self._state["trade_history"] = []
-                if "min_trade_usd" not in self._state:
-                    self._state["min_trade_usd"] = _DEFAULT_MIN_TRADE_USD
-                if "orders" not in self._state:
-                    self._state["orders"] = []
+                self._state = json.loads(raw)
+            except json.JSONDecodeError as e:
+                self._quarantine_corrupt(e)
+                return
+            # Healing/upgrade check: persist only when a key was actually added.
+            healed = False
+            for key, default in (
+                ("total_pnl", 0.0),
+                ("trade_history", []),
+                ("min_trade_usd", _DEFAULT_MIN_TRADE_USD),
+                ("orders", []),
+            ):
+                if key not in self._state:
+                    self._state[key] = default
+                    healed = True
+            if healed:
                 self.save()
-                logger.info("Loaded portfolio from %s", _PORTFOLIO_FILE)
-            except (json.JSONDecodeError, OSError) as e:
-                logger.error("Failed to load portfolio (%s), resetting to default", e)
-                self._state = _default_state()
-                self.save()
+            logger.info("Loaded portfolio from %s", _PORTFOLIO_FILE)
         else:
             logger.info("No existing portfolio found, initialising with $%.2f", _STARTING_BALANCE)
             self._state = _default_state()
             self.save()
+
+    def _quarantine_corrupt(self, err: Exception) -> None:
+        """Move an unparseable state file aside, then start from a default book.
+
+        WHY: the old path reset AND saved over the corrupt file, erasing the only copy
+        of the real holdings. Keeping the bytes lets an operator recover them by hand.
+        """
+        dest = _PORTFOLIO_FILE.with_name(f"{_PORTFOLIO_FILE.name}.corrupt-{int(time.time())}")
+        os.replace(str(_PORTFOLIO_FILE), str(dest))
+        logger.error("Corrupt portfolio file (%s); moved to %s and reset to default", err, dest)
+        from bot.audit import audit_event
+        audit_event("state_quarantined", file=_PORTFOLIO_FILE.name, moved_to=dest.name,
+                    error=str(err)[:200])
+        self._state = _default_state()
+        self.save()
 
     def save(self) -> None:
         """Atomically persist state: write temp file then os.replace()."""
