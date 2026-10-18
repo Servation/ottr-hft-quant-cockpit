@@ -1,0 +1,74 @@
+"""
+Council tests: JSON extraction, schema rules, repair retry, anonymization, code-side rules.
+"""
+
+import pytest
+
+from ottr.council.council import Council, compute_tally, enforce_rules
+from ottr.council.models import ModelError, ask_json, extract_json
+from ottr.council.schemas import SchemaError, analyst_validator, chair_validator
+from tests.fakes import ScriptedModel, analyst_reply
+
+U = ["BTC", "ETH"]
+
+
+def test_extract_json_tolerates_fences_rejects_nan():
+    assert extract_json('ok\n```json\n{"a": 1}\n```') == {"a": 1}
+    with pytest.raises(ValueError):
+        extract_json('{"conviction": NaN}')
+    with pytest.raises(ValueError):
+        extract_json("no json")
+
+
+def test_analyst_schema_requires_every_asset_once():
+    v = analyst_validator(U)
+    ok = analyst_reply(U)
+    assert [a["asset"] for a in v(ok)["assets"]] == U
+    ok["assets"].pop()
+    with pytest.raises(SchemaError):
+        v(ok)
+    with pytest.raises(SchemaError):
+        v(analyst_reply(U, {"BTC": ("MOON", 0.5)}))
+    with pytest.raises(SchemaError):
+        v(analyst_reply(U, {"BTC": ("BUY", 1.5)}))
+
+
+def test_chair_schema_has_no_sizing_and_bounds():
+    v = chair_validator(U, max_trades=1)
+    assert v({"summary": "s", "trades": [{"action": "buy", "asset": "eth", "conviction": 0.5,
+                                          "reasoning": "r"}]})["trades"][0]["asset"] == "ETH"
+    for t in ([{"action": "BUY", "asset": "ETH", "conviction": 0.5, "usd_amount": 5, "reasoning": "r"}],
+              [{"action": "SELL", "asset": "ETH", "fraction_of_position": 0, "reasoning": "r"}],
+              [{"action": "BUY", "asset": "DOGE", "conviction": 0.5, "reasoning": "r"}],
+              [{"action": "BUY", "asset": "ETH", "conviction": True, "reasoning": "r"}]):
+        with pytest.raises(SchemaError):
+            v({"summary": "s", "trades": t})
+
+
+async def test_ask_json_repairs_once_then_gives_up():
+    m = ScriptedModel("x", ["garbage", analyst_reply(U)])
+    assert (await ask_json(m, "p", analyst_validator(U)))["overall_view"] == "test view"
+    assert "rejected" in m.prompts[1]
+    with pytest.raises(ModelError):
+        await ask_json(ScriptedModel("x", ["bad", "bad"]), "p", analyst_validator(U))
+
+
+def test_tally_and_rules():
+    reps = {n: analyst_validator(U)(analyst_reply(U, {"BTC": (s, 0.6)}))
+            for n, s in (("a", "BUY"), ("b", "BUY"), ("c", "SELL"))}
+    t = compute_tally(reps, U)
+    assert t["assets"]["BTC"]["counts"] == {"BUY": 2, "SELL": 1} and t["assets"]["BTC"]["split"]
+    decision = {"trades": [{"action": "BUY", "asset": "BTC"}, {"action": "BUY", "asset": "ETH"},
+                           {"action": "SELL", "asset": "ETH"}]}
+    kept, dropped = enforce_rules(decision, reps, held=set())
+    assert kept == [{"action": "BUY", "asset": "BTC"}]
+    assert [w for _, w in dropped] == ["no analyst rated it BUY", "not held (desk is long-only)"]
+
+
+async def test_chair_sees_anonymized_reports():
+    chair = ScriptedModel("chair", [{"summary": "s", "trades": []}])
+    analysts = {n: ScriptedModel(n, [analyst_reply(U)]) for n in ("claude", "gpt", "gemini")}
+    rec = await Council(analysts, chair, U).run("ctx", held=set())
+    p = chair.prompts[0].lower()
+    assert "analyst a" in p and not any(n in p for n in ("claude", "gpt", "gemini"))
+    assert rec["labels"] == {"claude": "A", "gemini": "B", "gpt": "C"}  # kept internally

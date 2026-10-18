@@ -51,3 +51,6 @@ discord-bridge/data/*
 
 # Scratch Scripts
 test_funding.py
+
+# OTTR v2 runtime state (SQLite ledger, lock file)
+ottr/data/

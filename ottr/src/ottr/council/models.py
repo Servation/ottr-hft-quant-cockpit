@@ -131,7 +131,10 @@ class GeminiCLI(ModelAdapter):
 
 def extract_json(text: str) -> Any:
     """Pull the first JSON object out of model text (tolerates fences and chatter)."""
-    dec = json.JSONDecoder()
+    def _no_nan(token: str):
+        raise ValueError(f"non-finite number {token} in model output")
+
+    dec = json.JSONDecoder(parse_constant=_no_nan)
     idx = text.find("{")
     while idx != -1:
         try:
