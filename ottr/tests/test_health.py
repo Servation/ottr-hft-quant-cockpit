@@ -121,37 +121,56 @@ def test_heartbeat_ok_ts_survives_failures(store):
     assert h["ok"] is False and h["ok_ts"] == ok_ts and h["ts"] > ok_ts
 
 
-def _v1_db(path):
-    """A database exactly as P1 (schema v1) left it."""
+def _crypto_book(path, version):
+    """A database as the crypto desk left it (schema v1 or v2)."""
     c = sqlite3.connect(path)
-    c.executescript("""
+    c.executescript(f"""
         CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-        INSERT INTO meta VALUES ('schema_version', '1');
-        CREATE TABLE heartbeats (task TEXT PRIMARY KEY, ts REAL NOT NULL, ok INTEGER NOT NULL, detail TEXT);
-        INSERT INTO heartbeats VALUES ('risk', 100.0, 1, ''), ('council', 200.0, 0, 'abstain');
+        INSERT INTO meta VALUES ('schema_version', '{version}');
+        CREATE TABLE account (id INTEGER PRIMARY KEY, cash TEXT, realized_pnl TEXT, fees TEXT);
+        INSERT INTO account VALUES (1, '9876.54000000', '0', '0');
     """)
     c.commit()
     c.close()
 
 
-def test_v1_database_migrates_in_place(tmp_path):
+@pytest.mark.parametrize("version", [1, 2])
+def test_a_crypto_book_is_refused_and_left_untouched(tmp_path, version):
+    # The US desk starts a fresh v3 book; the crypto book is archived, never converted.
+    # The version must be read before any table is created, so the file comes out unchanged.
     db = tmp_path / "ottr.db"
-    _v1_db(db)
-    ro = Store(db, writer=False)  # an older engine still owns it: readers must cope
-    assert ro.heartbeats()["risk"]["ok_ts"] == 100.0 and ro.heartbeats()["council"]["ok_ts"] is None
-    ro.close()
-    s = Store(db, writer=True)
+    _crypto_book(db, version)
+    before = db.read_bytes()
+    with pytest.raises(SchemaError, match=f"schema v{version} book"):
+        Store(db, writer=True)
+    with pytest.raises(SchemaError, match="was not modified"):
+        Store(db, writer=False)
+    assert db.read_bytes() == before
+    tables = {r[0] for r in sqlite3.connect(db).execute("SELECT name FROM sqlite_master")}
+    assert "lots" not in tables and "positions" not in tables
+    # The refused open released the writer lock: a fresh book can still be made beside it.
+    Store(tmp_path / "fresh.db", writer=True).close()
+    Store(db.with_name("other.db"), writer=True).close()
+
+
+def test_a_non_ottr_database_is_refused(tmp_path):
+    db = tmp_path / "ottr.db"
+    c = sqlite3.connect(db)
+    c.execute("CREATE TABLE something (x)")
+    c.commit()
+    c.close()
+    with pytest.raises(SchemaError, match="not an OTTR database"):
+        Store(db, writer=True)
+
+
+def test_a_fresh_book_is_created_at_the_current_version(tmp_path):
+    s = Store(tmp_path / "ottr.db", writer=True)
     try:
-        assert s.meta("schema_version") == str(SCHEMA_VERSION)
-        h = s.heartbeats()
-        assert h["risk"]["ok_ts"] == 100.0 and h["council"]["ok_ts"] is None
-        assert s.audits("schema_migrated")[0]["from_version"] == 1
-        Ledger(s).initialize(10000)  # the rest of the schema was created alongside
+        assert s.meta("schema_version") == str(SCHEMA_VERSION) == "3"
+        Ledger(s).initialize(10000)
     finally:
         s.close()
-    s = Store(db, writer=True)  # reopening is a no-op
-    assert len(s.audits("schema_migrated")) == 1
-    s.close()
+    Store(tmp_path / "ottr.db", writer=True).close()  # reopening a current book is a no-op
 
 
 def test_newer_schema_is_refused_not_downgraded(tmp_path):

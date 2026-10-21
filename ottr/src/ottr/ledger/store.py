@@ -5,12 +5,18 @@ What it does: owns the schema, transactions, and small helpers (audit, heartbeat
 key/value risk state, candles, equity, meetings). The writer holds an OS-level lock file
 for its whole life; any other process can only open the DB read-only. Why: v1 kept state
 in JSON files that any importer could rewrite (and did), and a corrupt file was silently
-replaced by a fresh book. SQLite transactions make a fill + position + cash + order
+replaced by a fresh book. SQLite transactions make a fill + lots + position + cash + order
 status + audit row commit together or not at all.
 
-Schema changes ship as numbered MIGRATIONS so an existing book upgrades in place (the
-live ledger is never recreated), and a reader tolerates a not-yet-migrated file so
-`ottr status` keeps working while an older engine still runs.
+Schema v3 is the US-markets book: FIFO tax lots (`lots`, `lot_closures`), cash in cents,
+and fills that carry their trade date, fee breakdown and quote snapshot. v1 and v2 were
+the crypto book, which is archived at the cutover rather than converted: its positions,
+precision and fee model don't map onto equities. A v3 store refuses them, and it reads
+the version BEFORE creating any table, so refusing a file never changes it.
+
+Until the cutover no v3 database exists outside tests, so the PRs leading up to it extend
+SCHEMA directly (each table arrives with the code that uses it). After the cutover every
+change ships as a numbered MIGRATION so the live book upgrades in place.
 """
 
 from __future__ import annotations
@@ -24,7 +30,8 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+FIRST_SUPPORTED_VERSION = 3   # v1/v2 were the crypto book: archived, never converted
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -32,17 +39,35 @@ CREATE TABLE IF NOT EXISTS account (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     cash TEXT NOT NULL, realized_pnl TEXT NOT NULL, fees TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS cash_events (
-    id INTEGER PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL,
+    id INTEGER PRIMARY KEY, ts REAL NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL,
     asset TEXT, qty TEXT, amount TEXT NOT NULL, note TEXT);
+-- positions: per-asset summary of the open lots (qty, cost), plus the risk monitor's
+-- high-water mark. Kept in step with `lots` inside every fill's transaction.
 CREATE TABLE IF NOT EXISTS positions (
     asset TEXT PRIMARY KEY, qty TEXT NOT NULL, cost TEXT NOT NULL,
     high_water REAL NOT NULL, opened_ts REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS fills (
-    id INTEGER PRIMARY KEY, ts REAL NOT NULL, idem_key TEXT NOT NULL UNIQUE,
+    id INTEGER PRIMARY KEY, ts REAL NOT NULL, day TEXT NOT NULL, idem_key TEXT NOT NULL UNIQUE,
     asset TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),
     qty TEXT NOT NULL, price TEXT NOT NULL, notional TEXT NOT NULL, fee TEXT NOT NULL,
-    realized_pnl TEXT NOT NULL, quote_source TEXT NOT NULL, origin TEXT NOT NULL,
-    ref TEXT, reason TEXT);
+    fee_detail TEXT NOT NULL, realized_pnl TEXT NOT NULL, quote_source TEXT NOT NULL,
+    quote TEXT, origin TEXT NOT NULL, ref TEXT, reason TEXT);
+-- One lot per BUY fill (open_fill_id) or per holding brought in at `ottr init` (NULL).
+-- qty/cost are as opened; the *_remaining columns shrink as SELLs consume lots oldest
+-- first (FIFO).
+CREATE TABLE IF NOT EXISTS lots (
+    id INTEGER PRIMARY KEY, asset TEXT NOT NULL, open_fill_id INTEGER REFERENCES fills(id),
+    opened_ts REAL NOT NULL, opened_day TEXT NOT NULL,
+    qty TEXT NOT NULL, cost TEXT NOT NULL, qty_remaining TEXT NOT NULL,
+    cost_remaining TEXT NOT NULL, closed_ts REAL);
+CREATE INDEX IF NOT EXISTS lots_asset ON lots (asset, id);
+-- The part of one lot that one SELL consumed, with the proceeds and cost allocated to it.
+CREATE TABLE IF NOT EXISTS lot_closures (
+    id INTEGER PRIMARY KEY, lot_id INTEGER NOT NULL REFERENCES lots(id),
+    fill_id INTEGER NOT NULL REFERENCES fills(id), day TEXT NOT NULL,
+    qty TEXT NOT NULL, proceeds TEXT NOT NULL, cost TEXT NOT NULL, realized TEXT NOT NULL,
+    term TEXT NOT NULL CHECK (term IN ('short','long')));
+CREATE INDEX IF NOT EXISTS lot_closures_fill ON lot_closures (fill_id);
 CREATE TABLE IF NOT EXISTS orders (
     idem_key TEXT PRIMARY KEY, ts REAL NOT NULL, origin TEXT NOT NULL, asset TEXT NOT NULL,
     side TEXT NOT NULL, intent TEXT NOT NULL, status TEXT NOT NULL,
@@ -69,17 +94,11 @@ CREATE TABLE IF NOT EXISTS screens (
     id TEXT PRIMARY KEY, ts REAL NOT NULL, result TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS screens_ts ON screens (ts);
 """
-# `screens` is additive: the writer's SCHEMA run creates it on an existing book, and an older
-# engine simply ignores it, so it needs no schema-version bump (which would refuse a rollback).
 
-# version -> statements that upgrade a database from version-1. SCHEMA above is always
-# the latest shape, so a fresh database is created current and skips these.
-MIGRATIONS: Dict[int, Tuple[str, ...]] = {
-    # ok_ts = last time the task SUCCEEDED. `ts` alone can't tell "running but failing
-    # every tick" from healthy, because a failing tick still writes a heartbeat.
-    2: ("ALTER TABLE heartbeats ADD COLUMN ok_ts REAL",
-        "UPDATE heartbeats SET ok_ts = ts WHERE ok = 1"),
-}
+# version -> statements that upgrade a database from version-1. SCHEMA above is always the
+# latest shape, so a fresh database is created current and skips these. Empty until the
+# first post-cutover change (see the module docstring).
+MIGRATIONS: Dict[int, Tuple[str, ...]] = {}
 
 
 class LockError(RuntimeError):
@@ -87,7 +106,31 @@ class LockError(RuntimeError):
 
 
 class SchemaError(RuntimeError):
-    """The database was written by a newer OTTR than this code understands."""
+    """The file isn't a book this code can open: a newer version, an archived crypto book
+    (v1/v2), or not an OTTR database at all."""
+
+
+def read_version(conn: sqlite3.Connection, path: Path) -> Optional[int]:
+    """The file's schema version, or None for an empty (new) database. Reads only."""
+    tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    if not tables:
+        return None
+    if "meta" not in tables:
+        raise SchemaError(f"{path} is not an OTTR database (it has tables but no meta table)")
+    row = conn.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    if row is None:
+        raise SchemaError(f"{path} has no schema_version: not an OTTR book")
+    return int(row[0])
+
+
+def check_version(have: Optional[int], path: Path) -> None:
+    if have is None or FIRST_SUPPORTED_VERSION <= have <= SCHEMA_VERSION:
+        return
+    if have > SCHEMA_VERSION:
+        raise SchemaError(f"{path} is schema v{have}; this OTTR only knows up to v{SCHEMA_VERSION}")
+    raise SchemaError(
+        f"{path} is a schema v{have} book (the crypto desk). The US desk keeps a fresh v3 book: "
+        "archive this file and run `ottr init`. The file was not modified.")
 
 
 class _FileLock:
@@ -151,27 +194,35 @@ class Store:
             self._lock = _FileLock(self.path.with_suffix(".lock"))
             self._lock.acquire()
             self.conn = sqlite3.connect(self.path, isolation_level=None)
+            try:
+                # Version first: a file this code can't open must leave exactly as it came
+                # (no new tables, no WAL switch), so it can still be archived or rolled back.
+                have = read_version(self.conn, self.path)
+                check_version(have, self.path)
+            except BaseException:
+                self.close()
+                raise
             self.conn.execute("PRAGMA journal_mode=WAL")
             self.conn.execute("PRAGMA synchronous=FULL")  # a fill must survive a power cut
             self.conn.executescript(SCHEMA)
-            self._migrate()
+            self._migrate(have)
         else:
             if not self.path.exists():
                 raise FileNotFoundError(f"no OTTR database at {self.path} (run `ottr init`)")
             self.conn = sqlite3.connect(f"file:{self.path.as_posix()}?mode=ro", uri=True,
                                         isolation_level=None)
+            try:
+                check_version(read_version(self.conn, self.path), self.path)
+            except BaseException:
+                self.conn.close()
+                raise
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA busy_timeout=5000")
 
-    def _migrate(self) -> None:
-        raw = self.meta("schema_version")
-        if raw is None:  # fresh database: SCHEMA already created the latest shape
+    def _migrate(self, have: Optional[int]) -> None:
+        if have is None:  # fresh database: SCHEMA already created the latest shape
             self.set_meta("schema_version", str(SCHEMA_VERSION))
             return
-        have = int(raw)
-        if have > SCHEMA_VERSION:
-            self.close()
-            raise SchemaError(f"{self.path} is schema v{have}; this OTTR only knows v{SCHEMA_VERSION}")
         if have == SCHEMA_VERSION:
             return
         with self.tx() as c:
@@ -185,6 +236,7 @@ class Store:
         self.conn.close()
         if self._lock:
             self._lock.release()
+            self._lock = None
 
     def __enter__(self) -> "Store":
         return self
@@ -274,10 +326,6 @@ class Store:
 
     def heartbeats(self) -> Dict[str, Dict[str, Any]]:
         """task -> {ts (last report), ok, detail, ok_ts (last success, None if never)}."""
-        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(heartbeats)")}
-        if "ok_ts" not in cols:  # a v1 file an older engine still holds: best effort
-            return {r[0]: {"ts": r[1], "ok": bool(r[2]), "detail": r[3], "ok_ts": r[1] if r[2] else None}
-                    for r in self.conn.execute("SELECT task,ts,ok,detail FROM heartbeats")}
         return {r[0]: {"ts": r[1], "ok": bool(r[2]), "detail": r[3], "ok_ts": r[4]}
                 for r in self.conn.execute("SELECT task,ts,ok,detail,ok_ts FROM heartbeats")}
 
@@ -312,8 +360,5 @@ class Store:
                       (result["id"], result["ts"], dumps(result)))
 
     def latest_screen(self) -> Optional[Dict[str, Any]]:
-        try:
-            r = self.conn.execute("SELECT result FROM screens ORDER BY ts DESC LIMIT 1").fetchone()
-        except sqlite3.OperationalError:  # a reader on a book an older engine still holds
-            return None
+        r = self.conn.execute("SELECT result FROM screens ORDER BY ts DESC LIMIT 1").fetchone()
         return json.loads(r[0]) if r else None

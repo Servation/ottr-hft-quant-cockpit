@@ -40,7 +40,7 @@ from ottr import health
 from ottr.engine.engine import Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
-from ottr.ledger.store import LockError, Store
+from ottr.ledger.store import LockError, SchemaError, Store
 from ottr.market.service import MarketData
 from ottr.market.types import MarketDataError
 from ottr.notify import make_alerts
@@ -464,7 +464,13 @@ def main(argv=None) -> int:
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
           "chat": cmd_chat, "screen": cmd_screen, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
           "resume": cmd_resume}[args.cmd]
-    return asyncio.run(fn(cfg, args))
+    try:
+        return asyncio.run(fn(cfg, args))
+    except SchemaError as e:
+        # A book this version can't open (an archived crypto book, or a newer one): a
+        # plain message for a person, not a traceback. Exit 2, like a ledger problem.
+        print(f"ottr: {e}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":

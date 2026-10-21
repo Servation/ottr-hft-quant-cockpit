@@ -186,3 +186,18 @@ def test_screen_prints_the_ranking_and_stores_nothing(tmp_path, monkeypatch, cap
     assert not (tmp_path / "ottr.db").exists()
     assert cli.main(["screen", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["id"] == "s-test"
+
+
+def test_a_book_this_version_cannot_open_is_a_message_not_a_traceback(tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from ottr import cli
+    db = tmp_path / "ottr.db"
+    c = sqlite3.connect(db)
+    c.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); "
+                    "INSERT INTO meta VALUES ('schema_version', '2');")
+    c.commit()
+    c.close()
+    monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+    assert cli.main(["status"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("ottr: ") and "schema v2 book" in err and "Traceback" not in err
