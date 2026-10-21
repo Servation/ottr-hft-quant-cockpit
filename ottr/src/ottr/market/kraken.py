@@ -10,13 +10,13 @@ the candles the v1 backtests were run on.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from typing import Dict, List, Optional, Tuple
 
 import httpx
 
+from ottr.market import http
 from ottr.market.types import Quote
 
 logger = logging.getLogger(__name__)
@@ -31,7 +31,7 @@ PAIRS: Dict[str, str] = {
 }
 
 
-class KrakenError(RuntimeError):
+class KrakenError(http.HttpError):
     pass
 
 
@@ -50,40 +50,25 @@ class Kraken:
         self._retries = retries
         self._backoff = backoff
 
-    async def _once(self, client: httpx.AsyncClient, path: str, params: dict) -> Tuple[Optional[dict], Optional[str], bool]:
-        """One attempt -> (result, error, retryable)."""
-        try:
-            resp = await client.get(f"{BASE}/{path}", params=params)
-        except httpx.TransportError as e:
-            return None, f"transport: {e}", True
-        if resp.status_code == 429 or resp.status_code >= 500:
-            return None, f"HTTP {resp.status_code}", True
-        if resp.status_code >= 400:
-            return None, f"HTTP {resp.status_code}", False
-        try:
-            body = resp.json()
-        except ValueError:  # an HTML error page from a proxy/CDN: treat as an outage, not a crash
-            return None, "non-JSON response", True
-        errs = body.get("error") or []
+    @staticmethod
+    def _classify(resp: httpx.Response) -> http.Classified:
+        """Kraken wraps results as {"error": [...], "result": {...}}; its "Rate limit",
+        "Unavailable" and "Busy" errors are transient, anything else is a real failure."""
+        result, err, retryable = http.classify_json(resp)
+        if err is not None:
+            return result, err, retryable
+        errs = (result or {}).get("error") or []
         if errs:
             msg = "; ".join(errs)
             return None, msg, any(t in msg for t in ("Rate limit", "Unavailable", "Busy"))
-        return body.get("result") or {}, None, False
+        return (result or {}).get("result") or {}, None, False
 
     async def _get(self, path: str, params: dict) -> dict:
         client = self._client or httpx.AsyncClient(timeout=10.0)
         try:
-            delay = self._backoff
-            for attempt in range(self._retries + 1):
-                result, err, retryable = await self._once(client, path, params)
-                if err is None:
-                    return result
-                if not retryable or attempt >= self._retries:
-                    raise KrakenError(f"{path} failed: {err}")
-                logger.warning("Kraken %s attempt %d failed (%s); retrying", path, attempt + 1, err)
-                await asyncio.sleep(delay)
-                delay *= 2
-            raise KrakenError(f"{path} failed")  # unreachable
+            return await http.get_json(client, f"{BASE}/{path}", params, classify=self._classify,
+                                       retries=self._retries, backoff=self._backoff,
+                                       name=f"Kraken {path}", error=KrakenError)
         finally:
             if self._client is None:
                 await client.aclose()

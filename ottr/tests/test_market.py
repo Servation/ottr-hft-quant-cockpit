@@ -203,3 +203,42 @@ async def test_market_data_uses_the_configured_pair_for_an_extra_asset(cfg):
 
     await MarketData(c, kraken=Recording(), fallback=no_fallback).quotes(force=True)
     assert seen == {"BTC": "XBTUSD", "NEAR": "NEARUSD"}
+
+
+# ---- US-market foundations: annualization, date-aligned correlation, types ---------------
+
+def test_vol_annualizes_by_trading_days_when_asked():
+    closes = [100, 101, 99.5, 102, 101.2, 103, 102.1]
+    crypto = ind.annualized_vol(closes)
+    stocks = ind.annualized_vol(closes, periods_per_year=ind.TRADING_DAYS)
+    assert stocks == pytest.approx(crypto * math.sqrt(252 / 365))
+
+
+def test_aligned_correlation_pairs_returns_by_date():
+    from datetime import date
+    days = [date(2026, 11, d) for d in (20, 23, 24, 25, 27, 30)]
+    a = list(zip(days, [100, 102, 101, 103, 102, 104]))
+    b_full = list(zip(days, [50, 51, 50.5, 51.5, 51, 52]))       # moves with a, day for day
+    assert ind.aligned_return_correlation(a, b_full) == pytest.approx(1.0, abs=1e-6)
+    # b is missing the 24th (a halt). By position its moves shift a day against a's; by
+    # date the 23rd->25th move lines up with a's own 23rd->25th move.
+    b_gap = [r for r in b_full if r[0] != date(2026, 11, 24)]
+    assert ind.aligned_return_correlation(a, b_gap) > 0.9
+    assert ind.return_correlation([c for _, c in a], [c for _, c in b_gap]) < 0.9
+
+
+def test_aligned_correlation_needs_enough_common_dates():
+    from datetime import date
+    a = [(date(2026, 1, d), 100.0 + d) for d in (5, 6, 7)]
+    assert ind.aligned_return_correlation(a, a) is None  # only 2 returns
+
+
+def test_bar_rejects_impossible_prices_and_quote_defaults_to_live():
+    from datetime import date
+    from ottr.market.types import BASIS_LIVE, Bar
+    Bar(date(2026, 1, 2), 10, 11, 9.5, 10.5, 1000)
+    with pytest.raises(ValueError):
+        Bar(date(2026, 1, 2), 10, 9, 9.5, 10.5, 1000)  # high below open
+    with pytest.raises(ValueError):
+        Bar(date(2026, 1, 2), 10, 11, 9.5, 10.5, -1)
+    assert q("SPY", 500).basis == BASIS_LIVE
