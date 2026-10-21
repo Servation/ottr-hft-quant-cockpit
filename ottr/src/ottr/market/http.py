@@ -43,14 +43,22 @@ def classify_json(resp: httpx.Response) -> Classified:
         return None, "non-JSON response", True
 
 
-def retry_after(resp: Optional[httpx.Response]) -> Optional[float]:
-    """Seconds a server asked us to wait (Retry-After in seconds), if it said."""
+def retry_after(resp: Optional[httpx.Response], now: Optional[float] = None) -> Optional[float]:
+    """Seconds a server asked us to wait, if it said: Retry-After (seconds), or Alpaca's
+    X-RateLimit-Reset (the epoch second the rate window resets)."""
     if resp is None:
         return None
     try:
         return max(0.0, float(resp.headers.get("retry-after", "")))
     except ValueError:
+        pass
+    if resp.status_code != 429:  # Alpaca sends its reset header on every reply, not just 429s
         return None
+    try:
+        reset = float(resp.headers.get("x-ratelimit-reset", ""))
+    except ValueError:
+        return None
+    return max(0.0, reset - (time.time() if now is None else now))
 
 
 class RateLimiter:
@@ -91,8 +99,9 @@ async def get_json(client: httpx.AsyncClient, url: str, params: Optional[dict] =
                    retries: int = 3, backoff: float = 1.0, limiter: Optional[RateLimiter] = None,
                    headers: Optional[dict] = None, name: str = "request",
                    error: Type[HttpError] = HttpError,
-                   sleep: Callable[[float], Awaitable[None]] = asyncio.sleep) -> Any:
+                   sleep: Optional[Callable[[float], Awaitable[None]]] = None) -> Any:
     """GET `url` and return the classified result, or raise `error` once retries run out."""
+    sleep = sleep or asyncio.sleep  # resolved per call, so tests can stand in a fake sleep
     delay = backoff
     for attempt in range(retries + 1):
         if limiter is not None:
