@@ -57,6 +57,14 @@ class Report:
         return 2 if self.failed else 1 if self.degraded else 0
 
 
+def _short(text: str, width: int = 40) -> str:
+    """Trim at a word boundary, so a long fund name never ends mid-word."""
+    if len(text) <= width:
+        return text
+    cut = text[:width - 3].rsplit(" ", 1)[0].rstrip(" ,-")
+    return cut + "..."
+
+
 def _et(ts: float) -> str:
     return datetime.fromtimestamp(ts, tz=ET).strftime("%a %Y-%m-%d %H:%M ET")
 
@@ -108,15 +116,16 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
         if not a.tradable or a.status != "active":
             r.warn(f"{sym}: not tradable on Alpaca (status {a.status})")
         else:
-            r.ok(f"{sym}: {a.name[:40]} on {a.exchange}, {'fractional' if a.fractionable else 'whole shares only'}")
+            r.ok(f"{sym}: {_short(a.name)} on {a.exchange}, {'fractional' if a.fractionable else 'whole shares only'}")
 
-    # Quotes: the same verdicts the desk will act on. Outside a session every IEX quote is
-    # old, so that is informational there, a problem only while the market is open.
+    # Quotes: the same verdicts the desk will act on. Outside a session IEX quotes go stale,
+    # one-sided or wide, so there they are summarized in one line, not judged per symbol.
     try:
         snaps = await alpaca.snapshots(symbols)
     except AlpacaError as e:
         r.fail(f"snapshots: {e}")
         snaps = {}
+    closed_reasons: dict = {}
     for sym in symbols:
         q, why = check_quote(sym, snaps.get(sym), now)
         if q is not None:
@@ -125,7 +134,11 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
         elif clk.is_open:
             r.warn(f"{sym}: no usable quote ({why}); orders would defer")
         else:
-            r.note(f"{sym}: {why} (expected while the market is closed)")
+            key = why.split(" ")[0]
+            closed_reasons[key] = closed_reasons.get(key, 0) + 1
+    if closed_reasons:
+        summary = ", ".join(f"{n} {k.replace('_', '-')}" for k, n in sorted(closed_reasons.items()))
+        r.note(f"quotes: market closed, so not judged ({summary}); re-run during a session to check them")
 
     # Daily bars: a year of completed sessions, gaps measured against the calendar.
     start = today - timedelta(days=HISTORY_DAYS)

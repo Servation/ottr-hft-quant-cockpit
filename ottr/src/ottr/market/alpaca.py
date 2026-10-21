@@ -18,6 +18,10 @@ Free-plan facts this relies on (docs.alpaca.markets, checked 2026-10-21):
 - `limit` on bars counts bars across ALL symbols; results come sorted by symbol, so pages
   must be followed to the end (`next_page_token`).
 - 200 requests a minute: one shared RateLimiter keeps the client under that.
+- Daily bars cover the regular session only, closing at the official close (checked live
+  2026-10-21: SPY's daily close 773.09 matched the 15:59 bar, not the after-hours 770.92,
+  and PDBC's after-hours high/low fell outside its daily range). Daily bars are stamped at
+  midnight New York time, written in UTC.
 """
 
 from __future__ import annotations

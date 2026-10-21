@@ -54,7 +54,8 @@ async def test_closed_market_quotes_are_informational():
         f.add_quote(s, 100, 100.02, age=86400)
     code, text = await run(f)
     assert code == 0, text
-    assert "expected while the market is closed" in text
+    assert "quotes: market closed, so not judged (3 stale)" in text
+    assert "SPY: stale" not in text  # one summary line, not one line per symbol
 
 
 async def test_stale_quotes_during_the_session_degrade():
@@ -84,6 +85,12 @@ async def test_clock_and_calendar_disagreeing_fails():
 async def test_bad_keys_stop_the_check():
     code, text = await run(healthy(et(2026, 10, 21, 11, 0)), creds=Credentials("PKWRONG", "x"))
     assert code == 2 and "rejected the keys" in text
+
+
+def test_long_fund_names_are_trimmed_at_a_word():
+    name = "iShares iBoxx $ Investment Grade Corporate Bond ETF"
+    assert datacheck._short(name) == "iShares iBoxx $ Investment Grade..."
+    assert datacheck._short("SPDR Gold Trust") == "SPDR Gold Trust"
 
 
 def test_cli_without_keys_says_how_to_add_them(capsys):
