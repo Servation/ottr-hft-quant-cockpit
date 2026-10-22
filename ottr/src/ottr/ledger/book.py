@@ -23,8 +23,8 @@ Conventions, chosen to match how a US broker reports a taxable account:
 - A sale's net proceeds are split across lots by quantity, and the last lot takes the
   rounding remainder, so the pieces always add up to the fill exactly.
 - Long term means sold after the one-year anniversary of the purchase date (held more
-  than a year). Wash sales, which can move basis and holding period between lots, come in
-  the tax PR and adjust these lots rather than replace them.
+  than a year). Wash sales, which move basis and holding period between lots for tax, are
+  a view replayed from these lots (`ledger/tax.py`): the economic book here never changes.
 - Holdings are marked at the BID: what the position could actually be sold for.
 - Corporate actions (`ledger/corporate.py` decides; the methods here book): a split
   multiplies each open lot's remaining shares (cost and holding period unchanged), one

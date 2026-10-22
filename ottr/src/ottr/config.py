@@ -328,6 +328,18 @@ class Screen:
 
 
 @dataclass(frozen=True)
+class Tax:
+    """Rates for the tax ESTIMATES (`ledger/tax.py`): set them to your own. Not tax advice."""
+    federal_ordinary_pct: float = 24.0        # marginal rate on ordinary income and short-term gains
+    federal_long_term_pct: float = 15.0       # long-term gains and qualified dividends
+    collectibles_max_pct: float = 28.0        # long-term gains on collectibles, at most this
+    state_pct: float = 0.0
+    niit_pct: float = 0.0                     # net investment income tax (3.8 above its threshold)
+    collectibles: Tuple[str, ...] = ("GLD", "SLV")
+    qualified_dividend_classes: Tuple[str, ...] = ("equity_etf", "stock")
+
+
+@dataclass(frozen=True)
 class Sweep:
     enabled: bool = True
     at: str = "15:45"             # New York time; an early close moves it back the same distance
@@ -390,6 +402,7 @@ class Config:
     api: Api = field(default_factory=Api)
     chat: Chat = field(default_factory=Chat)
     screen: Screen = field(default_factory=Screen)
+    tax: Tax = field(default_factory=Tax)
     discord_webhook_url: Optional[str] = field(default=None, repr=False)
     api_key: Optional[str] = field(default=None, repr=False)
     discord_bot_token: Optional[str] = field(default=None, repr=False)
@@ -478,6 +491,11 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
     sched_raw = dict(raw.get("schedule", {}))
     if "meeting_times" in sched_raw:
         sched_raw["meeting_times"] = tuple(_hhmm(t, "schedule.meeting_times") for t in sched_raw["meeting_times"])
+    tax_raw = dict(raw.get("tax", {}))
+    if "collectibles" in tax_raw:
+        tax_raw["collectibles"] = tuple(_symbol(s, "tax.collectibles") for s in tax_raw["collectibles"])
+    if "qualified_dividend_classes" in tax_raw:
+        tax_raw["qualified_dividend_classes"] = tuple(str(x) for x in tax_raw["qualified_dividend_classes"])
     events_raw = dict(raw.get("events", {}))
     events_raw["macro"] = {str(k): str(v) for k, v in events_raw.get("macro", {}).items()}
 
@@ -493,11 +511,12 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
         sweep=_section(Sweep, sweep_raw, "sweep"),
         events=_section(EventFeeds, events_raw, "events"),
         screen=_section(Screen, raw.get("screen", {}), "screen"),
+        tax=_section(Tax, tax_raw, "tax"),
         **_shared_sections(raw),
         **_runtime(data_dir),
     )
     unknown = set(raw) - {"account", "universe", "trading", "sizing", "caps", "risk", "schedule", "data",
-                          "fees", "sweep", "events", "screen", "council", "engine", "alerts", "api", "chat"}
+                          "fees", "sweep", "events", "screen", "tax", "council", "engine", "alerts", "api", "chat"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
@@ -571,6 +590,12 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("data: vol_sessions in 10..252, er_sessions in 5..120, er_threshold in (0, 1)")
     _validate_events(cfg.events)
     _validate_screen(cfg.screen)
+    tx = cfg.tax
+    rates = (tx.federal_ordinary_pct, tx.federal_long_term_pct, tx.collectibles_max_pct, tx.state_pct, tx.niit_pct)
+    if not all(0 <= r <= 60 for r in rates):
+        raise ConfigError("tax: every rate must be a percent in 0..60")
+    if set(tx.qualified_dividend_classes) - set(ASSET_CLASSES):
+        raise ConfigError(f"tax.qualified_dividend_classes must be asset classes {ASSET_CLASSES}")
 
 
 def _validate_screen(s: Screen) -> None:

@@ -91,10 +91,11 @@ CREATE TABLE IF NOT EXISTS stances (
     PRIMARY KEY (meeting_id, analyst, asset));
 -- One point per equity tick: the book marked to market, and what the same starting equity
 -- would be worth in SPY alone and in 60/40 SPY/IEF (None until the first close after init).
+-- `after_tax` is the estimate of `ledger/tax.after_tax_equity` (None when unknown).
 -- `detail` holds each holding's weight and mark basis (live, delayed or close).
 CREATE TABLE IF NOT EXISTS equity (
     ts REAL PRIMARY KEY, equity REAL NOT NULL, cash REAL NOT NULL, invested REAL NOT NULL,
-    bench_spy REAL, bench_60_40 REAL, detail TEXT);
+    bench_spy REAL, bench_60_40 REAL, detail TEXT, after_tax REAL);
 CREATE TABLE IF NOT EXISTS risk_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
@@ -424,10 +425,12 @@ class Store:
 
     # -- equity ---------------------------------------------------------------------------
     def add_equity(self, ts: float, equity: float, cash: float, invested: float,
-                   bench_spy: Optional[float], bench_60_40: Optional[float], detail: Dict[str, Any]) -> None:
+                   bench_spy: Optional[float], bench_60_40: Optional[float], detail: Dict[str, Any],
+                   after_tax: Optional[float] = None) -> None:
         with self.tx() as c:
-            c.execute("INSERT OR REPLACE INTO equity(ts,equity,cash,invested,bench_spy,bench_60_40,detail) "
-                      "VALUES(?,?,?,?,?,?,?)", (ts, equity, cash, invested, bench_spy, bench_60_40, dumps(detail)))
+            c.execute("INSERT OR REPLACE INTO equity(ts,equity,cash,invested,bench_spy,bench_60_40,detail,after_tax) "
+                      "VALUES(?,?,?,?,?,?,?,?)",
+                      (ts, equity, cash, invested, bench_spy, bench_60_40, dumps(detail), after_tax))
 
     def equity_series(self, limit: int = 5000) -> List[Tuple[float, float]]:
         rows = self.conn.execute("SELECT ts,equity FROM equity ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()

@@ -36,7 +36,8 @@ from ottr import health
 from ottr.config import Config
 from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
 from ottr.engine.killswitch import KillSwitch
-from ottr.ledger.book import Ledger
+from ottr.ledger import tax
+from ottr.ledger.book import Ledger, trade_day
 from ottr.universe import db as udb
 from ottr.ledger.store import Store
 from ottr.market.types import Quote
@@ -271,7 +272,7 @@ def _position_rows(ctx: ApiContext, lg: Ledger, marks: Dict[str, Quote], now: fl
     return rows, v
 
 
-EQUITY_COLS = ("ts", "equity", "cash", "invested", "bench_spy", "bench_60_40")
+EQUITY_COLS = ("ts", "equity", "cash", "invested", "bench_spy", "bench_60_40", "after_tax")
 
 
 async def get_book(request: web.Request) -> web.Response:
@@ -284,6 +285,7 @@ async def get_book(request: web.Request) -> web.Response:
         acct = lg.account()
         owed = lg.receivable()
         rows, v = _position_rows(ctx, lg, marks, now)
+        after_tax = tax.after_tax_equity(ctx.cfg, ctx.reader, marks, v.equity, trade_day(now)) if v else None
         risk = RiskState.from_dict(ctx.reader.get_state("risk"))
         base = ctx.reader.get_state(BENCH_BASE)
         last = ctx.reader.conn.execute(
@@ -299,7 +301,7 @@ async def get_book(request: web.Request) -> web.Response:
     return ok({
         "as_of": now, "marked": v is not None, "prices_error": perr, "market": ctx.market_state(),
         "equity": v.equity if v else None, "cash": acct["cash"], "invested": invested,
-        "dividends_owed": owed,
+        "dividends_owed": owed, "after_tax_equity_estimate": after_tax,
         "invested_pct": invested / v.equity if v and v.equity > 0 else None,
         "cost_basis": cost, "unrealized_pnl": invested - float(cost) if v else None,
         "realized_pnl": acct["realized_pnl"], "fees": acct["fees"], "positions": len(rows),
