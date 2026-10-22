@@ -8,6 +8,7 @@
                                            the Windows scheduled task that runs `supervise`
   ottr chat [--check]                      the Discord slash-command bot (reads the API; can't trade)
   ottr screen [--json]                     rank other Kraken coins now (advisory; stores nothing)
+  ottr data --check [--symbols A,B]        is the Alpaca feed usable? (US desk; reads only)
   ottr meeting [--execute]                 one council meeting now (propose-only by default)
   ottr status [--json]                     read-only health + book; exit code says what's wrong
   ottr check                               replay the fill log and verify the books balance
@@ -343,6 +344,26 @@ async def cmd_screen(cfg, args) -> int:
     return 0
 
 
+async def cmd_data(cfg, args) -> int:
+    import time as _time
+
+    from ottr.market import datacheck
+    from ottr.market.alpaca import Alpaca, Credentials
+    from ottr.market.symbols import normalize
+    creds = Credentials.from_env()
+    if creds is None:
+        print("No Alpaca keys: set APCA_API_KEY_ID and APCA_API_SECRET_KEY in ottr/.env "
+              "(Alpaca dashboard > Paper Trading > API Keys).")
+        return 3
+    try:
+        symbols = [normalize(s) for s in args.symbols.split(",")] if args.symbols else list(datacheck.CORE_ETFS)
+    except ValueError as e:
+        print(e)
+        return 2
+    print(f"Checking Alpaca for {len(symbols)} symbols (about 30 seconds)...", flush=True)
+    return await datacheck.run(Alpaca(creds), symbols, _time.time())
+
+
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
     return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
@@ -424,6 +445,9 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true", help="machine-readable health report")
     p = sub.add_parser("screen", help="rank other Kraken coins now (advisory; prints, stores nothing)")
     p.add_argument("--json", action="store_true", help="the full result as JSON")
+    p = sub.add_parser("data", help="US desk: check the Alpaca market-data feed (reads only)")
+    p.add_argument("--check", action="store_true", required=True, help="run the feed check")
+    p.add_argument("--symbols", help="comma-separated symbols (default: the 16 core ETFs)")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)
@@ -438,7 +462,7 @@ def main(argv=None) -> int:
     _setup_logging(args.verbose, log_file, console=log_file is None or args.cmd == "supervise",
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
-          "chat": cmd_chat, "screen": cmd_screen, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
+          "chat": cmd_chat, "screen": cmd_screen, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
           "resume": cmd_resume}[args.cmd]
     return asyncio.run(fn(cfg, args))
 

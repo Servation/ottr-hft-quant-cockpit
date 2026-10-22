@@ -6,6 +6,7 @@ tripwire for exactly that).
 """
 
 import dataclasses
+import os
 import time
 
 import pytest
@@ -16,13 +17,29 @@ from ottr.ledger.store import Store
 from ottr.market.types import Quote
 
 
+LIVE_READ_ONLY_VARS = ("APCA_API_KEY_ID", "APCA_API_SECRET_KEY")  # market data keys: reads only
+
+
 @pytest.fixture(autouse=True)
-def isolated_env(tmp_path, monkeypatch):
-    """No test may read the developer's ottr/.env or real secrets (a webhook would post)."""
+def isolated_env(tmp_path, monkeypatch, request):
+    """No test may read the developer's ottr/.env or real secrets (a webhook would post).
+
+    Exception: tests marked `live` keep the read-only market-data keys, since checking the
+    real feed is their whole point (`pytest -m live`, keys exported or in ottr/.env).
+    """
+    live = request.node.get_closest_marker("live") is not None
     for var in ("OTTR_DRY_RUN", "MAX_TRADE_USD", "OTTR_DATA_DIR", "DISCORD_WEBHOOK_URL", "OTTR_API_KEY",
-                "DISCORD_BOT_TOKEN", "CEO_DISCORD_ID", "OTTR_CHAT_ALLOWED_IDS", "DISCORD_GUILD_ID"):
+                "DISCORD_BOT_TOKEN", "CEO_DISCORD_ID", "OTTR_CHAT_ALLOWED_IDS", "DISCORD_GUILD_ID",
+                *(() if live else LIVE_READ_ONLY_VARS)):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OTTR_ENV_FILE", str(tmp_path / "no-such.env"))
+    env_file = cfgmod.ROOT / ".env"
+    if live and env_file.exists():
+        # Only the read-only keys: the file's other secrets (a webhook) stay out of tests.
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() in LIVE_READ_ONLY_VARS and value.strip() and key.strip() not in os.environ:
+                monkeypatch.setenv(key.strip(), value.strip())
 
 
 @pytest.fixture
