@@ -73,6 +73,8 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     ([("history_days = 400", "history_days = 200")], "history_days"),
     ([("max_gross_pct = 90.0", "max_gross_pct = 120.0")], "max_gross_pct"),
     ([("[api]", "[not_a_section]\nx = 1\n\n[api]")], "unknown sections"),
+    ([("keep_cash_pct = 5.0", "keep_cash_pct = 1.0")], "sweep.keep_cash_pct"),   # below the 2% reserve
+    ([('at = "15:45"', 'at = "17:00"')], "sweep.at"),
     ([('host = "127.0.0.1"', 'host = "0.0.0.0"')], "loopback"),          # shared rule applies too
     ([("min_analysts = 2", "min_analysts = 5")], "min_analysts"),
 ])

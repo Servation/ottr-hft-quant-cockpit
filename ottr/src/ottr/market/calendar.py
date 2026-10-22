@@ -40,12 +40,18 @@ class Session:
     day: date
     open: datetime
     close: datetime
+    # When a trade made in this session settles (T+1 business day). It comes from the
+    # exchange calendar rather than "the next session" because banks close on days the
+    # market is open (Columbus Day, Veterans Day), and trades don't settle on those.
+    settles: Optional[date] = None
 
     def __post_init__(self) -> None:
         if self.open.tzinfo is None or self.close.tzinfo is None:
             raise ValueError("session times must be timezone-aware")
         if not self.open < self.close:
             raise ValueError(f"{self.day}: open must be before close")
+        if self.settles is not None and self.settles <= self.day:
+            raise ValueError(f"{self.day}: settlement must come after the trade date")
 
     @property
     def open_ts(self) -> float:
@@ -64,9 +70,10 @@ class Session:
         return self.open_ts <= ts < self.close_ts
 
     @classmethod
-    def at(cls, day: date, open_hm: str = "09:30", close_hm: str = "16:00") -> "Session":
+    def at(cls, day: date, open_hm: str = "09:30", close_hm: str = "16:00",
+           settles: Optional[date] = None) -> "Session":
         """A session from New York wall-clock times ("HH:MM"), as exchange calendars list them."""
-        return cls(day, _et(day, open_hm), _et(day, close_hm))
+        return cls(day, _et(day, open_hm), _et(day, close_hm), settles)
 
 
 def _et(day: date, hm: str) -> datetime:
@@ -124,7 +131,9 @@ class TradingCalendar:
                   last_day: Optional[date] = None) -> "TradingCalendar":
         """From exchange-calendar rows: {"date": "2026-11-27", "open": "09:30", "close": "13:00"}
         (the shape of Alpaca's /v2/calendar)."""
-        sessions = [Session.at(date.fromisoformat(r["date"]), r["open"], r["close"]) for r in rows]
+        sessions = [Session.at(date.fromisoformat(r["date"]), r["open"], r["close"],
+                               date.fromisoformat(r["settlement_date"]) if r.get("settlement_date") else None)
+                    for r in rows]
         return cls(sessions, first_day, last_day)
 
     # -- lookups ---------------------------------------------------------------------------
@@ -178,6 +187,16 @@ class TradingCalendar:
         self._check(ts)
         j = bisect.bisect_right(self._closes, ts)
         return list(self.sessions[max(0, j - n):j])
+
+    def settlement_date(self, trade_day: date) -> date:
+        """When a trade made on `trade_day` settles. Raises if the calendar doesn't say: a
+        guessed settlement date would let a cash account spend money it doesn't have yet."""
+        s = self.session_on(trade_day)
+        if s is None:
+            raise CalendarError(f"{trade_day} is not a trading day")
+        if s.settles is None:
+            raise CalendarError(f"{trade_day}: the calendar has no settlement date")
+        return s.settles
 
     def missing_days(self, have: Iterable[date], start: date, end: date) -> List[date]:
         """Trading days in [start, end] with no entry in `have`: gaps in a daily bar series
