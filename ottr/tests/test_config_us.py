@@ -83,6 +83,9 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     ([('VIXCLS = "VIX', 'vixcls = "VIX')], "events.macro.vixcls"),
     ([("corporate_actions_lookback_days = 60", "corporate_actions_lookback_days = 3")], "lookback"),
     ([("sec_every_days = 7", "sec_every_days = 7\nsec_key = 1")], r"\[events\] unknown keys"),
+    ([('sectors = ["XLB",', 'sectors = ["XLX",')], "universe.sectors"),
+    ([("quote_ttl_sec = 30", "quote_ttl_sec = 300")], "quote_ttl_sec"),     # longer than a quote may live
+    ([("er_threshold = 0.30", "er_threshold = 1.5")], "er_threshold"),
 ])
 def test_broken_configs_are_rejected(tmp_path, edits, needle):
     with pytest.raises(ConfigError, match=needle.replace("(", r"\(").replace(")", r"\)")):

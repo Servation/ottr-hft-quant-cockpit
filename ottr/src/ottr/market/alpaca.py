@@ -212,22 +212,52 @@ class Alpaca:
         end_dt = limit_end if end is None else min(limit_end, datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=ET))
         params = {"symbols": ",".join(to_alpaca(s) for s in symbols), "timeframe": "1Day",
                   "start": start.isoformat(), "end": end_dt.isoformat(timespec="seconds"),
-                  "adjustment": adjustment, "feed": feed, "limit": BARS_PAGE_LIMIT, "sort": "asc"}
+                  "adjustment": adjustment, "feed": feed}
         out: Dict[str, List[Bar]] = {normalize(s): [] for s in symbols}
+        for sym, rows in (await self._bar_rows(params)).items():
+            dst = out.setdefault(sym, [])
+            for r in rows:
+                try:
+                    dst.append(Bar(bar_day(r["t"]), float(r["o"]), float(r["h"]), float(r["l"]),
+                                   float(r["c"]), float(r["v"])))
+                except (KeyError, ValueError) as e:  # one bad bar is dropped and logged, not fatal
+                    logger.warning("dropping malformed %s bar %s: %s", sym, r.get("t"), e)
+        return {s: sorted(_dedupe(b), key=lambda x: x.day) for s, b in out.items()}
+
+    async def latest_minute_closes(self, symbols: Sequence[str], now: Optional[float] = None,
+                                   lookback: timedelta = timedelta(minutes=45)) -> Dict[str, Tuple[float, float]]:
+        """symbol -> (bar end time, close) of the newest SIP minute bar the free plan may read
+        (16 minutes old or more), from the `lookback` before that. A symbol with no trade in
+        the window is absent. Marks a holding whose live IEX quote isn't usable."""
+        now = self._clock.time() if now is None else now
+        end = datetime.fromtimestamp(now, tz=timezone.utc) - SIP_DELAY
+        params = {"symbols": ",".join(to_alpaca(s) for s in symbols), "timeframe": "1Min",
+                  "start": (end - lookback).isoformat(timespec="seconds"),
+                  "end": end.isoformat(timespec="seconds"), "adjustment": "raw", "feed": "sip"}
+        out: Dict[str, Tuple[float, float]] = {}
+        for sym, rows in (await self._bar_rows(params)).items():
+            for r in rows:
+                try:
+                    ts, close = parse_ts(r["t"]) + 60.0, float(r["c"])  # a minute bar is stamped at its start
+                except (KeyError, ValueError):
+                    continue
+                if close > 0 and (sym not in out or ts > out[sym][0]):
+                    out[sym] = (ts, close)
+        return out
+
+    async def _bar_rows(self, params: dict) -> Dict[str, List[dict]]:
+        """Raw bar rows per canonical symbol, following every page (`limit` counts across
+        all symbols, so a page can end mid-symbol)."""
+        params = {**params, "limit": BARS_PAGE_LIMIT, "sort": "asc"}
+        out: Dict[str, List[dict]] = {}
         token: Optional[str] = None
         for _ in range(1000):  # a hard stop if the API ever repeats a token
             page = await self._get(self.data_base, "/v2/stocks/bars", {**params, **({"page_token": token} if token else {})})
             for sym, rows in ((page or {}).get("bars") or {}).items():
-                dst = out.setdefault(normalize(sym), [])
-                for r in rows:
-                    try:
-                        dst.append(Bar(bar_day(r["t"]), float(r["o"]), float(r["h"]), float(r["l"]),
-                                       float(r["c"]), float(r["v"])))
-                    except (KeyError, ValueError) as e:  # one bad bar is dropped and logged, not fatal
-                        logger.warning("dropping malformed %s bar %s: %s", sym, r.get("t"), e)
+                out.setdefault(normalize(sym), []).extend(rows or ())
             token = (page or {}).get("next_page_token")
             if not token:
-                return {s: sorted(_dedupe(b), key=lambda x: x.day) for s, b in out.items()}
+                return out
         raise AlpacaError("bars pagination did not end")
 
     async def corporate_actions(self, symbols: Sequence[str], start: date, end: date,

@@ -22,6 +22,8 @@ sleeve_pct = 40.0           # satellites (including ones being sold off) at most
 # Data only, never traded: equal-weight S&P and the sector SPDRs, for breadth. XLE, the
 # energy sector, is in the traded core below, so it isn't repeated here.
 reference = ["RSP", "XLB", "XLC", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
+# Breadth in the council packet: how many of these sit above their 50-day average.
+sectors = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
 
 [universe.core]
 SPY = "equity_etf"
@@ -176,6 +178,10 @@ max_spread_pct = 1.0       # a wider IEX quote isn't a market: the order defers
 max_quote_age_sec = 120
 max_trade_gap_pct = 2.0
 max_close_gap_pct = 25.0
+quote_ttl_sec = 30         # snapshots are re-fetched after this (an order re-fetches after 10s)
+vol_sessions = 60          # realized vol for sizing, annualized by sqrt(252)
+er_sessions = 20           # efficiency ratio over this many sessions: >= er_threshold is TRENDING
+er_threshold = 0.30
 
 [council]
 analysts = ["claude", "gpt", "gemini"]

@@ -381,6 +381,7 @@ class Account:
 class UsUniverse:
     core: Dict[str, str]                 # symbol -> asset class
     reference: Tuple[str, ...] = ()      # data only, never traded
+    sectors: Tuple[str, ...] = ()        # breadth: how many sit above their 50-day average
     cash_symbol: str = "SGOV"
     satellites_max: int = 6
     sleeve_pct: float = 40.0
@@ -435,6 +436,10 @@ class Data:
     max_quote_age_sec: float = 120.0
     max_trade_gap_pct: float = 2.0
     max_close_gap_pct: float = 25.0
+    quote_ttl_sec: float = 30.0       # snapshots are re-fetched after this (an order re-fetches after 10s)
+    vol_sessions: int = 60            # realized vol for sizing: sessions of daily returns, annualized by 252
+    er_sessions: int = 20             # efficiency-ratio window for the trending/choppy regime
+    er_threshold: float = 0.30
 
     def quote_limits(self):
         from ottr.market.alpaca import QuoteLimits
@@ -537,7 +542,9 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
     core_raw = uni_raw.pop("core", {})
     core = {_symbol(k, "universe.core"): str(v) for k, v in core_raw.items()}
     reference = tuple(_symbol(s, "universe.reference") for s in uni_raw.pop("reference", []))
-    universe = _section(UsUniverse, {**uni_raw, "core": core, "reference": reference}, "universe")
+    sectors = tuple(_symbol(s, "universe.sectors") for s in uni_raw.pop("sectors", []))
+    universe = _section(UsUniverse, {**uni_raw, "core": core, "reference": reference, "sectors": sectors},
+                        "universe")
 
     trading_raw = dict(raw.get("trading", {}))
     dry = _env_bool("OTTR_DRY_RUN")
@@ -605,6 +612,9 @@ def _validate_us(cfg: UsConfig) -> None:
         raise ConfigError(f"universe.cash_symbol {u.cash_symbol!r} must be in universe.core as cash_etf")
     if set(u.reference) & set(u.core):
         raise ConfigError(f"universe.reference repeats traded symbols {sorted(set(u.reference) & set(u.core))}")
+    unknown_sectors = set(u.sectors) - set(u.reference) - set(u.core)
+    if unknown_sectors:
+        raise ConfigError(f"universe.sectors must be core or reference symbols (not {sorted(unknown_sectors)})")
     if not 0 <= u.satellites_max <= 20 or not 0 < u.sleeve_pct <= 100:
         raise ConfigError("universe.satellites_max must be in 0..20 and sleeve_pct in (0, 100]")
     if t.min_trade_usd <= 0 or t.max_trade_usd < 0 or (t.max_trade_usd and t.max_trade_usd < t.min_trade_usd):
@@ -646,6 +656,11 @@ def _validate_us(cfg: UsConfig) -> None:
         raise ConfigError(f"data.history_days must be >= {MIN_HISTORY_DAYS} (the screener needs 273 sessions)")
     if min(d.max_spread_pct, d.max_quote_age_sec, d.max_trade_gap_pct, d.max_close_gap_pct) <= 0:
         raise ConfigError("data: quote limits must all be positive")
+    if not 5 <= d.quote_ttl_sec <= d.max_quote_age_sec:
+        # A cached snapshot older than the quote age limit could only ever be judged stale.
+        raise ConfigError("data.quote_ttl_sec must be in 5..max_quote_age_sec")
+    if not 10 <= d.vol_sessions <= 252 or not 5 <= d.er_sessions <= 120 or not 0 < d.er_threshold < 1:
+        raise ConfigError("data: vol_sessions in 10..252, er_sessions in 5..120, er_threshold in (0, 1)")
     _validate_events(cfg.events)
 
 

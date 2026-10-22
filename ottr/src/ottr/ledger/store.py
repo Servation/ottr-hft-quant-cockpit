@@ -101,6 +101,20 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 CREATE TABLE IF NOT EXISTS screens (
     id TEXT PRIMARY KEY, ts REAL NOT NULL, result TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS screens_ts ON screens (ts);
+-- The exchange calendar as Alpaca listed it (sessions, early closes, settlement dates).
+-- meta 'calendar_range' says which days the rows speak for: a day in range with no row
+-- is a holiday. A restart, or a read-only `ottr status`, knows the session without Alpaca.
+CREATE TABLE IF NOT EXISTS calendar (
+    day TEXT PRIMARY KEY, open TEXT NOT NULL, close TEXT NOT NULL, settles TEXT);
+-- Raw daily bars, as traded: official closes for marking the book, kept as an archive.
+CREATE TABLE IF NOT EXISTS bars (
+    symbol TEXT NOT NULL, day TEXT NOT NULL, open REAL NOT NULL, high REAL NOT NULL,
+    low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL, PRIMARY KEY (symbol, day));
+-- Split- and dividend-adjusted closes (total return) for indicators and benchmarks. Each
+-- refresh replaces a symbol's whole window: a new dividend rewrites every adjusted close
+-- before it, so rows from two refreshes must never be mixed.
+CREATE TABLE IF NOT EXISTS adj_closes (
+    symbol TEXT NOT NULL, day TEXT NOT NULL, close REAL NOT NULL, PRIMARY KEY (symbol, day));
 -- External event feeds (ottr/events): when each last ran (ts) and last succeeded (ok_ts).
 -- Readers judge freshness by ok_ts, so data from a refresh that is too old counts as
 -- unknown rather than as "nothing scheduled".
