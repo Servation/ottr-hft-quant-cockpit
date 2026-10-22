@@ -136,6 +136,11 @@ trim_band_pct = 5.0
 cooldown_sec = 900
 min_equity_points = 24
 
+[sweep]                    # idle cash into the cash ETF (universe.cash_symbol) once a day
+enabled = true
+at = "15:45"               # New York time; an early close moves it back the same distance (12:45)
+keep_cash_pct = 5.0        # buying power above 5% of equity is swept; a short BUY sells it back first
+
 [schedule]
 meeting_times = ["10:15", "15:15"]   # New York time, trading days only
 min_before_close_min = 45            # on early closes a later slot moves back to this

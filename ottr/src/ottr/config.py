@@ -410,6 +410,13 @@ class Schedule:
 
 
 @dataclass(frozen=True)
+class Sweep:
+    enabled: bool = True
+    at: str = "15:45"             # New York time; an early close moves it back the same distance
+    keep_cash_pct: float = 5.0    # buying power above this % of equity goes into the cash ETF
+
+
+@dataclass(frozen=True)
 class Data:
     feed: str = "iex"
     history_days: int = 400
@@ -435,6 +442,7 @@ class UsConfig:
     schedule: Schedule
     data: Data
     fees: FeeSchedule
+    sweep: Sweep
     council: Council
     engine: Engine
     data_dir: Path
@@ -521,6 +529,9 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
         fees = fee_schedule_from_rows(rate_rows)
     except FeeScheduleError as e:
         raise ConfigError(f"fees: {e}")
+    sweep_raw = dict(raw.get("sweep", {}))
+    if "at" in sweep_raw:
+        sweep_raw["at"] = _hhmm(sweep_raw["at"], "sweep.at")
     sched_raw = dict(raw.get("schedule", {}))
     if "meeting_times" in sched_raw:
         sched_raw["meeting_times"] = tuple(_hhmm(t, "schedule.meeting_times") for t in sched_raw["meeting_times"])
@@ -534,11 +545,12 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
         schedule=_section(Schedule, sched_raw, "schedule"),
         data=_section(Data, raw.get("data", {}), "data"),
         fees=fees,
+        sweep=_section(Sweep, sweep_raw, "sweep"),
         **_shared_sections(raw),
         **_runtime(data_dir),
     )
     unknown = set(raw) - {"account", "universe", "trading", "sizing", "caps", "risk", "schedule", "data",
-                          "fees", "council", "engine", "alerts", "api", "chat"}
+                          "fees", "sweep", "council", "engine", "alerts", "api", "chat"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
@@ -592,6 +604,9 @@ def _validate_us(cfg: UsConfig) -> None:
     missing_fees = [f for f in REQUIRED_FEES if f not in cfg.fees.fees]
     if missing_fees:
         raise ConfigError(f"fees: no [[fees.rate]] for {missing_fees}: a missing fee would silently be $0")
+    if not 0 <= cfg.sweep.keep_cash_pct < 100 or cfg.sweep.keep_cash_pct < t.cash_reserve_pct:
+        # The sweep would otherwise try to invest the reserve the gate keeps back.
+        raise ConfigError("sweep.keep_cash_pct must be in [trading.cash_reserve_pct, 100)")
     d = cfg.data
     if d.feed not in FEEDS:
         raise ConfigError(f"data.feed must be one of {FEEDS}, got {d.feed!r}")

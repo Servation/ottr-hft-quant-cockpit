@@ -10,7 +10,7 @@ request so tests can prove what the client did (and didn't) send, and can inject
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from typing import Dict, List, Optional
 from urllib.parse import parse_qs
 
@@ -102,7 +102,7 @@ class FakeAlpaca:
             return httpx.Response(200, json=[
                 {"date": s.day.isoformat(), "open": s.open.strftime("%H:%M"), "close": s.close.strftime("%H:%M"),
                  "session_open": "0400", "session_close": "2000",
-                 "settlement_date": (s.day + timedelta(days=1)).isoformat()}
+                 "settlement_date": s.settles.isoformat()}
                 for s in self.sessions if lo <= s.day <= hi])
         if path == "/v2/assets":
             return httpx.Response(200, json=list(self.assets.values()))
