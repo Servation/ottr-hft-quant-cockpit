@@ -77,6 +77,53 @@ EEM = 15.0
 SLV = 10.0
 PDBC = 15.0
 
+# Pass-through regulatory fees (ottr/broker/fees.py). Each rate applies from its
+# `effective` TRADE date until the next rate for the same fee; a date before a fee's first
+# rate is an error, never a guess. Fills accrue these exactly; each trading day's total is
+# charged at the close, rounded up to the cent. Alpaca charges no commission on stocks/ETFs.
+[[fees.rate]]
+fee = "sec"
+effective = 2026-04-02
+basis = "notional"
+rate = 0.0000206          # $20.60 per $1M of sales
+sides = ["SELL"]
+source = "SEC FY2026 fee rate advisory; Nasdaq OTA2026-14: trades from 2026-04-02"
+
+[[fees.rate]]
+fee = "taf"
+effective = 2026-01-01
+basis = "share"
+rate = 0.000195
+max_per_trade = 9.79
+sides = ["SELL"]
+source = "FINRA By-Laws Sch. A s.1 (rate in force before the Q4 2026 pause; Jan 2026 per broker notices)"
+
+[[fees.rate]]
+fee = "taf"
+effective = 2026-10-01
+basis = "share"
+rate = 0.0
+max_per_trade = 0.0
+sides = ["SELL"]
+source = "FINRA SR-FINRA-2026-021: TAF paused for trades 2026-10-01 to 2026-12-31"
+
+[[fees.rate]]
+fee = "taf"
+effective = 2027-01-01
+basis = "share"
+rate = 0.000195
+max_per_trade = 9.79
+sides = ["SELL"]
+source = "FINRA SR-FINRA-2026-021: TAF resumes at its prior rate on 2027-01-01"
+
+[[fees.rate]]
+fee = "cat"
+effective = 2026-10-12
+basis = "share"           # per executed equivalent share; one NMS share = one
+rate = 0.000003
+sides = ["BUY", "SELL"]
+source = "Alpaca brokerage fee schedule (Oct 12 2026)"
+
 [risk]
 enabled = true
 trailing_stop_pct = 10.0

@@ -11,7 +11,12 @@ log (deposits + fills, in order) and reports any difference.
 Conventions, chosen to match how a US broker reports a taxable account:
 - Cash, cost, proceeds and fees are in cents. Quantities go to 1e-9 shares, the
   precision Alpaca uses for fractional shares.
-- BUY fees are added to the lot's cost basis; SELL fees reduce the proceeds.
+- Fees charged at the fill (a commission, the crypto exchange fee): BUY fees are added
+  to the lot's cost basis; SELL fees reduce the proceeds.
+- Regulatory fees (SEC, TAF, CAT) are accrued per fill, exactly, and charged once per
+  trading day, rounded up to the cent, as a 'fee' cash event: Alpaca's end-of-day charge.
+  They are account costs, not part of any lot, so they reduce cash and equity but not a
+  lot's basis or a closure's proceeds.
 - Lots are consumed FIFO (the IRS default without specific identification). A partial
   lot keeps its remaining cost exactly: the consumed part's cost is rounded to the cent and
   the remainder is what's left, so a lot's pieces always add back to its total.
@@ -32,6 +37,7 @@ from datetime import date, datetime
 from decimal import ROUND_HALF_EVEN, Decimal, getcontext
 from typing import Dict, List, Mapping, Optional, Tuple
 
+from ottr.broker.fees import charge_for_day
 from ottr.ledger.store import Store, dumps
 from ottr.market.calendar import ET
 from ottr.market.types import Quote
@@ -42,7 +48,7 @@ QTY = Decimal("0.000000001")      # 1e-9 shares: Alpaca's fractional precision
 ZERO = Decimal(0)
 # Cash event kinds that move cash. Others (deposit_in_kind) record holdings only.
 # Dividends, fee charges and interest join this set in the PRs that book them.
-CASH_KINDS = frozenset({"deposit"})
+CASH_KINDS = frozenset({"deposit", "fee"})
 EVENT_KINDS = CASH_KINDS | {"deposit_in_kind"}
 
 
@@ -138,6 +144,7 @@ class Fill:
     day: date
     id: int
     closures: Tuple[Closure, ...]
+    accrued: Mapping[str, Decimal]          # regulatory fees owed, charged at the day's close
 
 
 @dataclass(frozen=True)
@@ -245,13 +252,15 @@ class Ledger:
     # -- writes (call inside store.tx()) -------------------------------------------------
     def apply_fill(self, *, idem_key: str, asset: str, side: str, quantity, price,
                    quote_source: str, origin: str, fee_pct: float = 0.0,
-                   fees: Optional[Mapping[str, object]] = None, quote: Optional[Quote] = None,
+                   fees: Optional[Mapping[str, object]] = None,
+                   accrued: Optional[Mapping[str, object]] = None, quote: Optional[Quote] = None,
                    ref: str = "", reason: str = "", now: Optional[float] = None) -> Fill:
         """Book one fill. Raises LedgerError (rolling back the caller's tx) on any violation.
 
         Fees: either `fees`, a breakdown in dollars ({"sec": 0.0021, "taf": 0.000195}) whose
         total is charged rounded to the cent, or `fee_pct` of the notional. The breakdown is
-        stored with the fill either way.
+        stored with the fill either way. `accrued` is the regulatory fees the fill owes
+        (exact, from broker.fees); they are not charged now but by `charge_fees` at the close.
         """
         if not self.store._depth:
             raise LedgerError("apply_fill must run inside store.tx() so the fill commits atomically")
@@ -272,6 +281,9 @@ class Ledger:
         else:
             fee = usd(notional * D(fee_pct) / 100)
             detail = {"fee": fee}
+        owed = {k: D(v) for k, v in (accrued or {}).items()}
+        if any(v < 0 for v in owed.values()):
+            raise LedgerError("accrued fees can't be negative")
         acct = self.account()
         pos = self.positions().get(asset)
         quote_json = dumps({"bid": quote.bid, "ask": quote.ask, "last": quote.last, "ts": quote.ts,
@@ -330,8 +342,11 @@ class Ledger:
 
         c.execute("UPDATE account SET cash=?, realized_pnl=?, fees=? WHERE id=1",
                   (str(new_cash), str(acct["realized_pnl"] + realized), str(acct["fees"] + fee)))
+        for name, amount in owed.items():
+            c.execute("INSERT INTO fee_accruals(fill_id,day,fee,amount) VALUES(?,?,?,?)",
+                      (fill_id, day.isoformat(), name, str(amount)))
         fill = Fill(idem_key, asset, side, q, px, notional, fee, realized, quote_source, now, day,
-                    fill_id, tuple(closures))
+                    fill_id, tuple(closures), owed)
         self.store.audit("fill", idem_key=idem_key, asset=asset, side=side, qty=q, price=px,
                          notional=notional, fee=fee, realized_pnl=realized, origin=origin)
         problems = self.check()
@@ -358,6 +373,55 @@ class Ledger:
             proceeds_so_far += proceeds
             plan.append((lot, take, proceeds, cost, proceeds - cost, holding_term(lot.opened_day, day)))
         return plan
+
+    # -- regulatory fees: accrued per fill, charged per day ------------------------------
+    def pending_fees(self) -> Decimal:
+        """What the uncharged accruals will cost when charged: each day's total rounded up.
+        Buying power must hold this back, the way a broker deducts pending fees intraday."""
+        days: Dict[str, List[Decimal]] = {}
+        for day, amount in self.store.conn.execute("SELECT day, amount FROM fee_accruals WHERE charged=0"):
+            days.setdefault(day, []).append(D(amount))
+        return sum((charge_for_day(v) for v in days.values()), ZERO)
+
+    def charge_fees(self, through: date, now: Optional[float] = None) -> List[Tuple[date, Decimal]]:
+        """Charge every uncharged trading day up to `through`, one 'fee' cash event per day.
+
+        Each day is charged separately, rounded up to the cent, so an engine that missed a
+        close catches up without merging days (merged days would round differently).
+        Returns [(day, amount charged)].
+        """
+        now = time.time() if now is None else now
+        done: List[Tuple[date, Decimal]] = []
+        with self.store.tx() as c:
+            rows = c.execute("SELECT id, day, fee, amount FROM fee_accruals WHERE charged=0 AND day<=? "
+                             "ORDER BY day, id", (through.isoformat(),)).fetchall()
+            by_day: Dict[str, list] = {}
+            for r in rows:
+                by_day.setdefault(r[1], []).append(r)
+            for day, accruals in by_day.items():
+                amount = charge_for_day(D(r[3]) for r in accruals)
+                event_id = None
+                if amount > 0:
+                    acct = self.account()
+                    if amount > acct["cash"]:
+                        raise LedgerError(f"fees of {amount} for {day} exceed cash {acct['cash']}")
+                    detail: Dict[str, Decimal] = {}
+                    for r in accruals:
+                        detail[r[2]] = detail.get(r[2], ZERO) + D(r[3])
+                    event_id = c.execute(
+                        "INSERT INTO cash_events(ts,day,kind,amount,note) VALUES(?,?,?,?,?)",
+                        (now, day, "fee", str(-amount), dumps(detail))).lastrowid
+                    c.execute("UPDATE account SET cash=?, fees=? WHERE id=1",
+                              (str(acct["cash"] - amount), str(acct["fees"] + amount)))
+                c.executemany("UPDATE fee_accruals SET charged=1, charge_event_id=? WHERE id=?",
+                              [(event_id, r[0]) for r in accruals])
+                done.append((date.fromisoformat(day), amount))
+            if done:
+                self.store.audit("fees_charged", days={d.isoformat(): a for d, a in done})
+                problems = self.check()
+                if problems:
+                    raise LedgerError("invariant violated: " + "; ".join(problems))
+        return done
 
     def set_high_water(self, asset: str, price: float) -> None:
         with self.store.tx() as c:
@@ -479,10 +543,47 @@ class Ledger:
             problems.append(f"cash {acct['cash']} != replayed {cash}")
         if acct["cash"] < 0:
             problems.append(f"negative cash {acct['cash']}")
+        problems += self._check_fee_accruals()
+        fees += sum((-D(r[0]) for r in c.execute("SELECT amount FROM cash_events WHERE kind='fee'")), ZERO)
         if fees != acct["fees"]:
             problems.append(f"fees {acct['fees']} != replayed {fees}")
         if realized_all != acct["realized_pnl"]:
             problems.append(f"realized {acct['realized_pnl']} != sum of lot closures {realized_all}")
+        return problems
+
+    def _check_fee_accruals(self) -> List[str]:
+        """Every accrual belongs to a fill on its own trade day; every 'fee' event is exactly
+        its accruals' total rounded up; a day charged without an event accrued exactly 0."""
+        c = self.store.conn
+        problems: List[str] = []
+        fill_day = {r[0]: r[1] for r in c.execute("SELECT id, day FROM fills")}
+        events = {r[0]: (r[1], D(r[2])) for r in c.execute("SELECT id, day, amount FROM cash_events WHERE kind='fee'")}
+        by_event: Dict[int, List[Decimal]] = {}
+        zero_days: Dict[str, Decimal] = {}
+        for aid, fid, day, amount, charged, event in c.execute(
+                "SELECT id, fill_id, day, amount, charged, charge_event_id FROM fee_accruals"):
+            amount = D(amount)
+            if fill_day.get(fid) != day:
+                problems.append(f"fee accrual {aid}: day {day} != its fill's day {fill_day.get(fid)}")
+            if amount < 0:
+                problems.append(f"fee accrual {aid} is negative")
+            if not charged and event is not None:
+                problems.append(f"fee accrual {aid} points at a charge but isn't marked charged")
+            if charged and event is None:
+                zero_days[day] = zero_days.get(day, ZERO) + amount
+            if event is not None:
+                if event not in events:
+                    problems.append(f"fee accrual {aid} points at missing fee event {event}")
+                elif events[event][0] != day:
+                    problems.append(f"fee accrual {aid} ({day}) charged on another day's event")
+                by_event.setdefault(event, []).append(amount)
+        for eid, (day, amount) in events.items():
+            owed = charge_for_day(by_event.get(eid, []))
+            if eid not in by_event or -amount != owed:
+                problems.append(f"fee event {eid} ({day}) charged {-amount}, its accruals round up to {owed}")
+        for day, total in zero_days.items():
+            if total != 0:
+                problems.append(f"{day}: fees of {total} marked charged without a charge")
         return problems
 
     def fills(self, limit: int = 50) -> List[Dict[str, str]]:

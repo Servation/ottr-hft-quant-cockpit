@@ -68,6 +68,14 @@ CREATE TABLE IF NOT EXISTS lot_closures (
     qty TEXT NOT NULL, proceeds TEXT NOT NULL, cost TEXT NOT NULL, realized TEXT NOT NULL,
     term TEXT NOT NULL CHECK (term IN ('short','long')));
 CREATE INDEX IF NOT EXISTS lot_closures_fill ON lot_closures (fill_id);
+-- Regulatory fees a fill accrued, exact and unrounded. Each trading day's total is charged
+-- once, rounded up to the cent, as one 'fee' cash event (charge_event_id), the way Alpaca
+-- charges at the close. A day whose fees total exactly 0 is marked charged with no event.
+CREATE TABLE IF NOT EXISTS fee_accruals (
+    id INTEGER PRIMARY KEY, fill_id INTEGER NOT NULL REFERENCES fills(id), day TEXT NOT NULL,
+    fee TEXT NOT NULL, amount TEXT NOT NULL, charged INTEGER NOT NULL DEFAULT 0,
+    charge_event_id INTEGER REFERENCES cash_events(id));
+CREATE INDEX IF NOT EXISTS fee_accruals_pending ON fee_accruals (charged, day);
 CREATE TABLE IF NOT EXISTS orders (
     idem_key TEXT PRIMARY KEY, ts REAL NOT NULL, origin TEXT NOT NULL, asset TEXT NOT NULL,
     side TEXT NOT NULL, intent TEXT NOT NULL, status TEXT NOT NULL,

@@ -14,6 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from ottr.broker.fees import FeeSchedule, FeeScheduleError
+from ottr.broker.fees import from_rows as fee_schedule_from_rows
+
 ROOT = Path(__file__).resolve().parents[2]  # .../ottr
 DEFAULT_CONFIG = ROOT / "config.toml"
 
@@ -349,6 +352,7 @@ def _validate_shared(cfg) -> None:
 # above is retired; until then the two live side by side so the running engine is unaffected.
 
 US_CONFIG = ROOT / "config.us.toml"
+REQUIRED_FEES = ("sec", "taf", "cat")   # the pass-through fees every US equity fill can owe
 ACCOUNT_TYPES = ("margin_1x", "cash")
 US_CLASSES = ("equity_etf", "bond_etf", "cash_etf", "commodity_etf", "real_estate_etf", "stock")
 FEEDS = ("iex", "sip")
@@ -430,6 +434,7 @@ class UsConfig:
     risk: Risk
     schedule: Schedule
     data: Data
+    fees: FeeSchedule
     council: Council
     engine: Engine
     data_dir: Path
@@ -508,6 +513,14 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
     sizing_raw["vol_floor"] = {str(k): float(v) for k, v in sizing_raw.get("vol_floor", {}).items()}
     caps_raw = dict(raw.get("caps", {}))
     by_symbol = {_symbol(k, "caps.symbol"): float(v) for k, v in caps_raw.pop("symbol", {}).items()}
+    fees_raw = dict(raw.get("fees", {}))
+    rate_rows = fees_raw.pop("rate", [])
+    if fees_raw:
+        raise ConfigError(f"[fees] unknown keys: {sorted(fees_raw)} (rates go in [[fees.rate]] tables)")
+    try:
+        fees = fee_schedule_from_rows(rate_rows)
+    except FeeScheduleError as e:
+        raise ConfigError(f"fees: {e}")
     sched_raw = dict(raw.get("schedule", {}))
     if "meeting_times" in sched_raw:
         sched_raw["meeting_times"] = tuple(_hhmm(t, "schedule.meeting_times") for t in sched_raw["meeting_times"])
@@ -520,11 +533,12 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
         caps=UsCaps(by_class={str(k): float(v) for k, v in caps_raw.items()}, by_symbol=by_symbol),
         schedule=_section(Schedule, sched_raw, "schedule"),
         data=_section(Data, raw.get("data", {}), "data"),
+        fees=fees,
         **_shared_sections(raw),
         **_runtime(data_dir),
     )
     unknown = set(raw) - {"account", "universe", "trading", "sizing", "caps", "risk", "schedule", "data",
-                          "council", "engine", "alerts", "api", "chat"}
+                          "fees", "council", "engine", "alerts", "api", "chat"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
@@ -575,6 +589,9 @@ def _validate_us(cfg: UsConfig) -> None:
         raise ConfigError("schedule.meeting_times must be distinct and in order")
     if not 0 <= cfg.schedule.min_before_close_min <= 120:
         raise ConfigError("schedule.min_before_close_min must be in 0..120")
+    missing_fees = [f for f in REQUIRED_FEES if f not in cfg.fees.fees]
+    if missing_fees:
+        raise ConfigError(f"fees: no [[fees.rate]] for {missing_fees}: a missing fee would silently be $0")
     d = cfg.data
     if d.feed not in FEEDS:
         raise ConfigError(f"data.feed must be one of {FEEDS}, got {d.feed!r}")
