@@ -269,6 +269,15 @@ anything). It is deterministic code; no model can add a symbol.
     - a warning flag
     - a report within 5 sessions
   - A demoted stock that is held stays a member in "sunset" (SELL or HOLD only) until it is sold.
+- **Tradable on the free feed:** the desk sees only IEX's own book, where a thinly quoted
+  stock can show a spread of several percent for hours. Every member's quote is sampled
+  each minute in session and the latest screen's top 40 every 15 minutes.
+  - A candidate needs a usable quote (inside `data.max_spread_pct`) at least 75% of the
+    time over the last 5 sessions.
+  - A satellite below that is demoted, since the desk could neither trade it nor enforce
+    its stop.
+  - A candidate not measured yet waits a week, so a brand-new book's first screen adds
+    no stocks until the next Saturday.
 
 Each run goes to Discord as a digest, to `/screen`, `GET /api/screen` and `/ask`, and is
 kept in the ledger. `[screen]` in config.toml holds every threshold.

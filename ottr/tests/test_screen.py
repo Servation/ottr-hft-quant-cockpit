@@ -33,6 +33,7 @@ from ottr.universe import last_slot
 from ottr.universe import db as udb
 from ottr.universe.db import Satellite
 from ottr.universe.run import ScreenError
+from ottr.market import quality
 from ottr.universe.screen import Row, measure, percentiles, score
 from ottr.universe.select import decide
 from tests.fake_feeds import FakeSec
@@ -268,12 +269,20 @@ async def screen_rig(cfg, store, now=SAT):
     reports = [EarningsDate(s, today + timedelta(days=3 if s == "SOON" else 40)) for s in [*STOCKS, "TWIN"]]
     db.save_earnings(store, reports, today, now)
     db.record_feed(store, FEED_EARNINGS, True, "test", now)
+    quotes_seen(store, [*STOCKS, "TWIN"])
     rig.requote()
     await rig.ready()
     client = Sec("Test Person test@example.com", client=sec.client(), limiter=RateLimiter(1e6), backoff=0)
     rec = Recorder()
     eng = Engine(cfg, store, rig.market, sources=Sources(sec=client), alerts=Alerts(rec, Limits()), clock=rig.clock)
     return eng, rig, rec
+
+
+def quotes_seen(store, symbols, samples=30, usable=30, day=FRIDAY):
+    """A week's IEX quote samples (here all on Friday) for `symbols`."""
+    with store.tx() as c:
+        c.executemany("INSERT OR REPLACE INTO quote_quality(symbol,day,samples,usable) VALUES(?,?,?,?)",
+                      [(s, day.isoformat(), samples, usable) for s in symbols])
 
 
 def drain(alerts):
@@ -417,3 +426,36 @@ async def test_without_the_sec_no_stock_is_assumed_to_be_a_company(cfg, store, l
     with pytest.raises(ScreenError, match="no operating company confirmed among 11 stocks that passed the gates"):
         await eng.screen()
     assert udb.satellites(store) == {}
+
+
+async def test_stocks_whose_iex_quote_is_rarely_usable_are_skipped_or_demoted(cfg, store, ledger):
+    eng, rig, _ = await screen_rig(cfg, store)
+    first = await eng.screen(apply=True)
+    held_in = [s for s, _ in first.decision.promote]
+    poor_sat, poor_cand = held_in[0], ({"AAPL", "TWIN"} - set(held_in)).pop()
+    quotes_seen(store, [poor_sat], samples=400, usable=120)            # a member: sampled every minute
+    quotes_seen(store, [poor_cand], samples=26, usable=10)
+    res = await eng.screen(apply=True)                                 # the same week, screened again
+    assert dict(res.decision.demote)[poor_sat] == (
+        "hard gate: IEX quote usable only 30% of the time since 2026-10-19 (needs 75%)")
+    assert dict(res.decision.passed)[poor_cand] == "IEX quote usable only 38% of the time since 2026-10-19 (needs 75%)"
+    assert res.rows[poor_sat].quote_usable == pytest.approx(0.3)
+    assert res.counts["quote_ok"] == res.counts["ranked"] - 1
+    assert " iex  flags" in screen_report(res, 3)
+
+
+async def test_an_unmeasured_candidate_waits_a_week(cfg, store, ledger):
+    eng, rig, _ = await screen_rig(cfg, store)
+    store.conn.execute("DELETE FROM quote_quality")
+    res = await eng.screen(apply=True)
+    assert res.decision.promote == [] and res.counts["quote_ok"] == 0
+    assert all(why.startswith("IEX quote not measured enough yet (0 samples since 2026-10-19")
+               for s, why in res.decision.passed if s not in ("SOON",))
+    # During the week the engine samples the screen's best ranked (untracked) stocks.
+    rig.at(et(2026, 10, 26, 11))
+    await eng.market_tick()
+    seen = quality.usable(store, [r.symbol for r in res.ranked], date(2026, 10, 26))
+    assert len(seen) == len(res.ranked) and all(n == 1 for n, _ in seen.values())
+    await eng.market_tick()                                            # not again within 15 minutes
+    assert quality.usable(store, ["AAPL"], date(2026, 10, 26))["AAPL"][0] == 1
+    assert quality.usable(store, ["SPY"], date(2026, 10, 26))["SPY"] == (2, 2)   # members: every tick

@@ -138,15 +138,23 @@ class MarketData:
 
     async def live_quotes(self) -> Dict[str, Quote]:
         """Every tracked symbol that has a usable live quote right now."""
+        return {s: q for s, (q, _) in (await self.quote_checks()).items() if q is not None}
+
+    async def quote_checks(self, symbols: Optional[Iterable[str]] = None) -> Dict[str, Tuple[Optional[Quote], str]]:
+        """symbol -> (a usable quote or None, why not), for every tracked symbol (from the
+        cached snapshots), or for `symbols` (fetched now: the screener's candidates). A
+        symbol Alpaca returns no snapshot for is unusable, not missing."""
         now = self.clock.time()
-        limits = self.cfg.data.quote_limits()
-        splits = self._splits(now)
-        out = {}
-        for s, snap in (await self.snapshots()).items():
-            q, _ = check_quote(s, snap, now, limits, splits.get(s, 1.0))
-            if q is not None:
-                out[s] = q
-        return out
+        if symbols is None:
+            syms, snaps = self.tracked(), await self.snapshots()
+        else:
+            syms = sorted(set(symbols))
+            try:
+                snaps = await self.alpaca.snapshots(syms, feed=self.cfg.data.feed) if syms else {}
+            except AlpacaError as e:
+                raise MarketDataError(f"snapshots: {e}") from e
+        limits, splits = self.cfg.data.quote_limits(), self._splits(now)
+        return {s: check_quote(s, snaps.get(s), now, limits, splits.get(s, 1.0)) for s in syms}
 
     # -- asset records -----------------------------------------------------------------------
     async def refresh_assets(self, symbols: Iterable[str], force: bool = False) -> Dict[str, Asset]:

@@ -28,6 +28,7 @@ missing SEC lists, no SPY history or bars missing for most stocks fail the run i
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import re
 import statistics
@@ -42,7 +43,7 @@ from ottr.events.sec import Company, Sec, SecError, operating_company
 from ottr.events.view import StoredEvents
 from ottr.ledger.book import trade_day
 from ottr.ledger.store import Store
-from ottr.market import history
+from ottr.market import history, quality
 from ottr.market import indicators as ind
 from ottr.market.alpaca import Alpaca, completed_bars
 from ottr.market.calendar import TradingCalendar
@@ -55,7 +56,7 @@ logger = logging.getLogger(__name__)
 SPY = "SPY"
 ALPACA_EXCHANGES = ("NYSE", "NASDAQ")
 RECENT_DAYS = 45                    # calendar days of bars for the liquidity stage
-SHOWN = 25                          # ranked rows kept in a stored screen
+SHOWN = 40                          # ranked rows kept in a stored screen (and quote-sampled all week)
 # Names of exchange-traded products that aren't companies. ("Trust" is left out: most
 # REITs are trusts, and the SEC profile catches the commodity trusts.)
 NOT_A_STOCK = re.compile(r"\b(ETF|ETN|ETP|fund|[23]x|leveraged|inverse|ultrapro|ultrashort)\b", re.I)
@@ -234,7 +235,31 @@ async def run_screen(cfg, store: Store, alpaca: Alpaca, sec: Optional[Sec], cal:
             memo[(a, b)] = ind.aligned_return_correlation(closes.get(a, []), closes.get(b, []), CORR_WINDOW)
         return memo[(a, b)]
 
-    decision = decide(cfg, ranked, rows, current, cooling, today, correlation, list(cfg.universe.core), unfit)
+    # A stock whose IEX quote was rarely usable can't be traded or protected on this feed:
+    # a satellite like that is demoted, a candidate passed over.
+    window = cal.completed_sessions(now, sc.quote_sessions)
+    since = window[0].day if window else today
+    seen = quality.usable(store, rows, since)
+    untradable: Dict[str, str] = {}
+    for s in rows:
+        n, ok = seen.get(s, (0, 0))
+        if n:
+            rows[s] = dataclasses.replace(rows[s], quote_usable=ok / n)
+        if n < sc.min_quote_samples:
+            if s not in current:
+                untradable[s] = (f"IEX quote not measured enough yet ({n} samples since {since}; the best of each "
+                                 "screen are sampled all week)")
+        elif ok / n * 100 < sc.min_quote_usable_pct:
+            why = (f"IEX quote usable only {ok / n * 100:.0f}% of the time since {since} (needs "
+                   f"{sc.min_quote_usable_pct:g}%)")
+            if s in current:
+                unfit[s] = why
+            else:
+                untradable[s] = why
+    ranked = [rows[r.symbol] for r in ranked]
+    counts["quote_ok"] = sum(1 for r in ranked if r.symbol not in untradable)
+    decision = decide(cfg, ranked, rows, current, cooling, today, correlation, list(cfg.universe.core), unfit,
+                      untradable)
     return ScreenResult(id=f"screen-{today.isoformat()}-{uuid.uuid4().hex[:6]}", ts=now, day=today, kind=kind,
                         counts=counts, ranked=ranked, rows=rows, decision=decision, current=sorted(current),
                         errors=errors)

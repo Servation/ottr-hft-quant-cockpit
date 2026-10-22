@@ -52,11 +52,13 @@ def _place(r: Row) -> str:
 
 def decide(cfg, ranked: Sequence[Row], measured: Mapping[str, Row], current: Mapping[str, Satellite],
            cooling: Mapping[str, Satellite], today: date, correlation: Callable[[str, str], Optional[float]],
-           core: Sequence[str], unfit: Mapping[str, str]) -> Decision:
+           core: Sequence[str], unfit: Mapping[str, str], untradable: Optional[Mapping[str, str]] = None) -> Decision:
     """`ranked`: rows that passed the gates, best first. `measured`: every row, by symbol.
     `current`: the active satellites. `cooling`: demoted ones still in their cooldown.
     `unfit`: symbol -> why it can't be a member at all (not tradable, not an operating
-    company), for satellites and candidates alike."""
+    company, a quote too rarely usable), for satellites and candidates alike.
+    `untradable`: candidate -> why its live quote can't be relied on yet."""
+    untradable = untradable or {}
     sc, slots_max = cfg.screen, cfg.universe.satellites_max
     out = Decision()
     by_rank = {r.symbol: r for r in ranked}
@@ -91,7 +93,7 @@ def decide(cfg, ranked: Sequence[Row], measured: Mapping[str, Row], current: Map
         sym = r.symbol
         if sym in kept or sym in current or sym in core:
             continue
-        why = unfit.get(sym) or r.entry_problem()
+        why = unfit.get(sym) or r.entry_problem() or untradable.get(sym, "")
         if not why and sym in cooling:
             why = f"cooling off since its demotion on {cooling[sym].demoted_day}"
         if not why:
