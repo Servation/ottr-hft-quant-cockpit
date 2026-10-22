@@ -9,7 +9,7 @@ symbol that left the universe can always be sold. A BUY must also:
 - not be in the session's last minutes, during the drawdown halt, during a cooldown,
   or after a risk action on the asset during the meeting;
 - for a single stock, have a known earnings date more than the blackout away;
-- not have an unmodeled corporate action pending;
+- not have a corporate action pending that blocks BUYs, or unknown corporate actions;
 - fit its target (vol-target weight x conviction x regime, capped by class and symbol),
   the per-trade ceiling, gross exposure (the cash ETF doesn't count), the satellite
   sleeve, and buying power less the cash reserve.
@@ -56,7 +56,7 @@ class UsGateContext:
     cash_etf_value: float = 0.0          # held in the sweep ETF: can fund a BUY
     satellites_value: float = 0.0        # stocks held, sunset ones included
     earnings_sessions: Optional[int] = None   # sessions to the next report; None = unknown
-    corp_action_pending: bool = False
+    corp_action: Optional[str] = None         # what blocks a BUY (a pending action, or unknown)
     halted: bool = False
     cooldown_until: float = 0.0
     risk_event_since_intent: bool = False
@@ -137,8 +137,8 @@ def _buy(intent: Intent, ctx: UsGateContext) -> Verdict:
             return Verdict.reject(intent, "earnings_unknown", "no confirmed earnings date: no new BUY")
         if ctx.earnings_sessions <= EARNINGS_BLACKOUT_SESSIONS:
             return Verdict.reject(intent, "earnings_blackout", f"reports in {ctx.earnings_sessions} sessions")
-    if ctx.corp_action_pending:
-        return Verdict.reject(intent, "corporate_action_pending")
+    if ctx.corp_action:
+        return Verdict.reject(intent, "corporate_action_pending", ctx.corp_action)
     val = ctx.valuation
     if val is None or val.equity <= 0:
         return Verdict.reject(intent, "book_unmarkable")

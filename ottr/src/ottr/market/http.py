@@ -4,8 +4,9 @@ Shared JSON-over-HTTP GET with bounded retries and an optional rate limiter.
 What it does: `get_json` makes one logical request and retries transient failures
 (transport errors, 429, 5xx, a provider's own "busy" errors) with exponential backoff,
 honoring a server's Retry-After. Each provider supplies a `classify` that turns a response
-into (result, error, retryable). `RateLimiter` is an async token bucket that keeps a client
-under a provider's budget (Alpaca's free tier allows 200 requests a minute).
+into (result, error, retryable); `classify_text` serves the CSV feeds (FRED, Alpha
+Vantage). `RateLimiter` is an async token bucket that keeps a client under a provider's
+budget (Alpaca's free tier allows 200 requests a minute, the SEC 10 a second).
 
 Why shared: OTTR talks to several data providers (Kraken now; Alpaca, FRED, Alpha Vantage
 and the SEC next). One retry policy means every feed fails the same way, loudly and
@@ -28,7 +29,11 @@ MAX_RETRY_AFTER = 60.0                         # never sleep longer than this on
 
 
 class HttpError(RuntimeError):
-    """A request failed for good (non-retryable, or out of retries)."""
+    """A request failed for good (non-retryable, or out of retries). `transient` says it ran
+    out of retries on an outage (transport error, 429/5xx, a maintenance page) rather than
+    being refused, so a caller can tell "the site is down" from "this request is wrong"."""
+
+    transient = False
 
 
 def classify_json(resp: httpx.Response) -> Classified:
@@ -41,6 +46,24 @@ def classify_json(resp: httpx.Response) -> Classified:
         return resp.json(), None, False
     except ValueError:  # an HTML error page from a proxy/CDN: an outage, not a crash
         return None, "non-JSON response", True
+
+
+def looks_like_html(text: str) -> bool:
+    head = text.lstrip()[:200].lower()
+    return head.startswith("<!doctype html") or head.startswith("<html")
+
+
+def classify_text(resp: httpx.Response) -> Classified:
+    """For CSV and other text feeds: 2xx returns the body. A web page in place of the data
+    (a maintenance or block page, which FRED serves with HTTP 200) is an outage: retry."""
+    if resp.status_code == 429 or resp.status_code >= 500:
+        return None, f"HTTP {resp.status_code}", True
+    if resp.status_code >= 400:
+        return None, f"HTTP {resp.status_code}", False
+    text = resp.text
+    if looks_like_html(text):
+        return None, "a web page instead of data (site maintenance?)", True
+    return text, None, False
 
 
 def retry_after(resp: Optional[httpx.Response], now: Optional[float] = None) -> Optional[float]:
@@ -100,7 +123,8 @@ async def get_json(client: httpx.AsyncClient, url: str, params: Optional[dict] =
                    headers: Optional[dict] = None, name: str = "request",
                    error: Type[HttpError] = HttpError,
                    sleep: Optional[Callable[[float], Awaitable[None]]] = None) -> Any:
-    """GET `url` and return the classified result, or raise `error` once retries run out."""
+    """GET `url` and return the classified result (parsed JSON by default, the body text with
+    `classify_text`), or raise `error` once retries run out."""
     sleep = sleep or asyncio.sleep  # resolved per call, so tests can stand in a fake sleep
     delay = backoff
     for attempt in range(retries + 1):
@@ -117,7 +141,9 @@ async def get_json(client: httpx.AsyncClient, url: str, params: Optional[dict] =
         if err is None:
             return result
         if not retryable or attempt >= retries:
-            raise error(f"{name} failed: {err}")
+            exc = error(f"{name} failed: {err}")
+            exc.transient = retryable
+            raise exc
         wait = delay
         hinted = retry_after(resp)
         if hinted is not None:

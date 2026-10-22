@@ -9,6 +9,7 @@ to a default. Here a bad or missing value fails at load time with a clear messag
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -432,6 +433,23 @@ class Data:
 
 
 @dataclass(frozen=True)
+class EventFeeds:
+    """The events and macro feeds (ottr/events): what to fetch, how often, and when data
+    is too old to trust. Keys and contact details come from the environment, not here."""
+    macro: Dict[str, str]                       # FRED series id -> label shown to the council
+    earnings_horizon: str = "6month"
+    macro_every_hours: float = 12.0
+    earnings_every_hours: float = 24.0
+    corporate_actions_every_hours: float = 4.0
+    sec_every_days: float = 7.0
+    max_age_hours: float = 72.0                 # older earnings / corporate actions count as unknown
+    corporate_actions_lookback_days: int = 60
+    corporate_actions_ahead_days: int = 120
+    macro_history_days: int = 400
+    macro_stale_days: int = 5
+
+
+@dataclass(frozen=True)
 class UsConfig:
     account: Account
     universe: UsUniverse
@@ -443,6 +461,7 @@ class UsConfig:
     data: Data
     fees: FeeSchedule
     sweep: Sweep
+    events: EventFeeds
     council: Council
     engine: Engine
     data_dir: Path
@@ -535,6 +554,8 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
     sched_raw = dict(raw.get("schedule", {}))
     if "meeting_times" in sched_raw:
         sched_raw["meeting_times"] = tuple(_hhmm(t, "schedule.meeting_times") for t in sched_raw["meeting_times"])
+    events_raw = dict(raw.get("events", {}))
+    events_raw["macro"] = {str(k): str(v) for k, v in events_raw.get("macro", {}).items()}
 
     cfg = UsConfig(
         account=_section(Account, raw.get("account", {}), "account"),
@@ -546,11 +567,12 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
         data=_section(Data, raw.get("data", {}), "data"),
         fees=fees,
         sweep=_section(Sweep, sweep_raw, "sweep"),
+        events=_section(EventFeeds, events_raw, "events"),
         **_shared_sections(raw),
         **_runtime(data_dir),
     )
     unknown = set(raw) - {"account", "universe", "trading", "sizing", "caps", "risk", "schedule", "data",
-                          "fees", "sweep", "council", "engine", "alerts", "api", "chat"}
+                          "fees", "sweep", "events", "council", "engine", "alerts", "api", "chat"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
@@ -614,3 +636,24 @@ def _validate_us(cfg: UsConfig) -> None:
         raise ConfigError(f"data.history_days must be >= {MIN_HISTORY_DAYS} (the screener needs 273 sessions)")
     if min(d.max_spread_pct, d.max_quote_age_sec, d.max_trade_gap_pct, d.max_close_gap_pct) <= 0:
         raise ConfigError("data: quote limits must all be positive")
+    _validate_events(cfg.events)
+
+
+def _validate_events(e: EventFeeds) -> None:
+    from ottr.events.earnings import HORIZONS
+    if e.earnings_horizon not in HORIZONS:
+        raise ConfigError(f"events.earnings_horizon must be one of {HORIZONS}, got {e.earnings_horizon!r}")
+    if min(e.macro_every_hours, e.earnings_every_hours, e.corporate_actions_every_hours, e.sec_every_days) <= 0:
+        raise ConfigError("events: every *_every_* interval must be positive")
+    if e.max_age_hours <= max(e.earnings_every_hours, e.corporate_actions_every_hours):
+        # Otherwise data would count as unknown between two on-time refreshes.
+        raise ConfigError("events.max_age_hours must be longer than the earnings and corporate-actions intervals")
+    if not 7 <= e.corporate_actions_lookback_days <= 365 or not 14 <= e.corporate_actions_ahead_days <= 365:
+        raise ConfigError("events: corporate_actions_lookback_days in 7..365 and corporate_actions_ahead_days in 14..365")
+    if e.macro_history_days < 30 or e.macro_stale_days < 1:
+        raise ConfigError("events: macro_history_days >= 30 and macro_stale_days >= 1")
+    if not e.macro:
+        raise ConfigError("events.macro needs at least one FRED series")
+    for sid, label in e.macro.items():
+        if not re.fullmatch(r"[A-Z0-9_]{2,40}", sid) or not label.strip():
+            raise ConfigError(f"events.macro.{sid}: needs an upper-case FRED series id and a label")

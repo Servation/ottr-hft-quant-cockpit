@@ -31,6 +31,7 @@ def test_the_shipped_config_is_valid(tmp_path):
     assert "XLE" in c.core and "XLE" not in c.universe.reference
     assert c.schedule.meeting_times == ("10:15", "15:15")
     assert c.data.feed == "iex"
+    assert c.events.earnings_horizon == "6month" and {"VIXCLS", "DGS10", "BAMLH0A0HYM2"} <= set(c.events.macro)
 
 
 def test_caps_resolve_override_then_class_and_cash_is_uncapped(tmp_path):
@@ -70,13 +71,18 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     ([('meeting_times = ["10:15", "15:15"]', 'meeting_times = ["08:00", "15:15"]')], "within the session"),
     ([('meeting_times = ["10:15", "15:15"]', 'meeting_times = ["15:15", "10:15"]')], "in order"),
     ([('feed = "iex"', 'feed = "polygon"')], "data.feed"),
-    ([("history_days = 400", "history_days = 200")], "history_days"),
+    ([("\nhistory_days = 400", "\nhistory_days = 200")], "data.history_days"),
     ([("max_gross_pct = 90.0", "max_gross_pct = 120.0")], "max_gross_pct"),
     ([("[api]", "[not_a_section]\nx = 1\n\n[api]")], "unknown sections"),
     ([("keep_cash_pct = 5.0", "keep_cash_pct = 1.0")], "sweep.keep_cash_pct"),   # below the 2% reserve
     ([('at = "15:45"', 'at = "17:00"')], "sweep.at"),
     ([('host = "127.0.0.1"', 'host = "0.0.0.0"')], "loopback"),          # shared rule applies too
     ([("min_analysts = 2", "min_analysts = 5")], "min_analysts"),
+    ([('earnings_horizon = "6month"', 'earnings_horizon = "1year"')], "events.earnings_horizon"),
+    ([("max_age_hours = 72", "max_age_hours = 24")], "events.max_age_hours"),    # stale between refreshes
+    ([('VIXCLS = "VIX', 'vixcls = "VIX')], "events.macro.vixcls"),
+    ([("corporate_actions_lookback_days = 60", "corporate_actions_lookback_days = 3")], "lookback"),
+    ([("sec_every_days = 7", "sec_every_days = 7\nsec_key = 1")], r"\[events\] unknown keys"),
 ])
 def test_broken_configs_are_rejected(tmp_path, edits, needle):
     with pytest.raises(ConfigError, match=needle.replace("(", r"\(").replace(")", r"\)")):

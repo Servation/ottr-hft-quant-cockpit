@@ -101,6 +101,38 @@ CREATE TABLE IF NOT EXISTS heartbeats (
 CREATE TABLE IF NOT EXISTS screens (
     id TEXT PRIMARY KEY, ts REAL NOT NULL, result TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS screens_ts ON screens (ts);
+-- External event feeds (ottr/events): when each last ran (ts) and last succeeded (ok_ts).
+-- Readers judge freshness by ok_ts, so data from a refresh that is too old counts as
+-- unknown rather than as "nothing scheduled".
+CREATE TABLE IF NOT EXISTS feeds (
+    name TEXT PRIMARY KEY, ts REAL NOT NULL, ok INTEGER NOT NULL, detail TEXT,
+    ok_ts REAL, rows INTEGER);
+CREATE TABLE IF NOT EXISTS macro_obs (
+    series TEXT NOT NULL, day TEXT NOT NULL, value REAL NOT NULL, PRIMARY KEY (series, day));
+-- Expected report dates. Each refresh replaces every row from today on (the calendar moves
+-- estimated dates around); past rows stay as history.
+CREATE TABLE IF NOT EXISTS earnings (
+    symbol TEXT NOT NULL, day TEXT NOT NULL, time_of_day TEXT NOT NULL, fiscal_end TEXT,
+    estimate REAL, fetched_ts REAL NOT NULL, PRIMARY KEY (symbol, day));
+-- Corporate actions by Alpaca id, for the symbol whose holders they affect. One that drops
+-- out of the feed (a cancelled deal) is marked withdrawn, never deleted. What the ledger
+-- has applied (PR 9) is kept apart, keyed by the same id.
+CREATE TABLE IF NOT EXISTS corporate_actions (
+    id TEXT PRIMARY KEY, kind TEXT NOT NULL, symbol TEXT NOT NULL, effective_day TEXT,
+    process_day TEXT, ex_day TEXT, record_day TEXT, pay_day TEXT, detail TEXT NOT NULL,
+    first_seen_ts REAL NOT NULL, updated_ts REAL NOT NULL, withdrawn_ts REAL);
+CREATE INDEX IF NOT EXISTS corporate_actions_symbol ON corporate_actions (symbol, process_day);
+-- When each symbol's corporate actions were last fetched. Never, or not lately, means its
+-- actions are unknown.
+CREATE TABLE IF NOT EXISTS corporate_action_checks (symbol TEXT PRIMARY KEY, ts REAL NOT NULL);
+-- The SEC's lists (replaced whole at each refresh) and company profiles (cached by CIK).
+CREATE TABLE IF NOT EXISTS sec_listings (
+    symbol TEXT PRIMARY KEY, cik INTEGER NOT NULL, name TEXT NOT NULL, exchange TEXT);
+CREATE TABLE IF NOT EXISTS sec_funds (symbol TEXT PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS sec_companies (
+    cik INTEGER PRIMARY KEY, name TEXT NOT NULL, entity_type TEXT NOT NULL, sic TEXT NOT NULL,
+    sic_description TEXT NOT NULL, tickers TEXT NOT NULL, exchanges TEXT NOT NULL,
+    fetched_ts REAL NOT NULL);
 """
 
 # version -> statements that upgrade a database from version-1. SCHEMA above is always the
