@@ -4,7 +4,8 @@ name = "ottr"
 version = "2.0.0a1"
 description = "Three-model council paper-trading engine with deterministic risk and accounting"
 requires-python = ">=3.11"
-dependencies = ["httpx>=0.27", "aiohttp>=3.10", "discord.py>=2.4"]  # aiohttp: the API; discord.py: `ottr chat`
+# aiohttp: the API; discord.py: `ottr chat`; tzdata: zoneinfo has no timezone data on Windows
+dependencies = ["httpx>=0.27", "aiohttp>=3.10", "discord.py>=2.4", "tzdata>=2024.1"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "pytest-asyncio>=0.23", "pyflakes>=3"]

@@ -11,7 +11,7 @@ mistake "unknown" for "zero".
 from __future__ import annotations
 
 import math
-from typing import List, Optional, Sequence
+from typing import Hashable, List, Optional, Sequence, Tuple
 
 
 def ema_series(values: Sequence[float], length: int) -> List[float]:
@@ -82,14 +82,22 @@ def log_returns(closes: Sequence[float]) -> List[float]:
     return [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
 
 
-def annualized_vol(closes: Sequence[float], window: int = 30) -> Optional[float]:
-    """Sample stdev of daily log returns over `window` days, * sqrt(365)."""
+# Periods per year for annualizing daily volatility: crypto trades every calendar day,
+# US markets about 252 sessions a year. Using 365 on stock bars would overstate vol by
+# sqrt(365/252), about 20%, and shrink every position by the same factor.
+CRYPTO_DAYS = 365.0
+TRADING_DAYS = 252.0
+
+
+def annualized_vol(closes: Sequence[float], window: int = 30,
+                   periods_per_year: float = CRYPTO_DAYS) -> Optional[float]:
+    """Sample stdev of daily log returns over `window` bars, * sqrt(periods_per_year)."""
     rets = log_returns(list(closes)[-(window + 1):])
     if len(rets) < 2:
         return None
     m = sum(rets) / len(rets)
     var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
-    vol = math.sqrt(var) * math.sqrt(365.0)
+    vol = math.sqrt(var) * math.sqrt(periods_per_year)
     return vol if vol > 0 else None
 
 
@@ -99,9 +107,13 @@ def return_correlation(a: Sequence[float], b: Sequence[float],
     ra = log_returns(list(a)[-(window + 1):])
     rb = log_returns(list(b)[-(window + 1):])
     n = min(len(ra), len(rb))
+    return _pearson(ra[-n:], rb[-n:]) if n else None
+
+
+def _pearson(x: Sequence[float], y: Sequence[float]) -> Optional[float]:
+    n = len(x)
     if n < 3:
         return None
-    x, y = ra[-n:], rb[-n:]
     mx, my = sum(x) / n, sum(y) / n
     cov = sum((p - mx) * (q - my) for p, q in zip(x, y))
     vx = sum((p - mx) ** 2 for p in x)
@@ -109,3 +121,22 @@ def return_correlation(a: Sequence[float], b: Sequence[float],
     if vx == 0 or vy == 0:
         return None
     return cov / math.sqrt(vx * vy)
+
+
+def aligned_return_correlation(a: Sequence[Tuple[Hashable, float]], b: Sequence[Tuple[Hashable, float]],
+                               window: int = 30) -> Optional[float]:
+    """Pearson correlation of log returns over the last `window` dates BOTH series have.
+
+    `a` and `b` are (date, close) rows. Matching by position (as `return_correlation`
+    does) is only right when both series cover the same days. Stocks halt, list late and
+    trade different holiday calendars (EFA vs SPY), so one missing day would pair Monday's
+    move with Tuesday's. Here each return spans the same two dates in both series.
+    """
+    da, db = dict(a), dict(b)
+    common = sorted(set(da) & set(db))[-(window + 1):]
+    ra, rb = [], []
+    for d0, d1 in zip(common, common[1:]):
+        if da[d0] > 0 and da[d1] > 0 and db[d0] > 0 and db[d1] > 0:
+            ra.append(math.log(da[d1] / da[d0]))
+            rb.append(math.log(db[d1] / db[d0]))
+    return _pearson(ra, rb)
