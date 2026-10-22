@@ -217,3 +217,12 @@ def test_a_book_this_version_cannot_open_is_a_message_not_a_traceback(tmp_path, 
     assert cli.main(["status"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("ottr: ") and "schema v2 book" in err and "Traceback" not in err
+
+
+def test_a_bad_config_is_a_message_not_a_traceback(tmp_path, capsys):
+    bad = tmp_path / "config.toml"
+    bad.write_text(cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8").replace(
+        "stop_vol_mult = 2.0", "stop_vol_mult = 2.0\ntrailing_stop_pct = 10.0"), encoding="utf-8")
+    assert cli.main(["--config", str(bad), "status"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("ottr: config.toml: [risk] unknown keys: ['trailing_stop_pct']") and "Traceback" not in err

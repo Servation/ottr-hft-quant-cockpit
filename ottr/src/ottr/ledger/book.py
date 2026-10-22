@@ -93,10 +93,17 @@ class Position:
     cost: Decimal
     high_water: float
     opened_ts: float
+    stop_pct: Optional[float] = None    # trailing-stop distance, a fraction; None: no stop (yet)
 
     @property
     def avg_cost(self) -> Decimal:
         return self.cost / self.qty if self.qty > 0 else Decimal(0)
+
+    @property
+    def stop_price(self) -> Optional[float]:
+        """The trailing stop: the high-water mark less the stop distance. It only ever rises,
+        because the high-water mark only rises and the distance never changes."""
+        return self.high_water * (1 - self.stop_pct) if self.stop_pct else None
 
 
 @dataclass(frozen=True)
@@ -184,8 +191,8 @@ class Ledger:
         return {"cash": D(r[0]), "realized_pnl": D(r[1]), "fees": D(r[2])}
 
     def positions(self) -> Dict[str, Position]:
-        return {r[0]: Position(r[0], D(r[1]), D(r[2]), r[3], r[4]) for r in self.store.conn.execute(
-            "SELECT asset,qty,cost,high_water,opened_ts FROM positions ORDER BY asset")}
+        return {r[0]: Position(r[0], D(r[1]), D(r[2]), r[3], r[4], r[5]) for r in self.store.conn.execute(
+            "SELECT asset,qty,cost,high_water,opened_ts,stop_pct FROM positions ORDER BY asset")}
 
     def lots(self, asset: Optional[str] = None, open_only: bool = True) -> List[Lot]:
         """Lots oldest first: the order a SELL consumes them in."""
@@ -426,6 +433,15 @@ class Ledger:
     def set_high_water(self, asset: str, price: float) -> None:
         with self.store.tx() as c:
             c.execute("UPDATE positions SET high_water=MAX(high_water, ?) WHERE asset=?", (price, asset))
+
+    def set_stop(self, asset: str, pct: float) -> bool:
+        """Give an open position its trailing-stop distance, once: a stop that is already set
+        is never changed, so it can't be loosened later. True if this call set it."""
+        if not 0 < pct < 1:
+            raise LedgerError(f"stop distance {pct!r} for {asset} must be a fraction in (0, 1)")
+        with self.store.tx() as c:
+            return c.execute("UPDATE positions SET stop_pct=? WHERE asset=? AND stop_pct IS NULL",
+                             (pct, asset)).rowcount == 1
 
     # -- audit ----------------------------------------------------------------------------
     def check(self) -> List[str]:

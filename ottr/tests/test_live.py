@@ -224,15 +224,21 @@ async def test_a_live_message_is_posted_once_then_edited():
 async def test_edits_are_coalesced_and_spaced():
     hook = LiveRecorder()
     a = Alerts(hook, Limits(live_edit_sec=0.2), live=hook)
+    loop = asyncio.get_running_loop()
     async with a.running():
+        t0 = loop.time()
         a.live("k", "note", {"i": 0})
         for i in range(1, 30):
             await asyncio.sleep(0.02)
             a.live("k", "note", {"i": i})
         a.live("k", "note", {"i": "end"}, final=True)
+        elapsed = loop.time() - t0
     times = [t for _, t, _ in hook.calls]
     gaps = [b - a for a, b in zip(times, times[1:])]
-    assert 2 <= len(hook.calls) <= 6  # 31 updates in ~0.6s
+    # 31 updates coalesce into the create, at most one edit per 0.2s while they arrive, and
+    # the final state. Bounded by the time that actually passed: Windows sleeps in 15.6ms
+    # ticks, and a busy machine stretches the loop further.
+    assert 2 <= len(hook.calls) <= 3 + int(elapsed / 0.2), (len(hook.calls), elapsed)
     assert all(g >= 0.2 - 0.03 for g in gaps), gaps  # the loop may fire a timer one clock tick early
     assert hook.shown == "**note**: {'i': 'end'}"
 

@@ -477,8 +477,14 @@ def main(argv=None) -> int:
     sub.add_parser("resume")
     args = ap.parse_args(argv)
 
-    cfgmod.load_env_file(Path(os.environ.get("OTTR_ENV_FILE") or cfgmod.ROOT / ".env"))
-    cfg = cfgmod.load(args.config)
+    try:
+        cfgmod.load_env_file(Path(os.environ.get("OTTR_ENV_FILE") or cfgmod.ROOT / ".env"))
+        cfg = cfgmod.load(args.config)
+    except cfgmod.ConfigError as e:
+        # A typo in config.toml or ottr/.env: say which, without a traceback. Exit 2, like
+        # the other "fix this before running" errors.
+        print(f"ottr: {args.config.name}: {e}", file=sys.stderr)
+        return 2
     log_file = args.log_file
     if args.cmd == "supervise" and log_file is None:
         log_file = cfg.data_dir / "logs" / "supervisor.log"

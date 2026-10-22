@@ -42,10 +42,12 @@ CREATE TABLE IF NOT EXISTS cash_events (
     id INTEGER PRIMARY KEY, ts REAL NOT NULL, day TEXT NOT NULL, kind TEXT NOT NULL,
     asset TEXT, qty TEXT, amount TEXT NOT NULL, note TEXT);
 -- positions: per-asset summary of the open lots (qty, cost), plus the risk monitor's
--- high-water mark. Kept in step with `lots` inside every fill's transaction.
+-- high-water mark and trailing-stop distance (a fraction, set once when the position opens;
+-- NULL until then, and always for the cash ETF). Kept in step with `lots` inside every
+-- fill's transaction.
 CREATE TABLE IF NOT EXISTS positions (
     asset TEXT PRIMARY KEY, qty TEXT NOT NULL, cost TEXT NOT NULL,
-    high_water REAL NOT NULL, opened_ts REAL NOT NULL);
+    high_water REAL NOT NULL, opened_ts REAL NOT NULL, stop_pct REAL);
 CREATE TABLE IF NOT EXISTS fills (
     id INTEGER PRIMARY KEY, ts REAL NOT NULL, day TEXT NOT NULL, idem_key TEXT NOT NULL UNIQUE,
     asset TEXT NOT NULL, side TEXT NOT NULL CHECK (side IN ('BUY','SELL')),

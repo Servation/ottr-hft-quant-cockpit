@@ -29,7 +29,7 @@ from ottr.ledger.store import Store
 from ottr.market.calendar import TradingCalendar
 from ottr.market.types import Quote
 from ottr.risk import gate
-from ottr.risk.monitor import RiskState
+from ottr.risk.monitor import RiskState, entry_stop_pct
 from ottr.risk.types import PROTECTIVE, Intent, Verdict
 from ottr.universe import Member
 
@@ -125,10 +125,15 @@ class Desk:
         ex = self.broker.execute(order, ctx.quote, ctx.now, fractionable=member.fractionable if member else True)
         if not ex.filled:
             return BookResult(None, ex.reason)
-        return BookResult(self.ledger.apply_fill(
+        fill = self.ledger.apply_fill(
             idem_key=intent.idem_key, asset=intent.asset, side=verdict.side, quantity=ex.qty, price=ex.price,
             accrued=ex.accrued, quote=ctx.quote, quote_source=ctx.quote.source, origin=intent.origin,
-            ref=intent.ref, reason=intent.reason, now=ctx.now))
+            ref=intent.ref, reason=intent.reason, now=ctx.now)
+        if verdict.side == "BUY" and intent.asset != self.cfg.universe.cash_symbol:
+            # The stop is set by the BUY that opens the position (same transaction), from
+            # the vol it was sized on; an add to an open position keeps the stop it has.
+            self.ledger.set_stop(intent.asset, entry_stop_pct(self.cfg.risk, ctx.vol))
+        return BookResult(fill)
 
     def funding(self, intent: Intent, verdict: Verdict, ctx: gate.GateContext) -> Optional[Intent]:
         """Sell enough of the cash ETF to cover the shortfall (plus a hair for the fill's

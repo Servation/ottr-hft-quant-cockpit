@@ -161,7 +161,11 @@ def format_event(kind: str, d: dict) -> str:
     if kind == "meeting_live":
         return _live_meeting(d)
     if kind == "risk_halt":
-        return f"**Drawdown breaker tripped**: {d['drawdown'] * 100:.1f}% off peak. BUYs blocked."
+        sells = f" Selling part of {', '.join(d['derisk'])} until it fills." if d.get("derisk") else ""
+        return f"**Drawdown breaker tripped**: {d['drawdown'] * 100:.1f}% off peak. BUYs blocked.{sells}"
+    if kind == "risk_gap":
+        return (f"**{d['asset']} gapped through its stop**: bid {float(d['bid']):,.2f} vs stop "
+                f"{float(d['stop']):,.2f} (last close {float(d['close']):,.2f}). Selling at the bid.")
     if kind == "risk_resume":
         return f"**Breaker resumed** ({d['why']})."
     if kind == "alarm":

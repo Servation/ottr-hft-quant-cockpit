@@ -15,8 +15,10 @@ symbol that left the universe can always be sold. A BUY must also:
   sleeve, and buying power less the cash reserve.
 A BUY short of buying power while the cash ETF is held asks to be funded first
 ("needs_cash"); the executor sells that much of the cash ETF and then asks again.
-Quantities are fractional to 1e-9 only where the broker allows it, else whole shares,
-and the limit price is the touch rounded to a legal tick against us.
+Quantities are fractional to 1e-9 only where the broker allows it, else whole shares (a
+partial SELL rounds to the nearest share, at least one), and the limit price is the touch
+rounded to a legal tick against us. A SELL that would leave a stub under the minimum trade
+sells it all; a council SELL under the minimum is refused, a protective one never is.
 
 Why pure: every rule is a plain function of the context the desk gathers, so each one is
 unit-tested without a clock, a network or a database, and the gate can't change anything.
@@ -25,14 +27,14 @@ unit-tested without a clock, a network or a database, and the gate can't change 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Optional
 
 from ottr.broker.base import whole_or_fractional
 from ottr.ledger.book import Position, Valuation
 from ottr.market.calendar import MarketTime
 from ottr.market.types import Quote
-from ottr.risk.types import CODE_SIZED, Intent, Verdict
+from ottr.risk.types import CODE_SIZED, PROTECTIVE, Intent, Verdict
 from ottr.universe import Member
 
 EARNINGS_BLACKOUT_SESSIONS = 5
@@ -102,7 +104,13 @@ def _sell(intent: Intent, ctx: GateContext) -> Verdict:
         return Verdict.reject(intent, "bad_fraction")
     price = ctx.limit_price
     fractionable = ctx.member.fractionable if ctx.member else True
-    q = whole_or_fractional(pos.qty * Decimal(str(intent.fraction)), fractionable)
+    want = pos.qty * Decimal(str(intent.fraction))
+    if fractionable:
+        q = whole_or_fractional(want, True)
+    else:
+        # Whole shares: the nearest whole number, and at least one. Flooring would turn a
+        # 25% sale of 2 shares into 0 shares, which the stub rule below makes a full exit.
+        q = min(pos.qty, max(Decimal(1), want.to_integral_value(rounding=ROUND_HALF_UP)))
     notes = []
     # Leaving a sub-minimum remainder just creates an untradeable stub: sell it all.
     remainder = (pos.qty - q) * price
@@ -110,7 +118,9 @@ def _sell(intent: Intent, ctx: GateContext) -> Verdict:
         q = pos.qty
         notes.append("rounded_to_full_exit")
     notional = q * price
-    if notional < Decimal(str(t.min_trade_usd)) and q != pos.qty:
+    # The minimum keeps the council from churning tiny trades. A protective sale (stop,
+    # trim, de-risk) is never refused for being small: refusing it leaves the risk on.
+    if notional < Decimal(str(t.min_trade_usd)) and q != pos.qty and intent.origin not in PROTECTIVE:
         return Verdict.reject(intent, "below_min_trade", f"${notional:,.2f}")
     return Verdict(True, intent.asset, "SELL", "approved", quantity=q, price=float(price),
                    notional=float(notional), quote_source=ctx.quote.source, notes=tuple(notes))

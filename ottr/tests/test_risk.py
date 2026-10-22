@@ -48,8 +48,8 @@ def sell(asset="TLT", fraction=1.0, origin="council"):
     return Intent(origin=origin, asset=asset, side="SELL", fraction=fraction, idem_key="k", created_ts=OPEN)
 
 
-def pos(asset="TLT", q="10", cost="900", hwm=90.0, opened=OPEN - 86400):
-    return Position(asset, Decimal(q), Decimal(cost), hwm, opened)
+def pos(asset="TLT", q="10", cost="900", hwm=90.0, opened=OPEN - 86400, stop=None):
+    return Position(asset, Decimal(q), Decimal(cost), hwm, opened, stop)
 
 
 # ---- sizing --------------------------------------------------------------------------------
@@ -151,6 +151,21 @@ def test_a_sell_fills_at_the_bid_on_a_tick_and_rounds_a_stub_to_a_full_exit(cfg)
     assert v.quantity == Decimal("10") and "rounded_to_full_exit" in v.notes   # $45 left is below the minimum
 
 
+@pytest.mark.parametrize("held,fraction,expect", [("2", 0.25, "1"), ("10", 0.25, "3"), ("10", 0.24, "2"),
+                                                   ("3", 0.95, "3")])
+def test_whole_share_sales_round_to_the_nearest_share_not_to_a_full_exit(cfg, held, fraction, expect):
+    c = ctx(cfg, asset="PDBC", price=200.0, side="SELL", fractionable=False, position=pos("PDBC", held, "1000"))
+    assert gate.evaluate(sell("PDBC", fraction), c).quantity == Decimal(expect)
+
+
+def test_a_small_protective_sale_is_never_refused_but_a_small_council_one_is(cfg):
+    c = ctx(cfg, side="SELL", position=pos(q="10", cost="900"))         # $900 held
+    assert gate.evaluate(sell(fraction=0.08), c).reason == "below_min_trade"           # $72 council sale
+    for origin in ("stop", "trim", "derisk"):
+        v = gate.evaluate(sell(fraction=0.08, origin=origin), c)
+        assert v.approved and v.quantity == Decimal("0.8")
+
+
 def test_a_sell_needs_a_position(cfg):
     assert gate.evaluate(sell(), ctx(cfg, side="SELL")).reason == "no_position"
 
@@ -159,8 +174,9 @@ def test_a_sell_needs_a_position(cfg):
 CLASSES = {"TLT": "bond_etf", "SPY": "equity_etf", "SGOV": "cash_etf"}
 
 
-def run(cfg, positions, quotes, valuation=None, state=None, points=100, now=OPEN, classes=CLASSES):
-    return monitor.check(cfg, now, positions, valuation, quotes, state or monitor.RiskState(), points, classes)
+def run(cfg, positions, quotes, valuation=None, state=None, points=100, now=OPEN, classes=CLASSES, closes=None):
+    return monitor.check(cfg, now, positions, valuation, quotes, state or monitor.RiskState(), points, classes,
+                         closes)
 
 
 def live(asset, price, now=OPEN):
@@ -221,3 +237,62 @@ def test_no_live_quote_makes_the_monitor_blind_not_silent(cfg):
     assert run(cfg, {"TLT": pos()}, {"TLT": live("TLT", 90.0)}).summary() == "all clear"
     stale = live("TLT", 90.0, now=OPEN - 999)
     assert run(cfg, {"TLT": pos()}, {"TLT": stale}).events[0][0] == "risk_blind"
+
+
+# ---- PR 8: vol stops, gaps, the sleeve, a breaker that persists ----------------------------------
+@pytest.mark.parametrize("vol,expect", [
+    (0.15, 2 * 0.15 * (10 / 252) ** 0.5),   # SPY-like: about 6%
+    (0.05, 0.03),                           # a bond ETF: the 3% floor
+    (0.60, 0.15),                           # silver-like: the 15% ceiling
+    (None, 0.10), (0.0, 0.10), (float("nan"), 0.10),   # unknown: the fallback, never a guess
+])
+def test_the_entry_stop_scales_with_volatility(cfg, vol, expect):
+    assert monitor.entry_stop_pct(cfg.risk, vol) == pytest.approx(expect)
+
+
+def test_each_position_trails_its_own_stop(cfg):
+    tight = pos(hwm=100.0, stop=0.05)                                   # stop at 95
+    assert run(cfg, {"TLT": tight}, {"TLT": live("TLT", 95.5)}).intents == []
+    (stop,) = run(cfg, {"TLT": tight}, {"TLT": live("TLT", 94.9)}).intents
+    assert (stop.origin, stop.idem_key) == ("stop", f"stop:TLT:{OPEN - 86400:.0f}") and "5.0% off high" in stop.reason
+    assert Position("TLT", Decimal(1), Decimal(1), 100.0, 0.0, 0.05).stop_price == pytest.approx(95.0)
+
+
+def test_a_gap_through_the_stop_sells_at_the_bid_and_says_so(cfg):
+    r = run(cfg, {"TLT": pos(hwm=100.0, stop=0.05)}, {"TLT": live("TLT", 91.0)}, closes={"TLT": 97.0})
+    (stop,) = r.intents
+    assert "gapped through its stop" in stop.reason and "last close 97.00" in stop.reason
+    assert ("gap", {"asset": "TLT", "bid": pytest.approx(91.0, rel=1e-3), "stop": pytest.approx(95.0),
+                    "close": 97.0}) in r.events
+    intraday = run(cfg, {"TLT": pos(hwm=100.0, stop=0.05)}, {"TLT": live("TLT", 94.0)}, closes={"TLT": 94.5})
+    assert "gapped" not in intraday.intents[0].reason and not [e for e in intraday.events if e[0] == "gap"]
+
+
+def test_the_single_stock_sleeve_is_trimmed_back_pro_rata(cfg):
+    names = ["AAA", "BBB", "CCC", "DDD", "EEE", "FFF"]
+    classes = dict(CLASSES, **{n: "stock" for n in names})
+    positions = {n: pos(n, "10", "700", 76.0) for n in names}
+    quotes = {n: live(n, 76.0) for n in names}
+    over = val(values={n: 760.0 for n in names})                         # 6 x 7.6% = 45.6% > 40% + 5%
+    r = run(cfg, positions, quotes, over, classes=classes)
+    trims = [i for i in r.intents if i.ref == "sleeve"]
+    assert [i.asset for i in trims] == names and trims[0].fraction == pytest.approx((0.456 - 0.40) / 0.456)
+    under = val(values={n: 740.0 for n in names})                        # 44.4%: inside the band
+    assert not [i for i in run(cfg, positions, quotes, under, classes=classes).intents if i.ref == "sleeve"]
+
+
+def test_the_breakers_sales_are_reissued_until_they_fill_and_end_on_resume(cfg):
+    st = monitor.RiskState(peak_equity=10000.0)
+    p = {"TLT": pos(hwm=90.0), "SGOV": Position("SGOV", Decimal("10"), Decimal("1000"), 100.0, OPEN)}
+    q = {"TLT": live("TLT", 90.0)}
+    down = val(equity=8400, values={"TLT": 900.0, "SGOV": 1000.0})
+    r = run(cfg, p, q, down, st)
+    assert r.state.halted and r.state.derisk == ["TLT"] and ("halt" in [k for k, _ in r.events])
+    keys = [i.idem_key for i in r.intents if i.origin == "derisk"]
+    assert keys == [f"derisk:TLT:{OPEN:.0f}"]
+    again = run(cfg, p, q, down, r.state, now=OPEN + 3600)                # the next check (or session)
+    assert [i.idem_key for i in again.intents if i.origin == "derisk"] == keys
+    gone = run(cfg, {"SGOV": p["SGOV"]}, {}, val(equity=8400, values={"SGOV": 1000.0}), r.state, now=OPEN + 7200)
+    assert not [i for i in gone.intents if i.origin == "derisk"]          # sold out: nothing left to issue
+    healed = run(cfg, p, q, val(equity=9500, values={"TLT": 900.0}), r.state, now=OPEN + 9000)
+    assert not healed.state.halted and healed.state.derisk == [] and not healed.intents
