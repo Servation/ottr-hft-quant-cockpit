@@ -1,8 +1,8 @@
 """
 Model adapters: one async `complete(prompt)` per provider, all via their local CLIs.
 
-What it does: runs Claude (`claude -p`), GPT (`codex exec`) and Gemini (`agy -p`) as
-subprocesses and returns raw text; `ask_json` extracts + validates JSON with one repair
+What it does: runs Claude (`claude -p`), GPT (`codex exec`) and Gemini (`agy`) as
+subprocesses, always passing the prompt on stdin, and returns raw text; `ask_json` extracts + validates JSON with one repair
 retry. Why CLIs: they use the user's existing subscriptions (no API keys in this repo)
 and the three share one tiny interface, so tests can swap in a fake. `make_adapter` builds
 one by name; the council passes its own effort, `ottr chat` a lower one so replies are quick.
@@ -25,6 +25,18 @@ logger = logging.getLogger(__name__)
 
 class ModelError(RuntimeError):
     """The model call failed (missing CLI, timeout, non-zero exit, empty output)."""
+
+
+# Hard ceiling on one prompt, in characters (about 100k tokens). Real council prompts are
+# a few tens of thousands; anything near this means a runaway packet (a bug), so fail with
+# a clear error before spawning a CLI instead of getting its opaque error or a context the
+# model silently truncates.
+MAX_PROMPT_CHARS = 400_000
+
+
+def check_prompt(name: str, prompt: str) -> None:
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise ModelError(f"{name}: prompt is {len(prompt):,} chars, over the {MAX_PROMPT_CHARS:,} limit")
 
 
 class ModelAdapter:
@@ -85,6 +97,7 @@ class ClaudeCLI(ModelAdapter):
         exe = self.locate()
         if not exe:
             raise ModelError("claude CLI not found on PATH")
+        check_prompt(self.name, prompt)
         # --tools "" + --disable-slash-commands: pure text in/out, no file or shell access.
         argv = [exe, "-p", "--output-format", "text", "--no-session-persistence",
                 "--tools", "", "--disable-slash-commands",
@@ -114,6 +127,7 @@ class CodexCLI(ModelAdapter):
         exe = self._find()
         if not exe:
             raise ModelError("codex CLI not found (expected inside the Codex desktop app)")
+        check_prompt(self.name, prompt)
         fd, out_path = tempfile.mkstemp(suffix=".txt")
         os.close(fd)
         try:
@@ -148,13 +162,45 @@ class GeminiCLI(ModelAdapter):
         exe = self.locate()
         if not exe:
             raise ModelError("agy (Antigravity CLI) not found on PATH")
-        argv = [exe, "-p", prompt, "--model", self.model, "--sandbox"]
+        check_prompt(self.name, prompt)
+        # The prompt goes in on stdin, never as an argument: Windows caps a command line at
+        # about 32k characters, which a full packet can exceed. agy only reads stdin in its
+        # stream-json mode, as one NDJSON {"event":"user","message":{"content":...}} line,
+        # and its -p flag always takes a value, so `-p=` (empty) hands the prompt to stdin.
+        # Plain-text stdin does not work: `-p -` sends a literal "-" as the prompt.
+        argv = [exe, "--input-format", "stream-json", "--output-format", "stream-json",
+                "--model", self.model, "--sandbox"]
         if self.effort:
             argv += ["--effort", self.effort]
-        rc, out, err = await _run(argv, None, timeout, tempfile.gettempdir())
-        if rc != 0 or not out.strip():
-            raise ModelError(f"agy exit {rc}: {err.strip()[:300]}")
-        return _normalize(out)
+        argv.append("-p=")
+        line = json.dumps({"event": "user", "message": {"content": prompt}}) + "\n"
+        rc, out, err = await _run(argv, line, timeout, tempfile.gettempdir())
+        return _normalize(agy_response(rc, out, err))
+
+
+def agy_response(rc: int, out: str, err: str) -> str:
+    """The reply text from agy's stream-json output, or ModelError.
+
+    The final `{"event":"result","result":{...}}` line carries `status` (SUCCESS or
+    ERROR), `response` and `error`; the step_update lines before it are streaming deltas.
+    """
+    result = None
+    for raw in out.splitlines():
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue  # agy may print a non-JSON notice; only the events matter
+        if isinstance(ev, dict) and ev.get("event") == "result":
+            result = ev.get("result") or {}
+    if result is None:
+        raise ModelError(f"agy exit {rc}: no result event ({err.strip()[:300]})")
+    if rc != 0 or result.get("status") != "SUCCESS":
+        why = result.get("error") or err.strip()
+        raise ModelError(f"agy exit {rc}, status {result.get('status')}: {str(why)[:300]}")
+    text = result.get("response") or ""
+    if not text.strip():
+        raise ModelError("agy returned an empty response")
+    return text
 
 
 def make_adapter(name: str, council: CouncilConfig, effort: Optional[str] = None) -> ModelAdapter:
