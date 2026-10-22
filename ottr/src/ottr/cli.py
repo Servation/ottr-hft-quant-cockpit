@@ -261,6 +261,17 @@ async def cmd_status(cfg, args) -> int:
         nxt = store.get_state("next_meeting_at")
         if nxt:
             print(f"next council meeting: {_et(nxt)}")
+        if cfg.watch.enabled:
+            from ottr.engine.engine import WATCH_STATE
+            from ottr.engine.watcher import WatchState
+            st = WatchState.from_dict(store.get_state(WATCH_STATE))
+            conds = ", ".join(t.describe() for t in st.triggers) or "no conditions set"
+            print(f"watcher: {conds}; {len(st.called_on(time.time()))} of {cfg.watch.max_called_per_day} "
+                  "called meetings used today")
+            if st.last_review:
+                print(f"  last review {st.last_review}")
+            if st.last_error:
+                print(f"  ! last failed review {st.last_error}")
         return report.exit_code
     finally:
         store.close()
@@ -589,6 +600,48 @@ async def cmd_archive(cfg, args) -> int:
     return 0
 
 
+def watch_report(out: dict, cfg) -> str:
+    """`ottr watch`: what the watcher would decide now."""
+    model = cfg.watch.model + (f" ({cfg.council.claude_model})" if cfg.watch.model == "claude" else "")
+    lines = [f"Watcher ({model}): call a meeting now? {'YES' if out['call_meeting'] else 'no'}",
+             f"  why: {out['why']}"]
+    if out.get("note"):
+        lines.append(f"  note: {out['note']}")
+    lines.append("Would watch:" if out["triggers"] else "Would watch: nothing")
+    lines += [f"  - {t.describe()}: {t.why}" for t in out["triggers"]]
+    if out["problems"]:
+        lines.append("Dropped by code:")
+        lines += [f"  - {p}" for p in out["problems"]]
+    lines.append("(a review by hand changes nothing and calls no meeting)")
+    return "\n".join(lines)
+
+
+async def cmd_watch(cfg, args) -> int:
+    from ottr.council.models import ModelError
+    alpaca = _alpaca(required=True)
+    store = _scratch_copy(cfg)
+    try:
+        market = MarketData(cfg, alpaca, store)
+        engine = Engine(cfg, store, market, alerts=make_alerts(None))
+        try:
+            await market.refresh_calendar()
+            await market.refresh_bars()
+            await engine.refresh_members()
+        except MarketDataError as e:
+            print(f"market data unavailable: {e}")
+            return 2
+        print("Asking the watcher what it would do now (one model call, a minute or two)...", flush=True)
+        try:
+            out = await engine.review("by hand", apply=False)
+        except (ModelError, MarketDataError) as e:
+            print(f"watcher failed: {e}")
+            return 1
+        print(watch_report(out, cfg))
+        return 0
+    finally:
+        store.close()
+
+
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
     return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
@@ -675,6 +728,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("data", help="US desk: check the Alpaca, events and macro feeds (reads only)")
     p.add_argument("--check", action="store_true", required=True, help="run the feed check")
     p.add_argument("--symbols", help="comma-separated symbols (default: the core universe in config.toml)")
+    sub.add_parser("watch", help="ask the desk watcher now what it would watch for and whether it would call a "
+                                 "meeting (on a scratch copy; changes nothing)")
     p = sub.add_parser("tax", help="tax ESTIMATES: gains by term, wash sales, dividends, estimated tax (reads only)")
     p.add_argument("--year", type=int, help="one tax year (default: every year)")
     p.add_argument("--detail", action="store_true", help="list every disposition and wash sale")
@@ -701,7 +756,8 @@ def main(argv=None) -> int:
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
           "chat": cmd_chat, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
-          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax, "archive": cmd_archive}[args.cmd]
+          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax, "archive": cmd_archive,
+          "watch": cmd_watch}[args.cmd]
     try:
         return asyncio.run(fn(cfg, args))
     except SchemaError as e:

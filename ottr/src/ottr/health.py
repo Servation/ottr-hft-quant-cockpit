@@ -41,7 +41,7 @@ CRITICAL, WARNING = "critical", "warning"
 # Risk and market feed the protective exits; jobs, equity and council run the day's
 # routine, measure and propose.
 SEVERITY = {"watchdog": CRITICAL, "market": CRITICAL, "risk": CRITICAL,
-            "jobs": WARNING, "equity": WARNING, "council": WARNING, "screen": WARNING}
+            "jobs": WARNING, "equity": WARNING, "council": WARNING, "screen": WARNING, "watch": WARNING}
 # A meeting gets this long past its slot to finish before a missing one is stale: two
 # council timeouts (analysts, then the chair) plus margin.
 COUNCIL_GRACE_EXTRA_SEC = 600.0
@@ -59,6 +59,7 @@ def intervals(cfg: Config) -> Dict[str, float]:
         "jobs": e.jobs_interval_sec,
         "risk": e.risk_interval_sec,
         "equity": e.equity_interval_sec,
+        **({"watch": 60.0} if cfg.watch.enabled else {}),
     }
 
 

@@ -133,6 +133,8 @@ def _live_meeting(d: dict) -> str:
     else:
         head = f"**Council in session** (`{mid}`, started <t:{int(d.get('started_at') or 0)}:R>)"
     lines = [head]
+    if d.get("called"):
+        lines.append(f"Called by the watcher: {clip(no_em_dash(d['called']), 240)}")
     if phase == "market":
         lines.append("Reading the market and the book.")
     for a in d.get("analysts") or []:
@@ -157,7 +159,19 @@ def format_event(kind: str, d: dict) -> str:
         trades = ", ".join(f"{t['action']} {t['asset']}" for t in d["trades"]) or "no trades"
         dropped = "".join(f"\n- dropped {x['trade']['action']} {x['trade']['asset']}: {x['why']}"
                           for x in d.get("dropped", []))
-        return f"**Council {d['id']}** ({d['status']}): {trades}\n{no_em_dash(d.get('summary', ''))}{dropped}"
+        called = f"\nCalled by the watcher: {clip(no_em_dash(d['called']), 300)}" if d.get("called") else ""
+        return (f"**Council {d['id']}** ({d['status']}): {trades}{called}\n{no_em_dash(d.get('summary', ''))}"
+                f"{dropped}")
+    if kind == "watch_set":
+        head = f"**Watching** ({d.get('reason')})" + (f": {clip(no_em_dash(d['note']), 200)}" if d.get("note") else "")
+        rows = [f"- {c}: {clip(no_em_dash(why), 160)}" for c, why in d.get("triggers") or []]
+        return "\n".join([head, *(rows or ["- nothing: no condition set until the next meeting"])])
+    if kind == "meeting_called":
+        who = "a watched condition was met" if d.get("by") == "condition" else "the watcher"
+        return f"**Meeting called** ({who}): {clip(no_em_dash(d.get('why', '')), 600)}"
+    if kind == "meeting_call_refused":
+        who = "A watched condition was met" if d.get("by") == "condition" else "The watcher asked for a meeting"
+        return (f"**{who}, but no meeting**: {d.get('blocked')}.\n> {clip(no_em_dash(d.get('why', '')), 400)}")
     if kind == "meeting_live":
         return _live_meeting(d)
     if kind == "risk_halt":

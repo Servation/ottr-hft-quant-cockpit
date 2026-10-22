@@ -125,7 +125,13 @@ def council_line(c: Optional[dict]) -> str:
         return f"Council: **in session** (started {when(c.get('started_at'))})" + (f": {where}" if where else "")
     last = c.get("last_meeting")
     tail = f" | last {when(last['ts'])} ({last['status']})" if last else " | no meeting yet"
-    return f"Council: next meeting {when(c.get('next_meeting_at'))}{tail}"
+    line = f"Council: next meeting {when(c.get('next_meeting_at'))}{tail}"
+    w = c.get("watch") or {}
+    if w.get("enabled"):
+        conds = [x["condition"] for x in w.get("conditions") or []]
+        line += (f"\nWatcher: {'watching ' + ', '.join(conds) if conds else 'no conditions set'}; "
+                 f"{w.get('called_today', 0)} of {w.get('max_called_per_day')} called meetings used today")
+    return line
 
 
 def status(health: Optional[dict], book: Optional[dict], council: Optional[dict],

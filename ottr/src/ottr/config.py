@@ -58,6 +58,20 @@ class Council:
 
 
 @dataclass(frozen=True)
+class Watch:
+    """The desk watcher (`engine/watcher.py`): a model that reviews the market between
+    meetings, sets conditions for code to watch, and may call a meeting."""
+    enabled: bool = True
+    model: str = "claude"                  # claude | gpt | gemini (claude runs council.claude_model)
+    effort: str = ""                       # "" = the council's reasoning effort
+    check_every_min: float = 30.0          # a review this often in session (and after every meeting)
+    max_triggers: int = 8
+    max_called_per_day: int = 4
+    min_gap_min: float = 45.0              # between meetings, called or scheduled
+    timeout_sec: float = 300.0
+
+
+@dataclass(frozen=True)
 class Engine:
     market_interval_sec: float = 60.0  # market data upkeep (calendar, bars, quote health)
     jobs_interval_sec: float = 60.0    # scheduled jobs: fees, sweep, events feeds, deferred orders
@@ -186,6 +200,7 @@ def _shared_sections(raw: dict) -> dict:
     return dict(
         risk=_section(Risk, raw.get("risk", {}), "risk"),
         council=_section(Council, raw.get("council", {}), "council"),
+        watch=_section(Watch, raw.get("watch", {}), "watch"),
         engine=_section(Engine, raw.get("engine", {}), "engine"),
         alerts=_section(Alerts, raw.get("alerts", {}), "alerts"),
         api=_section(Api, raw.get("api", {}), "api"),
@@ -403,6 +418,7 @@ class Config:
     chat: Chat = field(default_factory=Chat)
     screen: Screen = field(default_factory=Screen)
     tax: Tax = field(default_factory=Tax)
+    watch: Watch = field(default_factory=Watch)
     discord_webhook_url: Optional[str] = field(default=None, repr=False)
     api_key: Optional[str] = field(default=None, repr=False)
     discord_bot_token: Optional[str] = field(default=None, repr=False)
@@ -516,7 +532,7 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
         **_runtime(data_dir),
     )
     unknown = set(raw) - {"account", "universe", "trading", "sizing", "caps", "risk", "schedule", "data",
-                          "fees", "sweep", "events", "screen", "tax", "council", "engine", "alerts", "api", "chat"}
+                          "fees", "sweep", "events", "screen", "tax", "watch", "council", "engine", "alerts", "api", "chat"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
@@ -590,6 +606,13 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("data: vol_sessions in 10..252, er_sessions in 5..120, er_threshold in (0, 1)")
     _validate_events(cfg.events)
     _validate_screen(cfg.screen)
+    w = cfg.watch
+    if w.model not in ("claude", "gpt", "gemini"):
+        raise ConfigError(f"watch.model must be claude, gpt or gemini, got {w.model!r}")
+    if not 5 <= w.check_every_min <= 240 or not 0 <= w.max_triggers <= 20:
+        raise ConfigError("watch: check_every_min in 5..240 and max_triggers in 0..20")
+    if not 0 <= w.max_called_per_day <= 10 or not 15 <= w.min_gap_min <= 240 or not 30 <= w.timeout_sec <= 900:
+        raise ConfigError("watch: max_called_per_day in 0..10, min_gap_min in 15..240, timeout_sec in 30..900")
     tx = cfg.tax
     rates = (tx.federal_ordinary_pct, tx.federal_long_term_pct, tx.collectibles_max_pct, tx.state_pct, tx.niit_pct)
     if not all(0 <= r <= 60 for r in rates):

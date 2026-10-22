@@ -64,6 +64,7 @@ estimates.
 | `ottr data --check [--symbols A,B]` | no | checks Alpaca, FRED, Alpha Vantage, the SEC and corporate actions with your keys |
 | `ottr screen [--top N]` | no | runs the stock screener now and shows what it would change (a few minutes) |
 | `ottr tax [--year Y] [--detail]` | no | tax ESTIMATES: gains by term, wash sales, dividends, estimated tax, after tax |
+| `ottr watch` | no | asks the desk watcher now what it would watch for and whether it would call a meeting (a scratch copy) |
 | `ottr status [--json]` | no | health, the book (with after-tax equity), risk state, benchmarks, schedule |
 | `ottr check` | no | replays the ledger; exits 2 if the books don't balance |
 | `ottr meeting [--execute]` | no (yes with `--execute`) | one council meeting now; without `--execute` on a scratch copy |
@@ -91,6 +92,8 @@ closes, DST).
   noise. A holding that gapped through its stop overnight is sold at the bid.
 - **10:15 and 15:15 meetings:** on an early close the later one moves to 45 minutes
   before the close. BUYs stop 10 minutes before the close.
+- **In between, the watcher:** after every meeting and every 30 minutes, Claude reviews
+  what changed and may call a meeting (see [The desk watcher](#the-desk-watcher)).
 - **15:45 sweep:** cash above 5% of equity buys SGOV; a BUY short of cash sells SGOV first.
 - **The close:** the day's regulatory fees are charged (rounded up, as Alpaca does). Once
   the official close is final (16 minutes later on the free plan), an equity point is
@@ -98,8 +101,8 @@ closes, DST).
 - **Saturday 08:00:** the stock screener promotes and demotes satellites.
 
 Engine tasks: market 60s, jobs 60s (fees, sweep, events feeds, deferred retries), risk 60s
-in session, equity 15 min in session and once per close, council by the schedule, the
-screen weekly, watchdog 60s.
+in session, equity 15 min in session and once per close, council by the schedule (and
+when the watcher calls one), watch 60s in session, the screen weekly, watchdog 60s.
 
 ## Running unattended
 
@@ -155,6 +158,35 @@ fills can't crowd out an alarm. Every raise and clear is also in the audit log.
 The engine can't report its own death. Restarts are covered by the supervisor, and by
 the next start (it posts that the previous run didn't shut down cleanly). A machine that
 is simply off shows up as exit code 3 from `ottr status`.
+
+## The desk watcher
+
+Between the scheduled meetings, Claude (the council's `claude_model`, Opus) watches the desk.
+After every meeting, and every 30 minutes in session, it reads what changed since the last
+meeting and answers two questions:
+- **Call a meeting now?** It answers yes only when something material changed that the last
+  meeting didn't weigh: a holding breaking down, a level that mattered breaking, or a shock
+  across assets.
+- **What to watch until the next meeting?** Up to 8 conditions: an asset below or above a
+  level, or moving more than some percent either way. Code checks them every minute on
+  live quotes; one that is met calls a meeting and is used up.
+
+**The limits are code:**
+- in session only, and none in the last 45 minutes;
+- at least 45 minutes after the last meeting and before the next scheduled one;
+- at most 4 called meetings a day;
+- never while a meeting runs.
+
+A condition that is unpriced, more than 25% from the price, or already met is dropped and
+said so.
+
+The watcher can't trade. A called meeting runs the full council and the same risk gate;
+its packet opens with why it was called, and the chair may well decide nothing. Discord
+gets a post when the watched conditions change, when a meeting is called (and why), and
+when a call is refused (and why). `/status`, `ottr status` and `GET /api/council` show
+what it is watching. `ottr watch` asks it what it would do right now, changing nothing.
+`[watch]` in config.toml holds every limit, the model and how often it reviews
+(`enabled = false` turns it off).
 
 ## Watching a council meeting
 

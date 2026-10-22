@@ -119,7 +119,7 @@ def beat_at(store, task, ts, ok=True, detail=""):
                        (task, ts, int(ok), detail, ts if ok else None))
 
 
-HEALTHY = ("market", "jobs", "equity", "council")
+HEALTHY = ("market", "jobs", "equity", "council", "watch")
 
 
 async def test_watchdog_alarm_reaches_audit_and_discord_then_resolves(eng, store):
@@ -136,7 +136,7 @@ async def test_watchdog_alarm_reaches_audit_and_discord_then_resolves(eng, store
 
     for step in range(1, 7):  # the feed recovers; one tick a minute
         t = now + 60 * step
-        for task in ("market", "jobs", "risk"):
+        for task in ("market", "jobs", "risk", "watch"):
             beat_at(store, task, t)
         eng.watchdog_tick(t)
         if step < 5:  # clean, but inside the 300s hysteresis
