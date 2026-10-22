@@ -28,6 +28,7 @@ from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, 
 
 from ottr.clock import SYSTEM, Clock
 from ottr.events.view import MacroReading
+from ottr.ledger import corporate
 from ottr.ledger.book import Ledger, trade_day
 from ottr.ledger.marks import SIP_FINAL_AFTER_SEC, mark
 from ottr.ledger.store import Store
@@ -121,15 +122,26 @@ class MarketData:
                 return None, f"market_data_error ({e})"
         else:
             snaps = await self.snapshots(force=self.clock.time() - self._snaps_ts > REFRESH_IF_OLDER_SEC)
-        return check_quote(symbol, snaps.get(symbol), self.clock.time(), self.cfg.data.quote_limits())
+        now = self.clock.time()
+        return check_quote(symbol, snaps.get(symbol), now, self.cfg.data.quote_limits(),
+                           self._splits(now).get(symbol, 1.0))
+
+    def _splits(self, now: float) -> Dict[str, float]:
+        """symbol -> the share multiple of splits effective since the last close."""
+        try:
+            last = self.calendar.state_at(now).last_close
+        except CalendarError:
+            return {}
+        return corporate.split_ratios(self.store, last.day, trade_day(now)) if last else {}
 
     async def live_quotes(self) -> Dict[str, Quote]:
         """Every tracked symbol that has a usable live quote right now."""
         now = self.clock.time()
         limits = self.cfg.data.quote_limits()
+        splits = self._splits(now)
         out = {}
         for s, snap in (await self.snapshots()).items():
-            q, _ = check_quote(s, snap, now, limits)
+            q, _ = check_quote(s, snap, now, limits, splits.get(s, 1.0))
             if q is not None:
                 out[s] = q
         return out
@@ -213,7 +225,9 @@ class MarketData:
 
     async def prices(self, symbols: Iterable[str]) -> Dict[str, Quote]:
         """The current price of each symbol that has one, by the session rules in
-        `ledger/marks.py` (live quote, delayed minute close, or last official close)."""
+        `ledger/marks.py` (live quote, delayed minute close, or last official close). With
+        the market shut, the last close is restated by the corporate actions the book has
+        applied since (`ledger/corporate.restate_marks`)."""
         syms = sorted(set(symbols))
         if not syms:
             return {}
@@ -232,6 +246,8 @@ class MarketData:
             m = mark(s, mt, live.get(s), delayed.get(s), bars[s])
             if m is not None:
                 out[s] = m
+        if not mt.is_open and mt.last_close is not None:
+            out = corporate.restate_marks(self.store, out, mt.last_close.day)
         return out
 
     async def marks(self) -> Dict[str, Quote]:
