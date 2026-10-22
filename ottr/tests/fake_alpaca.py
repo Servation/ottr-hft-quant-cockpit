@@ -37,6 +37,8 @@ class FakeAlpaca:
         self.assets = {}            # symbol -> asset row
         self.snaps: Dict[str, dict] = {}
         self.bars: Dict[str, List[dict]] = {}
+        self.adj_bars: Dict[str, List[dict]] = {}
+        self.minute_bars: Dict[str, List[dict]] = {}
         self.page_size = 10000
         self.fail_429: Dict[str, int] = {}   # path -> how many 429s to send first
         self.reset_in = 2.0
@@ -58,13 +60,24 @@ class FakeAlpaca:
         self.snaps[symbol] = {"latestQuote": q, "latestTrade": t,
                               "prevDailyBar": {"t": "2026-01-01T05:00:00Z", "o": pc, "h": pc, "l": pc, "c": pc, "v": 1}}
 
-    def add_daily_bars(self, symbol: str, closes: Dict[date, float]) -> None:
-        rows = []
-        for d, c in sorted(closes.items()):
-            midnight = datetime(d.year, d.month, d.day, tzinfo=ET).astimezone(timezone.utc)
-            rows.append({"t": midnight.strftime("%Y-%m-%dT%H:%M:%SZ"), "o": c, "h": c * 1.01, "l": c * 0.99,
-                         "c": c, "v": 1000, "n": 10, "vw": c})
-        self.bars[symbol] = rows
+    def add_daily_bars(self, symbol: str, closes: Dict[date, float],
+                       adjusted: Optional[Dict[date, float]] = None) -> None:
+        """Raw daily bars, and optionally different adjusted ones (adjustment=all); without
+        them the adjusted series equals the raw one (no dividends or splits)."""
+        def rows(cs):
+            out = []
+            for d, c in sorted(cs.items()):
+                midnight = datetime(d.year, d.month, d.day, tzinfo=ET).astimezone(timezone.utc)
+                out.append({"t": midnight.strftime("%Y-%m-%dT%H:%M:%SZ"), "o": c, "h": c * 1.01, "l": c * 0.99,
+                            "c": c, "v": 1000, "n": 10, "vw": c})
+            return out
+        self.bars[symbol] = rows(closes)
+        self.adj_bars[symbol] = rows(adjusted if adjusted is not None else closes)
+
+    def add_minute_bar(self, symbol: str, start_ts: float, close: float) -> None:
+        """One SIP minute bar, stamped (like Alpaca's) at the start of its minute."""
+        self.minute_bars.setdefault(symbol, []).append(
+            {"t": iso(start_ts).replace(".123456789", ""), "o": close, "h": close, "l": close, "c": close, "v": 100})
 
     # -- transport -------------------------------------------------------------------------
     def client(self) -> httpx.AsyncClient:
@@ -123,14 +136,20 @@ class FakeAlpaca:
         if path == "/v2/stocks/bars":
             if q.get("feed", "sip") == "sip" and parse_ts(q["end"]) > self.now - 15 * 60:
                 return httpx.Response(403, json={"message": "subscription does not permit querying recent SIP data"})
-            start = datetime.fromisoformat(q["start"]).date() if "T" in q["start"] else date.fromisoformat(q["start"])
             end_ts = parse_ts(q["end"])
             rows = []
-            for sym in sorted(q["symbols"].split(",")):
-                for r in self.bars.get(sym, []):
-                    t = parse_ts(r["t"])
-                    if datetime.fromtimestamp(t, tz=ET).date() >= start and t <= end_ts:
-                        rows.append((sym, r))
+            if q.get("timeframe") == "1Min":
+                start_ts = parse_ts(q["start"])
+                for sym in sorted(q["symbols"].split(",")):
+                    rows += [(sym, r) for r in self.minute_bars.get(sym, []) if start_ts <= parse_ts(r["t"]) <= end_ts]
+            else:
+                start = datetime.fromisoformat(q["start"]).date() if "T" in q["start"] else date.fromisoformat(q["start"])
+                source = self.adj_bars if q.get("adjustment") == "all" else self.bars
+                for sym in sorted(q["symbols"].split(",")):
+                    for r in source.get(sym, []):
+                        t = parse_ts(r["t"])
+                        if datetime.fromtimestamp(t, tz=ET).date() >= start and t <= end_ts:
+                            rows.append((sym, r))
             offset = int(q.get("page_token") or 0)
             limit = min(int(q.get("limit", 1000)), self.page_size)
             page = rows[offset:offset + limit]
