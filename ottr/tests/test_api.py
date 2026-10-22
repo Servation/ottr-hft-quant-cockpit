@@ -122,7 +122,7 @@ async def test_equity_curve_downsamples_and_keeps_the_last_point(api):
     _, s, _ = api
     full = await get(s, "/api/equity")
     assert full["count"] == 30 and full["returned"] == 30
-    assert set(full["points"][0]) == {"ts", "equity", "cash", "invested", "bench_spy", "bench_60_40"}
+    assert set(full["points"][0]) == {"ts", "equity", "cash", "invested", "bench_spy", "bench_60_40", "after_tax"}
     d = await get(s, "/api/equity?max_points=7")
     assert d["returned"] <= 7 and d["points"][-1]["ts"] == full["points"][-1]["ts"]
     d = await get(s, f"/api/equity?since={1_000_000 + 900 * 25}")

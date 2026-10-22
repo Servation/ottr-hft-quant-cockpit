@@ -51,7 +51,7 @@ from ottr.engine.killswitch import KillSwitch
 from ottr.engine.progress import MeetingProgress
 from ottr.events.refresh import Sources, refresh_due
 from ottr.events.view import FEED_CORPORATE, StoredEvents, macro_readings
-from ottr.ledger import corporate
+from ottr.ledger import corporate, tax
 from ottr.ledger.book import Ledger, trade_day
 from ottr.ledger.marks import SIP_FINAL_AFTER_SEC
 from ottr.ledger.store import Store, dumps
@@ -434,8 +434,13 @@ class Engine:
         detail = {"weights": v.weights, "basis": {s: m.basis for s, m in marks.items()}}
         if v.receivable:
             detail["receivable"] = v.receivable
-        self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail)
-        return f"equity ${v.equity:,.2f}"
+        try:
+            after_tax = tax.after_tax_equity(self.cfg, self.store, marks, v.equity, trade_day(now))
+        except ValueError as e:  # an inconsistent history: the ledger check alarms on it
+            logger.warning("after-tax equity unknown: %s", e)
+            after_tax = None
+        self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail, after_tax)
+        return f"equity ${v.equity:,.2f}" + (f" (after tax, est. ${after_tax:,.2f})" if after_tax is not None else "")
 
     # -- council -----------------------------------------------------------------------------
     def book_context(self, snap: UsSnapshot) -> str:

@@ -195,6 +195,17 @@ challenger_margin = 15.0         # score points a challenger must beat the weake
 max_correlation = 0.75           # with any member (120 sessions): passed over
 cooldown_days = 28               # a demoted stock waits this long before it can return
 
+[tax]
+# Rates for the tax ESTIMATES (ottr/ledger/tax.py): `ottr tax`, and the after-tax equity
+# beside the pre-tax one. Set them to your own situation; they are estimates, not advice.
+federal_ordinary_pct = 24.0      # your marginal federal rate (ordinary income, short-term gains)
+federal_long_term_pct = 15.0     # long-term gains and qualified dividends
+collectibles_max_pct = 28.0      # long-term gains on collectibles are taxed at up to this
+state_pct = 0.0
+niit_pct = 0.0                   # 3.8 if your income is over the net investment income tax threshold
+collectibles = ["GLD", "SLV"]    # physical-metal funds: their long-term gains are collectibles
+qualified_dividend_classes = ["equity_etf", "stock"]   # the rest count as ordinary dividends
+
 [schedule]
 meeting_times = ["10:15", "15:15"]   # New York time, trading days only
 min_before_close_min = 45            # on early closes a later slot moves back to this

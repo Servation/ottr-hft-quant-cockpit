@@ -31,6 +31,7 @@ import sys
 import tempfile
 import time
 from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -138,13 +139,17 @@ async def _marks(cfg, store: Store) -> Tuple[Dict[str, Quote], Optional[str]]:
     return out, None if len(out) == len(held) else "live prices need the Alpaca keys"
 
 
-def _print_book(store: Store, marks: Dict[str, Quote]) -> None:
+def _print_book(cfg, store: Store, marks: Dict[str, Quote]) -> None:
     lg = Ledger(store)
     v = lg.value(marks)
     acct = lg.account()
     if v:
+        from ottr.ledger import tax
         owed = f"  dividends owed ${v.receivable:,.2f}" if v.receivable else ""
-        print(f"equity ${v.equity:,.2f}  cash ${v.cash:,.2f}  invested ${v.invested:,.2f}{owed}  "
+        after = tax.after_tax_equity(cfg, store, marks, v.equity, datetime.now(tz=ET).date())
+        # Shown once there is something to tax: an untouched book is worth the same after tax.
+        net = f"  after tax (est.) ${after:,.2f}" if after is not None and abs(after - v.equity) >= 0.01 else ""
+        print(f"equity ${v.equity:,.2f}{net}  cash ${v.cash:,.2f}  invested ${v.invested:,.2f}{owed}  "
               f"realized ${float(acct['realized_pnl']):+,.2f}  fees ${float(acct['fees']):,.2f}")
     else:
         print(f"equity unknown (a holding has no price)  cash ${float(acct['cash']):,.2f}  "
@@ -191,7 +196,7 @@ async def cmd_status(cfg, args) -> int:
         marks, why = await _marks(cfg, store)
         if why:
             print(f"(prices unavailable here: {why})")
-        _print_book(store, marks)
+        _print_book(cfg, store, marks)
         st = RiskState.from_dict(store.get_state("risk"))
         print(f"risk: {'HALTED since ' + _et(st.halted_since) if st.halted else 'normal'}  "
               f"peak {_usd(st.peak_equity, 'n/a (set by the first in-session risk check)')}  cooldowns {list(st.cooldowns) or 'none'}")
@@ -449,6 +454,76 @@ async def cmd_screen(cfg, args) -> int:
     return 0
 
 
+def tax_report(cfg, store: Store, marks: Dict[str, Quote], today, year: Optional[int] = None,
+               detail: bool = False) -> str:
+    """`ottr tax`: each year's estimate, what selling everything today would add, and with
+    `detail` every disposition and wash sale. Labeled as an estimate throughout."""
+    from ottr.ledger import tax
+    t = cfg.tax
+    rep = tax.replay(store, t.collectibles)
+    divs = tax.dividends_by_year(store, tax.classes_of(cfg, store), t.qualified_dividend_classes)
+    ys = tax.years(rep, divs, t, today.year)
+    fees: Dict[int, Decimal] = {}
+    for day, amount in store.conn.execute("SELECT day, amount FROM cash_events WHERE kind='fee'"):
+        fees[int(day[:4])] = fees.get(int(day[:4]), Decimal(0)) - Decimal(amount)
+    lines = [f"TAX ESTIMATES for the paper book (rates in config.toml [tax]: federal {t.federal_ordinary_pct:g}% "
+             f"ordinary, {t.federal_long_term_pct:g}% long term, state {t.state_pct:g}%, NIIT {t.niit_pct:g}%). "
+             "Not tax advice."]
+    for y in ys:
+        if year is not None and y.year != year:
+            continue
+        disp = [d for d in rep.dispositions if d.sold.year == y.year]
+        realized = sum((d.proceeds - d.cost for d in disp), Decimal(0))
+        pretax = realized + y.qualified_dividends + y.ordinary_dividends - fees.get(y.year, Decimal(0))
+        lines += [f"\n{y.year}: short term {_signed(y.short_term)}, long term {_signed(y.long_term)}, "
+                  f"collectibles {_signed(y.collectibles)}; wash sales deferred ${y.disallowed:,.2f}",
+                  f"  dividends: qualified ${y.qualified_dividends:,.2f}, ordinary ${y.ordinary_dividends:,.2f}"]
+        if y.carry_in or y.deduction or y.carry_out:
+            lines.append(f"  capital loss: carried in ${y.carry_in:,.2f}, deducted ${y.deduction:,.2f}, "
+                         f"carried forward ${y.carry_out:,.2f}")
+        lines += [f"  estimated tax: federal ${y.federal:,.2f}, state ${y.state:,.2f}, NIIT ${y.niit:,.2f} = "
+                  f"${y.total:,.2f}",
+                  f"  result: realized {_signed(realized)} + dividends - fees ${fees.get(y.year, Decimal(0)):,.2f} = "
+                  f"{_signed(pretax)} before tax, {_signed(pretax - y.total)} after"]
+        if detail:
+            for d in disp:
+                wash = f", wash sale: ${d.disallowed:,.2f} disallowed" if d.disallowed else ""
+                adj = f" (basis +${d.adjustment:,.2f} from a wash sale)" if d.adjustment else ""
+                lines.append(f"    {d.sold} {d.asset:6} {d.qty.normalize():f} acquired {d.acquired}: proceeds "
+                             f"${d.proceeds:,.2f}, basis ${d.basis:,.2f}{adj}, {d.term} term "
+                             f"{_signed(d.gain)}{wash}")
+    liq = tax.liquidation(store, rep, marks, today, t.collectibles)
+    if liq is None:
+        lines.append("\nAfter tax if sold today: unknown (a holding has no price)")
+    elif liq:
+        more = sum((x.total for x in tax.years(rep, divs, t, today.year, liq)), Decimal(0)) - \
+            sum((x.total for x in ys), Decimal(0))
+        lines.append(f"\nSelling everything today at these prices would add about ${more:,.2f} of tax.")
+    return "\n".join(lines)
+
+
+def _signed(x) -> str:
+    return f"{'+' if x >= 0 else '-'}${abs(x):,.2f}"
+
+
+async def cmd_tax(cfg, args) -> int:
+    try:
+        store = Store(_db(cfg), writer=False)
+    except FileNotFoundError as e:
+        print(e)
+        return 3
+    try:
+        lg = Ledger(store)
+        if not lg.initialized():
+            print("no book yet (run `ottr init`)")
+            return 3
+        marks, _ = await _marks(cfg, store)
+        print(tax_report(cfg, store, marks, datetime.now(tz=ET).date(), args.year, args.detail))
+        return 0
+    finally:
+        store.close()
+
+
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
     return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
@@ -528,6 +603,9 @@ def main(argv=None) -> int:
     p = sub.add_parser("data", help="US desk: check the Alpaca, events and macro feeds (reads only)")
     p.add_argument("--check", action="store_true", required=True, help="run the feed check")
     p.add_argument("--symbols", help="comma-separated symbols (default: the core universe in config.toml)")
+    p = sub.add_parser("tax", help="tax ESTIMATES: gains by term, wash sales, dividends, estimated tax (reads only)")
+    p.add_argument("--year", type=int, help="one tax year (default: every year)")
+    p.add_argument("--detail", action="store_true", help="list every disposition and wash sale")
     p = sub.add_parser("screen", help="run the stock screener now and show what it would change (changes nothing)")
     p.add_argument("--top", type=int, default=25, help="ranked stocks to show")
     sub.add_parser("check")
@@ -551,7 +629,7 @@ def main(argv=None) -> int:
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
           "chat": cmd_chat, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
-          "resume": cmd_resume, "screen": cmd_screen}[args.cmd]
+          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax}[args.cmd]
     try:
         return asyncio.run(fn(cfg, args))
     except SchemaError as e:
