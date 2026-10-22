@@ -107,11 +107,60 @@ async def cmd_init(cfg, args) -> int:
             return 1
         lg.initialize(cfg.account.starting_cash)
         print(f"Book opened: ${cfg.account.starting_cash:,.2f} in a {cfg.account.type} account. The benchmarks "
-              "(SPY and 60/40) start from the first close the engine records. Next: `ottr run` (or "
-              "`ottr service start`).")
+              "(SPY and 60/40) start from the first close the engine records.")
+        if not args.no_seed:
+            alpaca = _alpaca(required=False)
+            if alpaca is None:
+                print(NO_KEYS + " The engine loads the market data and runs the first screen once they are set.")
+            else:
+                await seed(cfg, store, alpaca, _sources(alpaca))
+        print("Next: `ottr run` (or `ottr service start`).")
         return 0
     finally:
         store.close()
+
+
+async def seed(cfg, store: Store, alpaca, sources: Sources, say=print) -> bool:
+    """Load what the first session needs so the engine starts with it: the calendar, the
+    asset records and daily bars, the events feeds, and the first stock screen (applied).
+    True when everything loaded. A step that fails is reported; the engine retries each
+    one on its own (the screen runs at start-up while none has been applied)."""
+    from ottr.events.refresh import refresh_due
+    from ottr.market.http import HttpError
+    from ottr.universe import db as udb
+    from ottr.universe import run as urun
+    say("Loading the market data, the events feeds and the first stock screen (a few minutes)...")
+    market = MarketData(cfg, alpaca, store)
+    try:
+        cal = await market.refresh_calendar(force=True)
+        await market.refresh_assets(cfg.core, force=True)
+        n = await market.refresh_bars(force=True)
+    except MarketDataError as e:
+        say(f"  market data failed: {e}")
+        return False
+    say(f"  market data: the calendar through {cal.last_day}, {n:,} daily bars for {len(market.tracked())} symbols")
+    ok = True
+    for r in await refresh_due(cfg, store, sources, list(cfg.core), time.time()):
+        say(f"  {r.feed}: {r.detail}")
+        ok = ok and r.ok
+    try:
+        res = await urun.run_screen(cfg, store, alpaca, sources.sec, cal, time.time(), kind="init",
+                                    progress=lambda line: say(f"  {line}"))
+    except (urun.ScreenError, MarketDataError, HttpError) as e:
+        say(f"  first screen failed ({e}); the engine runs it when it starts")
+        return False
+    now = time.time()
+    urun.apply(store, res, set(Ledger(store).positions()), now)
+    udb.save_screen(store, res.id, "init", True, res.summary(), res.to_dict(), now)
+    say(f"  first screen: {res.summary()}")
+    if res.decision.promote:
+        # The new satellites need their history and their corporate actions checked
+        # before the first meeting can buy them.
+        await market.refresh_bars(force=True)
+        for r in await refresh_due(cfg, store, sources, list(cfg.core) + udb.member_symbols(store), time.time()):
+            say(f"  {r.feed}: {r.detail}")
+            ok = ok and r.ok
+    return ok
 
 
 async def _marks(cfg, store: Store) -> Tuple[Dict[str, Quote], Optional[str]]:
@@ -524,6 +573,22 @@ async def cmd_tax(cfg, args) -> int:
         store.close()
 
 
+async def cmd_archive(cfg, args) -> int:
+    from ottr.archive import ArchiveError, archive
+    try:
+        a = archive(cfg.data_dir, args.dest, args.with_config or args.config, retire=args.retire)
+    except ArchiveError as e:
+        print(f"archive failed: {e}")
+        return 2
+    print(f"Archived {cfg.data_dir / 'ottr.db'} (schema v{a.schema_version or '?'}) to {a.dest}: "
+          f"{sum(a.tables.values()):,} rows in {len(a.tables)} tables, integrity ok, SHA-256 {a.sha256[:16]}...")
+    if a.last_equity is not None:
+        print(f"Last equity point: ${a.last_equity:,.2f}")
+    if a.retired:
+        print(f"The original is set aside as {a.retired.name}: `ottr init` can open a new book.")
+    return 0
+
+
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
     return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
@@ -585,7 +650,14 @@ def main(argv=None) -> int:
     ap.add_argument("--log-file", type=Path, help="log to this rotating file instead of stderr")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("init", help="open the book (once) with the starting cash in config.toml")
+    p = sub.add_parser("init", help="open the book (once) with the starting cash in config.toml, then load the "
+                                    "market data, the events feeds and the first stock screen")
+    p.add_argument("--no-seed", action="store_true", help="only open the book; the engine loads the rest")
+    p = sub.add_parser("archive", help="copy the book (any version) to a new folder and verify it; --retire then "
+                                       "sets the original aside so `ottr init` can open a new one")
+    p.add_argument("dest", type=Path)
+    p.add_argument("--retire", action="store_true", help="rename the original database files once the copy checks out")
+    p.add_argument("--with-config", type=Path, help="the config file to keep with it (default: --config)")
     sub.add_parser("run")
     sub.add_parser("supervise", help="run the engine (and the chat bot) and restart them whenever they exit")
     p = sub.add_parser("chat", help="the Discord slash-command bot (reads the engine API, can't trade)")
@@ -629,7 +701,7 @@ def main(argv=None) -> int:
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
           "chat": cmd_chat, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
-          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax}[args.cmd]
+          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax, "archive": cmd_archive}[args.cmd]
     try:
         return asyncio.run(fn(cfg, args))
     except SchemaError as e:
