@@ -1,11 +1,13 @@
 """
 FakeAlpaca: Alpaca's paper trading + market data APIs, in memory, behind httpx.MockTransport.
 
-What it does: serves /v2/clock, /v2/calendar, /v2/assets, /v2/stocks/snapshots and
-/v2/stocks/bars from scripted data, and enforces the rules the real free plan enforces:
-auth headers, GET only, SIP data must be older than 15 minutes, bars sorted by symbol then
-date with `limit` counted across ALL symbols and `next_page_token` paging. It records every
-request so tests can prove what the client did (and didn't) send, and can inject 429s.
+What it does: serves /v2/clock, /v2/calendar, /v2/assets, /v2/stocks/snapshots,
+/v2/stocks/bars and /v1/corporate-actions from scripted data, and enforces the rules the
+real free plan enforces: auth headers, GET only, SIP data must be older than 15 minutes,
+bars sorted by symbol then date with `limit` counted across ALL symbols and
+`next_page_token` paging (corporate actions page the same way, filtered by process date).
+It records every request so tests can prove what the client did (and didn't) send, and
+can inject 429s.
 """
 
 from __future__ import annotations
@@ -39,6 +41,7 @@ class FakeAlpaca:
         self.fail_429: Dict[str, int] = {}   # path -> how many 429s to send first
         self.reset_in = 2.0
         self.clock_says_open = None          # force /v2/clock's is_open (to fake a disagreement)
+        self.actions: Dict[str, List[dict]] = {}   # corporate actions: Alpaca array name -> rows
 
     # -- scripting helpers ---------------------------------------------------------------
     def add_asset(self, symbol: str, fractionable: bool = True, tradable: bool = True, name: str = "") -> None:
@@ -136,4 +139,37 @@ class FakeAlpaca:
                 out.setdefault(sym, []).append(r)
             nxt = str(offset + limit) if offset + limit < len(rows) else None
             return httpx.Response(200, json={"bars": out, "next_page_token": nxt, "currency": "USD"})
+        if path == "/v1/corporate-actions":
+            return self._corporate_actions(q)
         return httpx.Response(404, json={"message": f"fake: no route {path}"})
+
+    def add_action(self, array: str, **row) -> dict:
+        """Script one corporate action, e.g. add_action("cash_dividends", symbol="SPY", ...)."""
+        row.setdefault("id", f"ca-{sum(len(v) for v in self.actions.values()) + 1}")
+        self.actions.setdefault(array, []).append(row)
+        return row
+
+    def _corporate_actions(self, q: dict) -> httpx.Response:
+        # Like the real endpoint: `symbols` matches any symbol in an action, start/end filter
+        # on process_date, `limit` counts across all types, and empty arrays are left out.
+        syms = set(q["symbols"].split(",")) if q.get("symbols") else None
+        types = set(q["types"].split(",")) if q.get("types") else None
+        lo, hi = q.get("start", ""), q.get("end", "")
+        rows = []
+        for array, items in sorted(self.actions.items()):
+            for r in items:
+                named = {v for k, v in r.items() if k.endswith("symbol") and v}
+                if syms is not None and not named & syms:
+                    continue
+                if types is not None and array.rstrip("s") not in types:
+                    continue
+                if not lo <= r["process_date"] <= hi:
+                    continue
+                rows.append((array, r))
+        offset = int(q.get("page_token") or 0)
+        limit = int(q.get("limit", 100))
+        out: Dict[str, list] = {}
+        for array, r in rows[offset:offset + limit]:
+            out.setdefault(array, []).append(r)
+        nxt = str(offset + limit) if offset + limit < len(rows) else None
+        return httpx.Response(200, json={"corporate_actions": out, "next_page_token": nxt})

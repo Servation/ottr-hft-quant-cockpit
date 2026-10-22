@@ -73,8 +73,8 @@ class Events:
     def earnings_sessions(self, s, now):
         return self.earnings.get(s)
 
-    def corp_action_pending(self, s, now):
-        return s in self.actions
+    def corp_action(self, s, now):
+        return "stock merger effective 2026-11-02" if s in self.actions else None
 
 
 @pytest.fixture
@@ -233,7 +233,29 @@ async def test_single_stocks_respect_the_earnings_blackout(rig, earnings, reason
 
 async def test_pending_corporate_action_blocks_buys(rig):
     rig.desk.events = Events(actions={"GLD"})
-    assert (await rig.ex.process(buy("GLD"))).reason == "corporate_action_pending"
+    v = await rig.ex.process(buy("GLD"))
+    assert v.reason == "corporate_action_pending" and "stock merger" in v.notes[0]
+
+
+async def test_the_stored_events_gate_buys_until_actions_are_known(rig):
+    """The real reader: unknown corporate actions block an ETF BUY, a clean check allows it,
+    and a stock needs a stored report date outside the blackout. Exits are never blocked."""
+    from ottr.events import db
+    from ottr.events.earnings import EarningsDate
+    from ottr.events.view import FEED_EARNINGS, StoredEvents
+    rig.desk.events = StoredEvents(rig.store, lambda: CAL, 72 * 3600)
+    v = await rig.ex.process(buy("SPY", "b1"))
+    assert v.reason == "corporate_action_pending" and "never checked" in v.notes[0]
+    db.save_corporate_actions(rig.store, [], ["SPY", "NVDA"], date(2026, 8, 1), date(2027, 1, 1), OPEN)
+    assert (await rig.ex.process(buy("SPY", "b2"))).approved
+    assert (await rig.ex.process(buy("NVDA", "b3"))).reason == "earnings_unknown"
+    db.save_earnings(rig.store, [EarningsDate("NVDA", date(2026, 11, 18))], date(2026, 10, 21), OPEN)
+    db.record_feed(rig.store, FEED_EARNINGS, True, "test", OPEN)
+    assert (await rig.ex.process(buy("NVDA", "b4"))).approved          # 20 sessions away
+    monday = et(2026, 10, 26, 11)                                       # no refresh since: stale, unknown
+    rig.clock.set(monday)
+    assert (await rig.ex.process(buy("SPY", "b5", created=monday))).reason == "corporate_action_pending"
+    assert (await rig.ex.process(sell("SPY", "s1", created=monday))).approved
 
 
 async def test_stocks_are_capped_tighter_than_etfs(rig):

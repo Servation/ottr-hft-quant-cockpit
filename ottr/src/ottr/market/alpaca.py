@@ -1,9 +1,11 @@
 """
-Alpaca market-data client: clock, calendar, assets, snapshots and daily bars. GET only.
+Alpaca market-data client: clock, calendar, assets, snapshots, daily bars and corporate
+actions. GET only.
 
 What it does: reads the US market through Alpaca's free plan. The trading API (paper host
 only) gives the clock, the exchange calendar and the asset list. The data API gives live
-IEX quotes (snapshots) and SIP daily bars. `check_quote` turns a snapshot into a Quote only
+IEX quotes (snapshots), SIP daily bars and corporate actions (read by
+`ottr.events.corporate`). `check_quote` turns a snapshot into a Quote only
 when the quote is sane; otherwise it says why, so the caller defers instead of guessing.
 
 Why GET only, paper host only: OTTR simulates its own fills, so it never needs to send an
@@ -48,6 +50,7 @@ FREE_PLAN_PER_MINUTE = 200
 SIP_DELAY = timedelta(minutes=16)   # free plan: SIP data newer than ~15 min is refused
 SNAPSHOT_CHUNK = 100                # symbols per snapshot request (keeps URLs short)
 BARS_PAGE_LIMIT = 10000             # Alpaca's maximum, counted across all symbols
+CORP_ACTIONS_PAGE_LIMIT = 1000      # Alpaca's maximum, counted across all symbols and types
 
 
 class AlpacaError(http.HttpError):
@@ -226,6 +229,38 @@ class Alpaca:
             if not token:
                 return {s: sorted(_dedupe(b), key=lambda x: x.day) for s, b in out.items()}
         raise AlpacaError("bars pagination did not end")
+
+    async def corporate_actions(self, symbols: Sequence[str], start: date, end: date,
+                                types: Optional[Sequence[str]] = None) -> Dict[str, List[dict]]:
+        """Raw corporate actions touching `symbols` whose process_date is in [start, end],
+        as Alpaca's arrays (type name -> rows), merged across symbol chunks and pages.
+        `ottr.events.corporate.parse_actions` reads them."""
+        out: Dict[str, List[dict]] = {}
+        seen: set = set()
+        syms = [to_alpaca(s) for s in symbols]
+        for i in range(0, len(syms), SNAPSHOT_CHUNK):
+            params = {"symbols": ",".join(syms[i:i + SNAPSHOT_CHUNK]), "start": start.isoformat(),
+                      "end": end.isoformat(), "limit": CORP_ACTIONS_PAGE_LIMIT}
+            if types:
+                params["types"] = ",".join(types)
+            token: Optional[str] = None
+            for _ in range(1000):  # a hard stop if the API ever repeats a token
+                page = await self._get(self.data_base, "/v1/corporate-actions",
+                                       {**params, **({"page_token": token} if token else {})})
+                for kind, rows in ((page or {}).get("corporate_actions") or {}).items():
+                    for r in rows or ():
+                        # An action touching two requested symbols (a merger of two of
+                        # them) comes back in both chunks: keep it once.
+                        rid = r.get("id") if isinstance(r, dict) else None
+                        if rid is None or rid not in seen:
+                            seen.add(rid)
+                            out.setdefault(kind, []).append(r)
+                token = (page or {}).get("next_page_token")
+                if not token:
+                    break
+            else:
+                raise AlpacaError("corporate actions pagination did not end")
+        return out
 
 
 def _dedupe(bars: Iterable[Bar]) -> List[Bar]:

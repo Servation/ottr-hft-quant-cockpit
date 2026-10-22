@@ -2,7 +2,8 @@
 # becomes config.toml and the crypto configuration is retired. Env overrides as in
 # config.toml: OTTR_DRY_RUN, MAX_TRADE_USD, OTTR_DATA_DIR, DISCORD_WEBHOOK_URL,
 # OTTR_API_KEY, DISCORD_BOT_TOKEN, CEO_DISCORD_ID, OTTR_CHAT_ALLOWED_IDS, DISCORD_GUILD_ID.
-# Alpaca keys (APCA_API_KEY_ID / APCA_API_SECRET_KEY) are read by the data client itself.
+# Alpaca keys (APCA_API_KEY_ID / APCA_API_SECRET_KEY), ALPHAVANTAGE_API_KEY and
+# SEC_USER_AGENT are read by the feed clients themselves.
 
 [account]
 # margin_1x: an Alpaca margin account set to max_margin_multiplier = 1 with shorting off.
@@ -140,6 +141,29 @@ min_equity_points = 24
 enabled = true
 at = "15:45"               # New York time; an early close moves it back the same distance (12:45)
 keep_cash_pct = 5.0        # buying power above 5% of equity is swept; a short BUY sells it back first
+
+[events]                   # ottr/events: earnings, corporate actions, macro, SEC lists
+# Keys come from ottr/.env: ALPHAVANTAGE_API_KEY (earnings) and SEC_USER_AGENT (the SEC
+# wants "Name email"). FRED needs no key; corporate actions use the Alpaca keys.
+earnings_horizon = "6month"          # 3month would drop a company that just reported (next one ~13 weeks out)
+earnings_every_hours = 24            # one Alpha Vantage call a day (the free key allows 25)
+corporate_actions_every_hours = 4
+macro_every_hours = 12
+sec_every_days = 7
+max_age_hours = 72                   # older earnings or corporate actions count as unknown: BUYs they guard are blocked
+corporate_actions_lookback_days = 60 # dividends are paid up to ~6 weeks after the ex-date (SPY: 42 days)
+corporate_actions_ahead_days = 120
+macro_history_days = 400
+macro_stale_days = 5                 # a series with no value for this many days is shown as stale
+
+[events.macro]             # FRED series id -> label shown to the council
+VIXCLS = "VIX (S&P 500 30-day implied vol)"
+DGS2 = "2-year Treasury yield (%)"
+DGS10 = "10-year Treasury yield (%)"
+T10Y2Y = "10y minus 2y Treasury spread (pp)"
+BAMLH0A0HYM2 = "US high-yield option-adjusted spread (%)"
+DFF = "Effective federal funds rate (%)"
+T10YIE = "10-year breakeven inflation (%)"
 
 [schedule]
 meeting_times = ["10:15", "15:15"]   # New York time, trading days only

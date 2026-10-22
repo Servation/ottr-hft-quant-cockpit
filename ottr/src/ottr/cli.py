@@ -347,6 +347,11 @@ async def cmd_screen(cfg, args) -> int:
 async def cmd_data(cfg, args) -> int:
     import time as _time
 
+    from ottr.events import check as eventcheck
+    from ottr.events.earnings import AlphaVantage
+    from ottr.events.fred import Fred
+    from ottr.events.refresh import Sources
+    from ottr.events.sec import Sec
     from ottr.market import datacheck
     from ottr.market.alpaca import Alpaca, Credentials
     from ottr.market.symbols import normalize
@@ -356,12 +361,21 @@ async def cmd_data(cfg, args) -> int:
               "(Alpaca dashboard > Paper Trading > API Keys).")
         return 3
     try:
-        symbols = [normalize(s) for s in args.symbols.split(",")] if args.symbols else list(datacheck.CORE_ETFS)
+        us = cfgmod.load_us(data_dir=cfg.data_dir)
+    except cfgmod.ConfigError as e:
+        print(f"config.us.toml: {e}")
+        return 2
+    try:
+        symbols = [normalize(s) for s in args.symbols.split(",")] if args.symbols else list(us.core)
     except ValueError as e:
         print(e)
         return 2
     print(f"Checking Alpaca for {len(symbols)} symbols (about 30 seconds)...", flush=True)
-    return await datacheck.run(Alpaca(creds), symbols, _time.time())
+    code = await datacheck.run(Alpaca(creds), symbols, _time.time())
+    print()
+    print("Checking the events and macro feeds (FRED, Alpha Vantage, SEC, corporate actions)...", flush=True)
+    sources = Sources(fred=Fred(), alpha_vantage=AlphaVantage.from_env(), sec=Sec.from_env(), alpaca=Alpaca(creds))
+    return max(code, await eventcheck.run(sources, us.events, symbols, _time.time()))
 
 
 async def cmd_chat(cfg, args) -> int:
@@ -445,9 +459,9 @@ def main(argv=None) -> int:
     p.add_argument("--json", action="store_true", help="machine-readable health report")
     p = sub.add_parser("screen", help="rank other Kraken coins now (advisory; prints, stores nothing)")
     p.add_argument("--json", action="store_true", help="the full result as JSON")
-    p = sub.add_parser("data", help="US desk: check the Alpaca market-data feed (reads only)")
+    p = sub.add_parser("data", help="US desk: check the Alpaca, events and macro feeds (reads only)")
     p.add_argument("--check", action="store_true", required=True, help="run the feed check")
-    p.add_argument("--symbols", help="comma-separated symbols (default: the 16 core ETFs)")
+    p.add_argument("--symbols", help="comma-separated symbols (default: the core universe in config.us.toml)")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)

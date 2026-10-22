@@ -113,19 +113,14 @@ class UsMarket(Protocol):
 
 
 class Events(Protocol):
-    def earnings_sessions(self, symbol: str, now: float) -> Optional[int]: ...
-    def corp_action_pending(self, symbol: str, now: float) -> bool: ...
-
-
-class NoEvents:
-    """Until the events feeds land (PR 6): earnings dates are unknown, which blocks BUYs of
-    single stocks (fail closed), and no corporate action is known to be pending."""
+    """Earnings and corporate actions for the gate (`ottr.events.view.StoredEvents`). There
+    is deliberately no default: a desk built without real events would trade blind."""
 
     def earnings_sessions(self, symbol: str, now: float) -> Optional[int]:
-        return None
+        """Sessions to the next report; None when unknown (which blocks a stock's BUY)."""
 
-    def corp_action_pending(self, symbol: str, now: float) -> bool:
-        return False
+    def corp_action(self, symbol: str, now: float) -> Optional[str]:
+        """What blocks a BUY (a pending action, or actions unknown), or None."""
 
 
 class UsDesk:
@@ -133,7 +128,7 @@ class UsDesk:
                  "limit_not_marketable", "needs_cash")
 
     def __init__(self, cfg, store: Store, ledger: Ledger, market: UsMarket, broker: SimBroker,
-                 members: Mapping[str, Member], events: Events = NoEvents(), clock: Clock = SYSTEM) -> None:
+                 members: Mapping[str, Member], events: Events, clock: Clock = SYSTEM) -> None:
         self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
         self.broker, self.members, self.events, self.clock = broker, members, events, clock
 
@@ -161,7 +156,7 @@ class UsDesk:
             buying_power=buying_power(self.cfg.account.type, self.ledger, cal, now).available,
             cash_etf_value=values.get(cash_symbol, 0.0), satellites_value=satellites,
             earnings_sessions=self.events.earnings_sessions(intent.asset, now),
-            corp_action_pending=self.events.corp_action_pending(intent.asset, now),
+            corp_action=self.events.corp_action(intent.asset, now),
             halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0), risk_event_since_intent=hit)
 
     def evaluate(self, intent: Intent, ctx: us_gate.UsGateContext) -> Verdict:

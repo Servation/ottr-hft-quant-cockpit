@@ -5,7 +5,8 @@ What it does: with the keys from ottr/.env it checks, in order, the key type, Al
 clock (and our own clock's skew against it), the calendar (and that it agrees with the
 clock), each symbol's asset record (tradable, fractionable), live IEX quotes through the
 same `check_quote` the desk will use, and a year of SIP daily bars checked for gaps against
-the calendar. It prints one line per finding and returns an exit code.
+the calendar. It prints one line per finding and returns an exit code. The same command
+then checks the events and macro feeds (`ottr.events.check`).
 
 Why: the US desk can only be as right as its feed. This is the command to run after adding
 keys, before a cutover, or when a quote alarm fires, and it reports the same verdicts the
@@ -24,10 +25,6 @@ from typing import Callable, List, Sequence
 from ottr.market.alpaca import Alpaca, AlpacaError, check_quote, completed_bars
 from ottr.market.calendar import ET, CalendarError
 
-# The plan's 16 core ETFs, the default check list until the universe moves into config
-# (US plan, PR 3). SGOV is the cash sweep; the rest span equity, rates, credit, real assets.
-CORE_ETFS = ("SPY", "QQQ", "IWM", "EFA", "EEM", "SGOV", "IEF", "TLT", "TIP", "LQD", "HYG",
-             "GLD", "SLV", "PDBC", "XLE", "VNQ")
 HISTORY_DAYS = 400        # calendar days of bars: covers the screener's 273-session minimum
 MAX_CLOCK_SKEW_SEC = 5.0  # quote ages are measured on our clock against Alpaca's timestamps
 
@@ -55,6 +52,14 @@ class Report:
     @property
     def exit_code(self) -> int:
         return 2 if self.failed else 1 if self.degraded else 0
+
+    def finish(self, out: Callable[[str], None], what: str) -> int:
+        """Print the findings and a verdict on `what`; return the exit code."""
+        for line in self.lines:
+            out(line)
+        verdict = {0: f"{what} OK", 1: f"{what} usable, with problems above", 2: f"{what} NOT usable"}[self.exit_code]
+        out(f"{verdict} (exit {self.exit_code})")
+        return self.exit_code
 
 
 def _short(text: str, width: int = 40) -> str:
@@ -86,7 +91,7 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
         cal = await alpaca.calendar(today - timedelta(days=HISTORY_DAYS), today + timedelta(days=14))
     except AlpacaError as e:
         r.fail(str(e))
-        return _finish(r, out)
+        return r.finish(out, "Alpaca data")
 
     skew = now - clk.ts
     (r.ok if abs(skew) <= MAX_CLOCK_SKEW_SEC else r.warn)(
@@ -95,7 +100,7 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
         mt = cal.state_at(clk.ts)
     except CalendarError as e:
         r.fail(f"calendar does not cover Alpaca's clock: {e}")
-        return _finish(r, out)
+        return r.finish(out, "Alpaca data")
     if mt.is_open != clk.is_open:
         r.fail(f"clock says {'open' if clk.is_open else 'closed'} but the calendar says {mt.state.value}: "
                "the desk would treat the market as closed")
@@ -146,7 +151,7 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
         bars = await alpaca.daily_bars(symbols, start, now=now)
     except AlpacaError as e:
         r.fail(f"daily bars: {e}")
-        return _finish(r, out)
+        return r.finish(out, "Alpaca data")
     for sym in symbols:
         done = completed_bars(bars.get(sym, []), cal, now)
         if not done:
@@ -159,13 +164,4 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
                    f"{'...' if len(missing) > 3 else ''})")
         else:
             r.ok(msg)
-    return _finish(r, out)
-
-
-def _finish(r: Report, out: Callable[[str], None]) -> int:
-    for line in r.lines:
-        out(line)
-    verdict = {0: "Alpaca data OK", 1: "Alpaca data usable, with problems above",
-               2: "Alpaca data NOT usable"}[r.exit_code]
-    out(f"{verdict} (exit {r.exit_code})")
-    return r.exit_code
+    return r.finish(out, "Alpaca data")
