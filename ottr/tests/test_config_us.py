@@ -72,7 +72,7 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     ([('feed = "iex"', 'feed = "polygon"')], "data.feed"),
     ([("history_days = 400", "history_days = 200")], "history_days"),
     ([("max_gross_pct = 90.0", "max_gross_pct = 120.0")], "max_gross_pct"),
-    ([("[api]", "[fees]\nsec = 1\n\n[api]")], "unknown sections"),
+    ([("[api]", "[not_a_section]\nx = 1\n\n[api]")], "unknown sections"),
     ([('host = "127.0.0.1"', 'host = "0.0.0.0"')], "loopback"),          # shared rule applies too
     ([("min_analysts = 2", "min_analysts = 5")], "min_analysts"),
 ])
