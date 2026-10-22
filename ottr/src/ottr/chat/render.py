@@ -239,6 +239,44 @@ def meeting(m: Optional[dict], now: float) -> str:
     return no_em_dash("\n".join(out))  # most of this view is model text
 
 
+def screen(d: dict, now: float) -> str:
+    """/screen: the satellites now, the latest screen's changes and the top of its ranking."""
+    sats = d.get("satellites") or []
+    out = [f"**Satellites** ({len([s for s in sats if s.get('state') == 'active'])} of {d.get('satellites_max')}, "
+           f"screened {d.get('schedule')}):"]
+    for s in sats:
+        if s.get("state") == "active":
+            out.append(f"- {s['symbol']}: since {s.get('promoted_day')}, score {float(s.get('score') or 0):.0f}")
+        else:
+            out.append(f"- {s['symbol']}: being sold off (demoted {s.get('demoted_day')}: {clip(s.get('why'), 120)})")
+    if not sats:
+        out.append("- none yet")
+    last = d.get("screen")
+    if not last:
+        out.append("No screen has run yet.")
+        return "\n".join(out)
+    res = last.get("result") or {}
+    k = res.get("counts") or {}
+    kind = "applied" if last.get("applied") else "dry run, nothing changed"
+    out.append(f"\n**Latest screen** {when(last.get('ts'), 'f')} ({when(last.get('ts'))}), {kind}: "
+               f"{k.get('ranked', 0):,} of {k.get('measured', 0):,} measured stocks passed the gates as operating "
+               f"companies ({k.get('liquid', 0):,} liquid).")
+    dec = res.get("decision") or {}
+    for label, key in (("Promoted", "promote"), ("Demoted", "demote"), ("Kept", "keep"), ("Passed over", "passed")):
+        items = dec.get(key) or []
+        if key == "passed":
+            items = items[:5]
+        for sym, why in items:
+            out.append(f"- {label} {sym}: {clip(why, 160)}")
+    top = res.get("top") or []
+    if top:
+        out.append("**Top of the ranking:** " + " | ".join(
+            f"{r['rank']}. {r['symbol']} {float(r.get('score') or 0):.0f}"
+            + (f" (12-1 {float(r['momentum_return']) * 100:+.0f}%)" if r.get("momentum_return") is not None else "")
+            for r in top[:10]))
+    return no_em_dash("\n".join(out))
+
+
 def kill_result(state: dict, engaged: bool, who: str) -> str:
     if engaged:
         return (f"**Kill switch ENGAGED** by {who}: nothing fills from now on; council verdicts are "

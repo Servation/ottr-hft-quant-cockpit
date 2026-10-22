@@ -39,6 +39,7 @@ from ottr.market.alpaca import Alpaca, AlpacaError, Asset, check_quote, complete
 from ottr.market.calendar import CalendarError, Session, TradingCalendar
 from ottr.market.packet import UsSnapshot, build_snapshot
 from ottr.market.types import Bar, MarketDataError, Quote
+from ottr.universe import db as udb
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,8 @@ class MarketData:
     def tracked(self) -> List[str]:
         u = self.cfg.universe
         held = Ledger(self.store).positions()
-        return sorted(set(u.core) | set(u.reference) | set(held) | set(self.extra_symbols()))
+        sats = udb.member_symbols(self.store)
+        return sorted(set(u.core) | set(u.reference) | set(held) | set(sats) | set(self.extra_symbols()))
 
     # -- calendar ----------------------------------------------------------------------------
     @property

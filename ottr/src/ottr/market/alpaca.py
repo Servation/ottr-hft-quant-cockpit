@@ -50,6 +50,7 @@ FREE_PLAN_PER_MINUTE = 200
 SIP_DELAY = timedelta(minutes=16)   # free plan: SIP data newer than ~15 min is refused
 SNAPSHOT_CHUNK = 100                # symbols per snapshot request (keeps URLs short)
 BARS_PAGE_LIMIT = 10000             # Alpaca's maximum, counted across all symbols
+BARS_CHUNK = 200                    # symbols per bars request (the screener asks for thousands)
 CORP_ACTIONS_PAGE_LIMIT = 1000      # Alpaca's maximum, counted across all symbols and types
 
 
@@ -210,11 +211,15 @@ class Alpaca:
         now = self._clock.time() if now is None else now
         limit_end = datetime.fromtimestamp(now, tz=timezone.utc) - SIP_DELAY
         end_dt = limit_end if end is None else min(limit_end, datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=ET))
-        params = {"symbols": ",".join(to_alpaca(s) for s in symbols), "timeframe": "1Day",
-                  "start": start.isoformat(), "end": end_dt.isoformat(timespec="seconds"),
+        params = {"timeframe": "1Day", "start": start.isoformat(), "end": end_dt.isoformat(timespec="seconds"),
                   "adjustment": adjustment, "feed": feed}
         out: Dict[str, List[Bar]] = {normalize(s): [] for s in symbols}
-        for sym, rows in (await self._bar_rows(params)).items():
+        syms = [to_alpaca(s) for s in symbols]
+        raw: Dict[str, List[dict]] = {}
+        for i in range(0, len(syms), BARS_CHUNK):
+            for sym, rows in (await self._bar_rows({**params, "symbols": ",".join(syms[i:i + BARS_CHUNK])})).items():
+                raw.setdefault(sym, []).extend(rows)
+        for sym, rows in raw.items():
             dst = out.setdefault(sym, [])
             for r in rows:
                 try:

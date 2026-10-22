@@ -200,8 +200,8 @@ def test_init_opens_the_book_once(tmp_path, monkeypatch, capsys):
         assert Ledger(s).cash() == 10000 and Ledger(s).check() == []
     finally:
         s.close()
-    with pytest.raises(SystemExit):
-        cli.main(["screen"])                       # the crypto screener is gone
+    with pytest.raises(SystemExit, match="No Alpaca keys"):
+        cli.main(["screen"])                       # the stock screener needs the Alpaca keys
 
 
 def test_a_book_this_version_cannot_open_is_a_message_not_a_traceback(tmp_path, monkeypatch, capsys):

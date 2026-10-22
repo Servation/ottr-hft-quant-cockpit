@@ -15,6 +15,8 @@ and branch on the session, because nights, weekends and holidays are normal stat
 - equity (15m): a point in session, and one at each close, with the SPY and 60/40
   benchmarks measured from the first close after the book opened.
 - council: meetings at the configured New York times on trading days.
+- screen: the weekly stock screener (`ottr/universe`), which promotes and demotes the
+  satellites; a run missed while the engine was down happens as soon as it is back.
 - watchdog (60s): turns stale heartbeats, a blind risk monitor, stale events feeds and
   ledger problems into alarms (audit log and Discord); the optional API serves the book.
 
@@ -62,7 +64,10 @@ from ottr.notify import Alerts
 from ottr.risk import gate, monitor
 from ottr.risk.monitor import RiskState
 from ottr.risk.types import Intent, Verdict
-from ottr.universe import SUNSET, Member, core_members
+from ottr.universe import ACTIVE, SUNSET, Member, core_members, last_slot
+from ottr.universe import db as udb
+from ottr.universe import run as urun
+from ottr.universe.db import Satellite
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +76,8 @@ NEXT_MEETING = "next_meeting_at"
 DEFERRED_RETRY_SEC = 60.0       # a deferred order is tried again at most this often
 BARS_GRACE_SEC = 3600.0         # a final session's bars should be stored within this long
 MEETING_GRACE_SEC = 1800.0      # a slot missed by more than this (engine down) is skipped
+SCREEN_RETRY_SEC = 1800.0       # a failed weekly screen is tried again after this
+WEEK_SEC = 7 * 86400.0
 EARNINGS_BLACKOUT = gate.EARNINGS_BLACKOUT_SESSIONS
 
 
@@ -81,10 +88,16 @@ def build_council(cfg: Config) -> Council:
                    max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec)
 
 
-def members_from(cfg: Config, assets: Mapping[str, Asset]) -> Dict[str, Member]:
-    """The core members, with Alpaca's fractional-share flag; a symbol Alpaca says isn't
-    tradable can't be bought (SELL or HOLD only) until it is again."""
+def members_from(cfg: Config, assets: Mapping[str, Asset],
+                 satellites: Optional[Mapping[str, Satellite]] = None) -> Dict[str, Member]:
+    """The core members and the satellites (stocks; a sunset one is SELL or HOLD only),
+    with Alpaca's fractional-share flag. A symbol Alpaca says isn't tradable can't be
+    bought (SELL or HOLD only) until it is again."""
     out = core_members(cfg, {s: a.fractionable for s, a in assets.items()})
+    for s, sat in (satellites or {}).items():
+        a = assets.get(s)
+        out[s] = Member(s, gate.STOCK, ACTIVE if sat.state == udb.ACTIVE else SUNSET,
+                        a.fractionable if a else False)
     for s, a in assets.items():
         if s in out and not (a.tradable and a.status == "active"):
             out[s] = Member(s, out[s].asset_class, SUNSET, out[s].fractionable)
@@ -107,7 +120,8 @@ class Engine:
         self.kill = KillSwitch(cfg, store)
         stored = (store.get_state("assets") or {}).get("assets") or {}
         # Updated in place, so the desk (which holds this dict) always sees the current members.
-        self.members: Dict[str, Member] = members_from(cfg, {s: Asset(**a) for s, a in stored.items()})
+        self.members: Dict[str, Member] = members_from(cfg, {s: Asset(**a) for s, a in stored.items()},
+                                                       udb.satellites(store))
         self.events = StoredEvents.from_config(store, lambda: market.calendar, cfg)
         self.desk = Desk(cfg, store, self.ledger, market, SimBroker(cfg.fees, cfg.trading.slippage_pct),
                          self.members, self.events, clock)
@@ -133,8 +147,14 @@ class Engine:
         return {s: m.asset_class for s, m in self.members.items()}
 
     async def refresh_members(self) -> None:
-        """Rebuild the members from Alpaca's asset records (fetched once a New York day)."""
-        fresh = members_from(self.cfg, await self.market.refresh_assets(self.cfg.core))
+        """Rebuild the members from the satellites and Alpaca's asset records (fetched once
+        a New York day). A sunset satellite that is no longer held leaves the universe."""
+        held = set(self.ledger.positions())
+        for s in udb.retire(self.store, held, self.clock.time()):
+            logger.info("%s sold off: no longer a member", s)
+        sats = udb.satellites(self.store)
+        assets = await self.market.refresh_assets(list(self.cfg.core) + sorted(sats))
+        fresh = members_from(self.cfg, assets, sats)
         for s in sorted(set(self.members) - set(fresh)):
             del self.members[s]
         self.members.update(fresh)
@@ -213,6 +233,49 @@ class Engine:
         for symbol, note in res.notes:
             self.alerts.event("corporate_action", {"symbol": symbol, "note": note})
         return res
+
+    # -- the weekly screen --------------------------------------------------------------------
+    async def screen(self, apply: bool = True, kind: str = "weekly") -> urun.ScreenResult:
+        """Run the screener; with `apply`, book its promotions and demotions. Either way the
+        result is stored (for /screen and the API) and its digest goes to Discord."""
+        now = self.clock.time()
+        res = await urun.run_screen(self.cfg, self.store, self.market.alpaca, self.sources.sec,
+                                    self.market.calendar, now, kind)
+        if apply:
+            urun.apply(self.store, res, set(self.ledger.positions()), now)
+        udb.save_screen(self.store, res.id, kind, apply, res.summary(), res.to_dict(), now)
+        self.store.audit("screen", id=res.id, screen_kind=kind, applied=apply, summary=res.summary())
+        if apply:
+            await self.refresh_members()
+            if res.decision.promote:
+                # A new satellite needs its history (vol, regime, the packet's indicators)
+                # before the next meeting, not after the next session's close.
+                await self.market.refresh_bars(force=True)
+        logger.info("screen %s: %s", res.id, res.summary())
+        self.alerts.event("screen", {**urun.digest(res), "applied": apply})
+        return res
+
+    async def _screen_loop(self) -> None:
+        sc = self.cfg.screen
+        while sc.enabled:
+            now = self.clock.time()
+            last = udb.last_applied_ts(self.store)
+            if last is None or last < last_slot(sc, now):
+                try:
+                    res = await self.screen(apply=True)
+                    self._beat("screen", True, res.summary())
+                except Exception as e:
+                    if isinstance(e, (urun.ScreenError, MarketDataError)):
+                        logger.warning("screen failed: %s", e)
+                    else:
+                        logger.exception("screen failed")
+                    self._beat("screen", False, f"{type(e).__name__}: {e}")
+                    await asyncio.sleep(SCREEN_RETRY_SEC)
+                    continue
+            now = self.clock.time()
+            await asyncio.sleep(max(1.0, min(last_slot(sc, now) + WEEK_SEC - now, 600.0)))
+        while True:  # switched off in config: nothing to do, but a core task never returns
+            await asyncio.sleep(3600)
 
     # -- jobs --------------------------------------------------------------------------------
     async def jobs_tick(self) -> str:
@@ -728,6 +791,7 @@ class Engine:
                     asyncio.create_task(self._every("equity", e.equity_interval_sec, self.equity_tick, 10),
                                         name="equity"),
                     asyncio.create_task(self._council_loop(), name="council"),
+                    asyncio.create_task(self._screen_loop(), name="screen"),
                     asyncio.create_task(self._watchdog_loop(), name="watchdog"),
                 ]
                 aux = [asyncio.create_task(self._watch_stop_file(stop), name="stopfile")]

@@ -41,11 +41,12 @@ CRITICAL, WARNING = "critical", "warning"
 # Risk and market feed the protective exits; jobs, equity and council run the day's
 # routine, measure and propose.
 SEVERITY = {"watchdog": CRITICAL, "market": CRITICAL, "risk": CRITICAL,
-            "jobs": WARNING, "equity": WARNING, "council": WARNING}
+            "jobs": WARNING, "equity": WARNING, "council": WARNING, "screen": WARNING}
 # A meeting gets this long past its slot to finish before a missing one is stale: two
 # council timeouts (analysts, then the chair) plus margin.
 COUNCIL_GRACE_EXTRA_SEC = 600.0
 FEED_STARTUP_GRACE_SEC = 600.0     # feeds refresh in the first jobs tick after a start
+SCREEN_GRACE_SEC = 3 * 3600.0      # a weekly screen (minutes of downloads) has this long to land
 
 
 def intervals(cfg: Config) -> Dict[str, float]:
@@ -179,6 +180,28 @@ def council_health(cfg: Config, store: Store, hb: Optional[dict], now: float,
     return TaskHealth(healthy=False, problem=f"council missed the {slot} meeting ({why})", **base)
 
 
+def screen_health(cfg: Config, store: Store, hb: Optional[dict], now: float,
+                  epoch: Optional[float]) -> TaskHealth:
+    """Healthy when a screen was applied after the newest weekly slot that should be done
+    by now (any kind: the weekly run, or the first one at `ottr init`), or the engine
+    started recently enough that the run it makes at start-up is still in its grace."""
+    from ottr.universe import last_slot
+    from ottr.universe.db import last_applied_ts
+    sc = cfg.screen
+    base = dict(task="screen", interval=0.0, last_ts=hb["ts"] if hb else None,
+                last_ok_ts=hb.get("ok_ts") if hb else None, ok=None if hb is None else bool(hb["ok"]),
+                detail=(hb or {}).get("detail") or "", expect=f"weekly, {sc.weekday} {sc.at} ET" if sc.enabled else "off")
+    if not sc.enabled:
+        return TaskHealth(healthy=True, **base)
+    slot = last_slot(sc, now - SCREEN_GRACE_SEC)
+    applied = last_applied_ts(store)
+    if (applied is not None and applied >= slot) or (epoch is not None and now - epoch < SCREEN_GRACE_SEC):
+        return TaskHealth(healthy=True, **base)
+    when = datetime.fromtimestamp(slot, tz=ET).strftime("%a %m-%d %H:%M ET")
+    why = f"the last run failed: {hb['detail'] or 'no detail'}" if hb and not hb["ok"] else "no screen was applied"
+    return TaskHealth(healthy=False, problem=f"screen missed the {when} run ({why})", **base)
+
+
 def feed_alarms(cfg: Config, store: Store, now: float, epoch: Optional[float]) -> List[Alarm]:
     """Events feeds too old to trust block BUYs, so they are alarms. Earnings only matter
     while the desk can hold or buy single stocks."""
@@ -225,6 +248,7 @@ def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_e
     tasks = [task_health(n, iv, hbs.get(n), now, epoch) for n, iv in intervals(cfg).items()
              if not (inside_engine and n == "watchdog")]
     tasks.append(council_health(cfg, store, hbs.get("council"), now, epoch))
+    tasks.append(screen_health(cfg, store, hbs.get("screen"), now, epoch))
     alarms: List[Alarm] = []
 
     alive: Optional[bool] = None

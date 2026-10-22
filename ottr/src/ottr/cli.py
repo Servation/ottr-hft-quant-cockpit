@@ -398,6 +398,57 @@ async def cmd_data(cfg, args) -> int:
     return max(code, await eventcheck.run(_sources(alpaca), cfg.events, symbols, time.time()))
 
 
+def screen_report(res, top: int) -> str:
+    """The screen as plain text for a terminal: where the pool shrank, the decision, and
+    the top of the ranking with the numbers behind each score."""
+    k, d = res.counts, res.decision
+    lines = [f"Stock screen for {res.day} ({res.kind}): {k.get('listed', 0):,} listed stocks, "
+             f"{k.get('liquid', 0):,} liquid (kept {k.get('pool', 0):,}), {k.get('measured', 0):,} measured, "
+             f"{k.get('passed', 0):,} passed the gates, {k.get('ranked', 0):,} of them operating companies (ranked)."]
+    for title, items in (("Promote", d.promote), ("Demote", d.demote), ("Keep", d.keep), ("Passed over", d.passed)):
+        if items:
+            lines.append(f"{title}:")
+            lines += [f"  {s:6} {why}" for s, why in items]
+    if not (d.promote or d.demote):
+        lines.append("No membership changes.")
+    lines.append(f"\n{'#':>4} {'symbol':6} {'score':>5} {'12-1':>6} {'resid':>6} {'vol':>4} {'high':>5} "
+                 f"{'ER':>5} {'corr':>5} {'earn':>4}  flags")
+    for r in res.ranked[:top]:
+        def f(x, spec):
+            return format(x, spec) if x is not None else "n/a"
+        lines.append(f"{r.rank:>4} {r.symbol:6} {r.score:>5.1f} {f(r.momentum_return and r.momentum_return * 100, '+5.0f')}% "
+                     f"{f(r.residual, '6.2f')} {f(r.vol and r.vol * 100, '3.0f')}% "
+                     f"{f(r.near_high and r.near_high * 100, '4.0f')}% {f(r.efficiency, '5.2f')} "
+                     f"{f(r.corr_spy, '5.2f')} {f(r.earnings_sessions, '>4')}  {', '.join(r.flags)}")
+    if res.errors:
+        lines.append("Errors: " + "; ".join(res.errors))
+    return "\n".join(lines)
+
+
+async def cmd_screen(cfg, args) -> int:
+    from ottr.events.sec import Sec
+    from ottr.universe.run import ScreenError, run_screen
+    alpaca = _alpaca(required=True)
+    try:
+        store = Store(_db(cfg), writer=False)
+    except FileNotFoundError as e:
+        print(e)
+        return 3
+    cal = load_calendar(store)
+    if cal is None:
+        print("No stored trading calendar yet: start the engine once (`ottr run`) so it loads one.")
+        return 3
+    print("Screening NYSE and Nasdaq stocks (a few minutes; changes nothing)...", flush=True)
+    try:
+        res = await run_screen(cfg, store, alpaca, Sec.from_env(), cal, time.time(), kind="dry_run",
+                               progress=lambda line: print(f"  {line}", flush=True))
+    except (ScreenError, MarketDataError) as e:
+        print(f"screen failed: {e}")
+        return 1
+    print(screen_report(res, args.top))
+    return 0
+
+
 async def cmd_chat(cfg, args) -> int:
     from ottr.chat.bot import check_chat, run_chat  # discord.py is only imported for chat
     return await (check_chat(cfg) if args.check else run_chat(cfg, standby=args.standby))
@@ -477,6 +528,8 @@ def main(argv=None) -> int:
     p = sub.add_parser("data", help="US desk: check the Alpaca, events and macro feeds (reads only)")
     p.add_argument("--check", action="store_true", required=True, help="run the feed check")
     p.add_argument("--symbols", help="comma-separated symbols (default: the core universe in config.toml)")
+    p = sub.add_parser("screen", help="run the stock screener now and show what it would change (changes nothing)")
+    p.add_argument("--top", type=int, default=25, help="ranked stocks to show")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)
@@ -498,7 +551,7 @@ def main(argv=None) -> int:
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
           "chat": cmd_chat, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
-          "resume": cmd_resume}[args.cmd]
+          "resume": cmd_resume, "screen": cmd_screen}[args.cmd]
     try:
         return asyncio.run(fn(cfg, args))
     except SchemaError as e:

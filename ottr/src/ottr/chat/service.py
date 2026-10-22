@@ -105,6 +105,11 @@ class ChatService:
             return render.meeting(await self.api.latest_meeting(), self.clock())
         return await self._read(asker, "meeting", view)
 
+    async def screen(self, asker: Asker) -> str:
+        async def view() -> str:
+            return render.screen(await self.api.screen(), self.clock())
+        return await self._read(asker, "screen", view)
+
     # -- kill switch (the one write, through the API's authenticated endpoint) -------------
     async def _kill(self, asker: Asker, command: str, engaged: bool, reason: str) -> str:
         # by="discord" says where it came from; the reason says who (the ID can't be spoofed).

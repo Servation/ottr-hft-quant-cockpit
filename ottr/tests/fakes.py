@@ -264,6 +264,8 @@ class FakeEngineApi:
                                       "fee": "0.00", "realized_pnl": "0", "quote_source": "alpaca",
                                       "origin": "council", "ref": "m-1", "reason": "rates and trend"}],
                            "next_before": None},
+            "/api/screen": {"screen": None, "satellites": [], "changes": [], "schedule": "Sat 08:00 ET weekly",
+                            "satellites_max": 6},
         }
 
     def handler(self, request):

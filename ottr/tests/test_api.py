@@ -196,7 +196,10 @@ async def test_unknown_route_is_json_404(api):
     _, s, _ = api
     d = await get(s, "/api/nope", status=404)
     assert d["status"] == 404
-    await get(s, "/api/screen", status=404)                            # the crypto screener is gone
+    # /api/screen is the US stock screen now (the crypto screener's route is gone); before
+    # the first screen it answers with an empty membership, not an error.
+    d = await get(s, "/api/screen")
+    assert (d["screen"], d["satellites"], d["schedule"]) == (None, [], "Sat 08:00 ET weekly")
 
 
 async def test_foreign_host_header_is_refused(api):

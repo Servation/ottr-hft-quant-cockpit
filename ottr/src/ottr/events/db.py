@@ -202,6 +202,12 @@ def sec_listing(store: Store, symbol: str) -> Optional[Listing]:
     return Listing(r[0], r[1], r[2], r[3]) if r else None
 
 
+def sec_listings_all(store: Store) -> Dict[str, Listing]:
+    """Every stored exchange-listed filer, by symbol (the screener's starting list)."""
+    return {r[0]: Listing(r[0], r[1], r[2], r[3])
+            for r in store.conn.execute("SELECT symbol,cik,name,exchange FROM sec_listings")}
+
+
 def sec_funds(store: Store) -> Set[str]:
     return {r[0] for r in store.conn.execute("SELECT symbol FROM sec_funds")}
 
