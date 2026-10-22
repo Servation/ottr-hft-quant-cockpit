@@ -1,14 +1,28 @@
 """
-Engine: wires market data, the council, the risk monitor and the executor together.
+Engine: runs the US desk. Market data, the council, the risk monitor, the daily jobs and
+one Executor, in one process that is the only writer.
 
-What it does: periodic tasks (market every 60s, risk every 60s, equity every 15m, a
-council meeting every N hours) feed one Executor. Every task writes a heartbeat; a
-watchdog task turns stale heartbeats, a blind risk monitor and ledger problems into
-alarms (audit log + Discord), and the optional HTTP API serves the book read-only.
+What it does: core tasks run on fixed cadences (so `health.task_health` stays meaningful)
+and branch on the session, because nights, weekends and holidays are normal states:
+- market (60s): the calendar and asset records (daily), the daily bars (after each close)
+  and, in session, proof that live quotes are arriving.
+- jobs (60s): corporate actions in effect (dividends owed and paid, splits, cash
+  mergers; also once at start-up, before any task reads the book), the close-of-day fee
+  charge, the cash sweep before the close, the events feeds that are due, and, in
+  session, retries of orders deferred by a bad quote or a closed market.
+- risk (60s): the protective monitor, in session only (a stop needs a live bid to sell at),
+  including the exit from a holding ahead of a corporate action the book can't model.
+- equity (15m): a point in session, and one at each close, with the SPY and 60/40
+  benchmarks measured from the first close after the book opened.
+- council: meetings at the configured New York times on trading days.
+- screen: the weekly stock screener (`ottr/universe`), which promotes and demotes the
+  satellites; a run missed while the engine was down happens as soon as it is back.
+- watchdog (60s): turns stale heartbeats, a blind risk monitor, stale events feeds and
+  ledger problems into alarms (audit log and Discord); the optional API serves the book.
 
-Why one process: it is the only writer, so there is exactly one place where state
-changes. Why crash-only: if a core task ever exits, `run` returns 1 so the supervisor
-restarts a fresh process, instead of limping on with, say, no risk monitor.
+Why one process: it is the only writer, so there is exactly one place where state changes.
+Why crash-only: if a core task ever exits, `run` returns 1 so the supervisor restarts a
+fresh process, instead of limping on with, say, no risk monitor.
 """
 
 from __future__ import annotations
@@ -18,66 +32,100 @@ import json
 import logging
 import os
 import time
-from typing import Any, Awaitable, Callable, Dict, Optional, Set, Tuple
+from datetime import datetime, timedelta
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Union
 
 from ottr import health
+from ottr.broker.account import buying_power
+from ottr.broker.sim import SimBroker
+from ottr.clock import SYSTEM, Clock
 from ottr.config import Config
 from ottr.control import (STOP_FILE, clear_stale_stop, install_stop_signals, restore_signals,
                           stop_requested)
 from ottr.council.council import Council, new_meeting_id
 from ottr.council.models import make_adapter
+from ottr.engine.desks import Desk
 from ottr.engine.executor import Executor
+from ottr.engine.jobs import close_of_day, sweep_intent
 from ottr.engine.killswitch import KillSwitch
 from ottr.engine.progress import MeetingProgress
-from ottr.ledger.book import Ledger
+from ottr.events.refresh import Sources, refresh_due
+from ottr.events.view import FEED_CORPORATE, StoredEvents, macro_readings
+from ottr.ledger import corporate, tax
+from ottr.ledger.book import Ledger, trade_day
+from ottr.ledger.marks import SIP_FINAL_AFTER_SEC
 from ottr.ledger.store import Store, dumps
-from ottr.market import screen
-from ottr.market.service import MarketData, MarketSnapshot
-from ottr.market.types import MarketDataError
+from ottr.market.alpaca import Asset
+from ottr.market.calendar import ET, CalendarError, next_meeting_at
+from ottr.market.packet import UsSnapshot
+from ottr.market.service import MarketData
+from ottr.market.types import BASIS_CLOSE, MarketDataError
 from ottr.notify import Alerts
 from ottr.risk import gate, monitor
 from ottr.risk.monitor import RiskState
 from ottr.risk.types import Intent, Verdict
+from ottr.universe import ACTIVE, SUNSET, Member, core_members, last_slot
+from ottr.universe import db as udb
+from ottr.universe import run as urun
+from ottr.universe.db import Satellite
 
 logger = logging.getLogger(__name__)
 
-# Kraken stamps a daily candle with its 00:00 UTC open and only closed candles are kept,
-# so the newest is normally 24-48h old. Older than 3 days means closes stopped updating.
-CANDLE_STALE_SEC = 3 * 86400
-SCREEN_FIRST_DELAY = 120.0   # let the first market and risk ticks land before a minute of screening
-SCREEN_RETRY_SEC = 1800.0    # a failed screen is retried after 30 min, not at once
+BENCH_BASE = "bench_base"
+NEXT_MEETING = "next_meeting_at"
+DEFERRED_RETRY_SEC = 60.0       # a deferred order is tried again at most this often
+BARS_GRACE_SEC = 3600.0         # a final session's bars should be stored within this long
+MEETING_GRACE_SEC = 1800.0      # a slot missed by more than this (engine down) is skipped
+SCREEN_RETRY_SEC = 1800.0       # a failed weekly screen is tried again after this
+WEEK_SEC = 7 * 86400.0
+EARNINGS_BLACKOUT = gate.EARNINGS_BLACKOUT_SESSIONS
 
 
 def build_council(cfg: Config) -> Council:
     c = cfg.council
     return Council(analysts={n: make_adapter(n, c) for n in c.analysts}, chair=make_adapter(c.chair, c),
-                   universe=cfg.universe, min_analysts=c.min_analysts,
+                   universe=list(cfg.core), min_analysts=c.min_analysts,
                    max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec)
 
 
-def benchmarks(base: Optional[dict], quotes) -> Tuple[Optional[float], Optional[float]]:
-    """(BTC buy-and-hold, equal-weight buy-and-hold) equity from the day-0 baseline."""
-    if not base:
-        return None, None
-    eq0, p0 = base["equity"], base["prices"]
-    btc = quotes.get("BTC")
-    bench_btc = eq0 * btc.mid / p0["BTC"] if btc and p0.get("BTC") else None
-    rel = [quotes[a].mid / p for a, p in p0.items() if a in quotes and p > 0]
-    bench_ew = eq0 * sum(rel) / len(rel) if rel and len(rel) == len(p0) else None
-    return bench_btc, bench_ew
+def members_from(cfg: Config, assets: Mapping[str, Asset],
+                 satellites: Optional[Mapping[str, Satellite]] = None) -> Dict[str, Member]:
+    """The core members and the satellites (stocks; a sunset one is SELL or HOLD only),
+    with Alpaca's fractional-share flag. A symbol Alpaca says isn't tradable can't be
+    bought (SELL or HOLD only) until it is again."""
+    out = core_members(cfg, {s: a.fractionable for s, a in assets.items()})
+    for s, sat in (satellites or {}).items():
+        a = assets.get(s)
+        out[s] = Member(s, gate.STOCK, ACTIVE if sat.state == udb.ACTIVE else SUNSET,
+                        a.fractionable if a else False)
+    for s, a in assets.items():
+        if s in out and not (a.tradable and a.status == "active"):
+            out[s] = Member(s, out[s].asset_class, SUNSET, out[s].fractionable)
+    return out
+
+
+def _et(ts: float, fmt: str = "%a %m-%d %H:%M") -> str:
+    return datetime.fromtimestamp(ts, tz=ET).strftime(fmt)
 
 
 class Engine:
     def __init__(self, cfg: Config, store: Store, market: MarketData,
                  council: Optional[Council] = None, alerts: Optional[Alerts] = None,
-                 screener: Optional[Callable[[], Awaitable[screen.ScreenResult]]] = None) -> None:
-        self.cfg, self.store, self.market = cfg, store, market
-        self.screener = screener or (lambda: screen.run(market.kraken, cfg))
+                 sources: Optional[Sources] = None, clock: Clock = SYSTEM) -> None:
+        self.cfg, self.store, self.market, self.clock = cfg, store, market, clock
+        self.sources = sources or Sources()
         self.ledger = Ledger(store)
         self.council = council or build_council(cfg)
         self.alerts = alerts or Alerts(None, cfg.alerts)
         self.kill = KillSwitch(cfg, store)
-        self.executor = Executor(cfg, store, self.ledger, market, self.alerts, kill=self.kill)
+        stored = (store.get_state("assets") or {}).get("assets") or {}
+        # Updated in place, so the desk (which holds this dict) always sees the current members.
+        self.members: Dict[str, Member] = members_from(cfg, {s: Asset(**a) for s, a in stored.items()},
+                                                       udb.satellites(store))
+        self.events = StoredEvents.from_config(store, lambda: market.calendar, cfg)
+        self.desk = Desk(cfg, store, self.ledger, market, SimBroker(cfg.fees, cfg.trading.slippage_pct),
+                         self.members, self.events, clock)
+        self.executor = Executor(cfg, store, self.ledger, self.desk, self.alerts, kill=self.kill)
         self.executor.on_outcome = self._order_outcome
         self.watchdog = health.Watchdog(cfg.engine.alarm_clear_sec)
         self.problems: Dict[str, health.Alarm] = {}  # engine-internal alarms (e.g. API bind)
@@ -94,30 +142,252 @@ class Engine:
         # their live message keeps updating until every order has an outcome.
         self._awaiting_orders: Dict[str, MeetingProgress] = {}
 
-    # -- risk ------------------------------------------------------------------------------
+    # -- members -----------------------------------------------------------------------------
+    def classes(self) -> Dict[str, str]:
+        return {s: m.asset_class for s, m in self.members.items()}
+
+    async def refresh_members(self) -> None:
+        """Rebuild the members from the satellites and Alpaca's asset records (fetched once
+        a New York day). A sunset satellite that is no longer held leaves the universe."""
+        held = set(self.ledger.positions())
+        for s in udb.retire(self.store, held, self.clock.time()):
+            logger.info("%s sold off: no longer a member", s)
+        sats = udb.satellites(self.store)
+        assets = await self.market.refresh_assets(list(self.cfg.core) + sorted(sats))
+        fresh = members_from(self.cfg, assets, sats)
+        for s in sorted(set(self.members) - set(fresh)):
+            del self.members[s]
+        self.members.update(fresh)
+
+    def buy_blocks(self, now: float) -> Dict[str, str]:
+        """Members the gate would refuse to BUY right now, and why, for the council."""
+        out = {}
+        for s, m in self.members.items():
+            if not m.buyable:
+                out[s] = "being sold off or not tradable: SELL or HOLD only"
+                continue
+            if m.asset_class == gate.STOCK:
+                n = self.events.earnings_sessions(s, now)
+                if n is None:
+                    out[s] = "no confirmed earnings date"
+                    continue
+                if n <= EARNINGS_BLACKOUT:
+                    out[s] = f"earnings in {n} sessions"
+                    continue
+            ca = self.events.corp_action(s, now)
+            if ca:
+                out[s] = ca
+        for s, why in corporate.unapplied(self.store, trade_day(now)).items():
+            if s in self.members:
+                out.setdefault(s, why)
+        return out
+
+    # -- market ------------------------------------------------------------------------------
+    async def market_tick(self) -> str:
+        """Keep the calendar, asset records and daily bars current, and in session prove the
+        live feed answers. Raises (a failed heartbeat) when the data can't be trusted."""
+        cal = await self.market.refresh_calendar()
+        await self.refresh_members()
+        await self.market.refresh_bars()
+        now = self.clock.time()
+        try:
+            mt = cal.state_at(now)
+        except CalendarError as e:
+            raise MarketDataError(str(e)) from e
+        problems = []
+        final = self.market.final_session(now)
+        bars = self.market.raw_bars("SPY")
+        if final and (not bars or bars[-1].day < final.day) and now > final.close_ts + SIP_FINAL_AFTER_SEC + BARS_GRACE_SEC:
+            problems.append(f"daily bars stop at {bars[-1].day if bars else 'nothing'}, but {final.day} closed")
+        if mt.is_open:
+            live = await self.market.live_quotes()
+            missing = sorted(s for s, m in self.members.items() if m.buyable and s not in live)
+            if not live:
+                problems.append("no usable live quote for any member")
+            detail = (f"open, {len(live)} live quotes" + (f"; none for {', '.join(missing)}" if missing else ""))
+        else:
+            nxt = mt.next_open
+            detail = f"{mt.state.value}; next open {_et(nxt.open_ts) if nxt else 'beyond the calendar'} ET"
+        if problems:
+            raise MarketDataError("; ".join(problems))
+        return detail
+
+    # -- corporate actions -------------------------------------------------------------------
+    def _fractionable(self, symbol: str) -> bool:
+        """Whether the broker keeps fractional shares of `symbol`: a member's flag, else its
+        stored asset record. Unknown counts as whole shares only (a fraction is paid out)."""
+        m = self.members.get(symbol)
+        if m is not None:
+            return m.fractionable
+        rec = ((self.store.get_state("assets") or {}).get("assets") or {}).get(symbol) or {}
+        return bool(rec.get("fractionable"))
+
+    def _close_before(self, symbol: str, day) -> Optional[float]:
+        done = [b for b in self.market.raw_bars(symbol, since=day - timedelta(days=10)) if b.day < day]
+        return done[-1].close if done else None
+
+    def apply_corporate_actions(self) -> corporate.Applied:
+        """Book the corporate actions in effect and settle the dividends owed. Each holding
+        it changed is announced; what couldn't be applied is alarmed by health."""
+        res = corporate.apply_due(self.store, self.clock.time(), self._fractionable, self._close_before)
+        for symbol, note in res.notes:
+            self.alerts.event("corporate_action", {"symbol": symbol, "note": note})
+        return res
+
+    # -- the weekly screen --------------------------------------------------------------------
+    async def screen(self, apply: bool = True, kind: str = "weekly") -> urun.ScreenResult:
+        """Run the screener; with `apply`, book its promotions and demotions. Either way the
+        result is stored (for /screen and the API) and its digest goes to Discord."""
+        now = self.clock.time()
+        res = await urun.run_screen(self.cfg, self.store, self.market.alpaca, self.sources.sec,
+                                    self.market.calendar, now, kind)
+        if apply:
+            urun.apply(self.store, res, set(self.ledger.positions()), now)
+        udb.save_screen(self.store, res.id, kind, apply, res.summary(), res.to_dict(), now)
+        self.store.audit("screen", id=res.id, screen_kind=kind, applied=apply, summary=res.summary())
+        if apply:
+            await self.refresh_members()
+            if res.decision.promote:
+                # A new satellite needs its history (vol, regime, the packet's indicators)
+                # before the next meeting, not after the next session's close.
+                await self.market.refresh_bars(force=True)
+        logger.info("screen %s: %s", res.id, res.summary())
+        self.alerts.event("screen", {**urun.digest(res), "applied": apply})
+        return res
+
+    async def _screen_loop(self) -> None:
+        sc = self.cfg.screen
+        while sc.enabled:
+            now = self.clock.time()
+            last = udb.last_applied_ts(self.store)
+            if last is None or last < last_slot(sc, now):
+                try:
+                    res = await self.screen(apply=True)
+                    self._beat("screen", True, res.summary())
+                except Exception as e:
+                    if isinstance(e, (urun.ScreenError, MarketDataError)):
+                        logger.warning("screen failed: %s", e)
+                    else:
+                        logger.exception("screen failed")
+                    self._beat("screen", False, f"{type(e).__name__}: {e}")
+                    await asyncio.sleep(SCREEN_RETRY_SEC)
+                    continue
+            now = self.clock.time()
+            await asyncio.sleep(max(1.0, min(last_slot(sc, now) + WEEK_SEC - now, 600.0)))
+        while True:  # switched off in config: nothing to do, but a core task never returns
+            await asyncio.sleep(3600)
+
+    # -- jobs --------------------------------------------------------------------------------
+    async def jobs_tick(self) -> str:
+        """The day's scheduled work. Events feeds that fail are recorded in `feeds` (and
+        alarmed by health); they don't fail this heartbeat."""
+        now = self.clock.time()
+        cal = self.market.calendar
+        notes: List[str] = []
+        ca = self.apply_corporate_actions()
+        for day, amount in close_of_day(self.ledger, cal, now):
+            logger.info("regulatory fees for %s charged: $%s", day, amount)
+            self.store.audit("fees_charged", day=str(day), amount=str(amount))
+            notes.append(f"fees for {day} charged")
+        if cal.state_at(now).is_open:
+            intent = sweep_intent(self.cfg, self.ledger, cal, await self.market.marks(), now)
+            if intent is not None:
+                await self.executor.submit(intent)
+                notes.append("sweep submitted")
+            retried = await self._retry_deferred()
+            if retried:
+                notes.append(f"{retried} deferred order(s) retried")
+        held = set(self.ledger.positions())
+        for r in await refresh_due(self.cfg, self.store, self.sources, sorted(set(self.members) | held), now):
+            notes.append(f"{r.feed} refreshed" if r.ok else f"{r.feed} feed: {r.detail}")
+            if r.ok and r.feed == FEED_CORPORATE:
+                # An action that arrives already in effect is booked now, not a tick later.
+                more = self.apply_corporate_actions()
+                ca.notes.extend(more.notes)
+                ca.failed = more.failed
+        if ca.notes:
+            notes.append(f"{len(ca.notes)} corporate action update(s)")
+        if ca.failed:
+            notes.append(f"{len(ca.failed)} corporate action(s) not applied")
+        return "; ".join(notes) or "nothing due"
+
+    async def _retry_deferred(self) -> int:
+        """Resubmit orders deferred for a transient reason (a bad quote, the market closed).
+        The gate decides again from scratch: an expired council decision is rejected then."""
+        wall = time.time()
+        rows = self.store.conn.execute(
+            "SELECT intent, updated_ts FROM orders WHERE status='deferred' ORDER BY ts").fetchall()
+        n = 0
+        for raw, updated in rows:
+            if wall - updated < DEFERRED_RETRY_SEC:
+                continue
+            await self.executor.submit(Intent.from_dict(json.loads(raw)))
+            n += 1
+        return n
+
+    # -- risk --------------------------------------------------------------------------------
     def _blind_state(self, assets: Set[str], now: float) -> Dict[str, float]:
         """asset -> blind since, for the watchdog. Logs only the transitions."""
         prev = self.store.get_state("risk_blind") or {}
         cur = {a: prev.get(a, now) for a in sorted(assets)}
         for a in sorted(set(cur) - set(prev)):
-            logger.warning("risk monitor blind on %s: no fresh quote", a)
+            logger.warning("risk monitor blind on %s: no live quote", a)
         for a in sorted(set(prev) - set(cur)):
             logger.info("risk monitor can see %s again", a)
         return cur
 
-    async def risk_tick(self) -> monitor.MonitorResult:
+    async def _ensure_stops(self) -> None:
+        """Give every holding without a stop its entry stop (the BUY that opens a position
+        sets it; holdings brought in at `ottr init` get theirs here, from today's vol)."""
+        for s, p in self.ledger.positions().items():
+            if s == self.cfg.universe.cash_symbol or p.stop_pct is not None:
+                continue
+            vol, _ = await self.market.vol_regime(s)
+            pct = monitor.entry_stop_pct(self.cfg.risk, vol)
+            if self.ledger.set_stop(s, pct):
+                logger.info("stop for %s set at %.1f%% under its high (vol %s)", s, pct * 100,
+                            f"{vol:.0%}" if vol else "unknown")
+
+    async def risk_tick(self) -> Union[monitor.MonitorResult, str]:
+        """The protective monitor in session (its result), or why it rested (a string)."""
+        now = self.clock.time()
+        mt = self.market.calendar.state_at(now)
+        if not mt.is_open:
+            self.store.set_state("risk_blind", {})  # no market to see: nothing is blind
+            return "market closed: stops wait for the open"
+        start = mt.session.open_ts + self.cfg.risk.open_delay_min * 60
+        if now < start:
+            # The opening auction's first prints are noise; a gap is still caught (and sold
+            # at the bid) at the first check after this.
+            self.store.set_state("risk_blind", {})
+            return f"the open: stops wait until {_et(start, '%H:%M')} ET"
+        await self._ensure_stops()
         positions = self.ledger.positions()
+        behind = corporate.unapplied(self.store, mt.session.day)
+        current = {s: p for s, p in positions.items() if s not in behind}
+        cash_symbol = self.cfg.universe.cash_symbol
         try:
-            quotes = await self.market.quotes()
+            quotes = await self.market.live_quotes()
+            marks = await self.market.marks()
         except MarketDataError:
             # No quotes at all: every holding is unprotected, which the watchdog must see.
-            self.store.set_state("risk_blind", self._blind_state(set(positions), time.time()))
+            self.store.set_state("risk_blind", self._blind_state(set(positions) - {cash_symbol}, now))
             raise
-        valuation = self.ledger.value(quotes)
+        # A holding whose corporate action isn't applied yet has shares or cash that aren't
+        # current: no stop on it, and no trim or breaker decision on equity until it is.
+        valuation = self.ledger.value(marks) if len(current) == len(positions) else None
         state = RiskState.from_dict(self.store.get_state("risk"))
         points = self.store.conn.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
-        now = time.time()
-        res = monitor.check(self.cfg, now, positions, valuation, quotes, state, points)
+        prev_close = {}
+        for s in current:
+            done = [b for b in self.market.raw_bars(s, since=mt.session.day - timedelta(days=10))
+                    if b.day < mt.session.day]
+            if done:
+                changes = corporate.restatements(self.store, [s], done[-1].day).get(s, [])
+                prev_close[s] = corporate.restate(done[-1].close, changes)
+        exits = corporate.exits_due(self.store, self.market.calendar, mt.session.day, current)
+        res = monitor.check(self.cfg, now, current, valuation, quotes, state, points, self.classes(), prev_close,
+                            exits)
         blind = self._blind_state({d["asset"] for k, d in res.events if k == "risk_blind"}, now)
         with self.store.tx():
             for a, h in res.high_water.items():
@@ -134,76 +404,91 @@ class Engine:
             await self.executor.submit(intent)
         return res
 
-    # -- market ----------------------------------------------------------------------------
-    async def market_tick(self) -> None:
-        """Keep quotes and candles warm and prove they are fresh (the market heartbeat).
-
-        Raises (a failed heartbeat) when any universe asset lacks a fresh quote or its
-        daily closes stopped updating, since sizing and the council would see stale data.
-        """
-        quotes = await self.market.quotes()
-        now = time.time()  # judge quotes before the (hourly, multi-second) candle refresh
-        problems = []
-        for a in self.cfg.universe:
-            q = quotes.get(a)
-            if q is None:
-                problems.append(f"{a} no quote")
-            elif q.age(now) > self.cfg.trading.max_data_age_sec:
-                problems.append(f"{a} quote {health.fmt_age(q.age(now))} old")
-        candles = await self.market.candles()  # TTL-cached: really refreshes hourly
-        now = time.time()
-        for a in self.cfg.universe:
-            rows = candles.get(a) or []
-            if not rows:
-                problems.append(f"{a} no daily candles")
-            elif now - rows[-1][0] > CANDLE_STALE_SEC:
-                problems.append(f"{a} last daily close {health.fmt_age(now - rows[-1][0])} old")
-        if problems:
-            raise MarketDataError("; ".join(problems))
-
-    # -- equity ----------------------------------------------------------------------------
-    def benchmarks(self, quotes) -> tuple:
-        return benchmarks(self.store.get_state("bench_base"), quotes)
-
-    async def equity_tick(self) -> Optional[float]:
-        quotes = await self.market.quotes()
-        v = self.ledger.value(quotes)
+    # -- equity ------------------------------------------------------------------------------
+    async def equity_tick(self) -> str:
+        """An equity point in session; outside it, one point per close, once the close is
+        final. The benchmark baseline is the first close after the book opened."""
+        now = self.clock.time()
+        mt = self.market.calendar.state_at(now)
+        final = self.market.final_session(now)
+        if not mt.is_open:
+            last = self.store.conn.execute("SELECT MAX(ts) FROM equity").fetchone()[0]
+            if final is None or (last is not None and last >= final.close_ts + SIP_FINAL_AFTER_SEC):
+                return "market closed; the last close is recorded"
+        behind = sorted(s for s in corporate.unapplied(self.store, trade_day(now)) if s in self.ledger.positions())
+        if behind:
+            raise MarketDataError(f"a corporate action on {', '.join(behind)} isn't applied yet; equity unknown "
+                                  "(not recorded)")
+        marks = await self.market.marks()
+        v = self.ledger.value(marks)
         if v is None:
-            raise MarketDataError("a held asset has no quote; equity unknown (not recorded)")
-        if not self.store.get_state("bench_base"):
-            self.store.set_state("bench_base", {"ts": time.time(), "equity": v.equity,
-                                                "prices": {a: q.mid for a, q in quotes.items()}})
-        b_btc, b_ew = self.benchmarks(quotes)
-        self.store.add_equity(time.time(), v.equity, v.cash, v.invested, b_btc, b_ew,
-                              {"weights": v.weights})
-        return v.equity
+            raise MarketDataError("a holding has no price; equity unknown (not recorded)")
+        if not mt.is_open and any(m.basis != BASIS_CLOSE for m in marks.values()):
+            return "waiting for the official close to mark the book"
+        base = self.store.get_state(BENCH_BASE)
+        if base is None and not mt.is_open and final is not None:
+            base = {"day": final.day.isoformat(), "equity": v.equity, "ts": now}
+            self.store.set_state(BENCH_BASE, base)
+            logger.info("benchmarks start from the %s close at $%.2f", final.day, v.equity)
+        bench = await self.market.benchmarks(base)
+        detail = {"weights": v.weights, "basis": {s: m.basis for s, m in marks.items()}}
+        if v.receivable:
+            detail["receivable"] = v.receivable
+        try:
+            after_tax = tax.after_tax_equity(self.cfg, self.store, marks, v.equity, trade_day(now))
+        except ValueError as e:  # an inconsistent history: the ledger check alarms on it
+            logger.warning("after-tax equity unknown: %s", e)
+            after_tax = None
+        self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail, after_tax)
+        return f"equity ${v.equity:,.2f}" + (f" (after tax, est. ${after_tax:,.2f})" if after_tax is not None else "")
 
-    # -- council ---------------------------------------------------------------------------
-    def book_context(self, snap: MarketSnapshot) -> str:
-        quotes = {a: v.quote for a, v in snap.assets.items() if v.quote}
-        v = self.ledger.value(quotes)
+    # -- council -----------------------------------------------------------------------------
+    def book_context(self, snap: UsSnapshot) -> str:
+        now = snap.as_of
+        marks = {s: v.price for s, v in snap.assets.items() if v.price is not None}
+        v = self.ledger.value(marks)
         positions = self.ledger.positions()
         st = RiskState.from_dict(self.store.get_state("risk"))
-        lines = ["DESK BOOK (paper):"]
+        cfg, u = self.cfg, self.cfg.universe
+        lines = [f"DESK BOOK (paper; {cfg.account.type}: long-only, no leverage, no shorting):"]
         if v is None:
-            lines.append("  valuation unavailable (missing quote)")
+            lines.append("  valuation unavailable (a holding has no price)")
         else:
-            lines.append(f"  equity ${v.equity:,.2f} | cash ${v.cash:,.2f} ({v.cash / v.equity * 100:.1f}%) | "
-                         f"invested {v.invested / v.equity * 100:.1f}%")
-        lines.append("  HOLDINGS: " + (", ".join(
-            f"{a} {v.weights.get(a, 0) * 100:.1f}% of book (entry avg ${float(p.avg_cost):,.6g}, "
-            f"now ${quotes[a].bid:,.6g}, {(quotes[a].bid / float(p.avg_cost) - 1) * 100:+.1f}%)"
-            for a, p in positions.items() if a in quotes and v) or "none"))
+            bp = buying_power(cfg.account.type, self.ledger, self.market.calendar, now).available
+            cash_etf = v.values.get(u.cash_symbol, 0.0)
+            risky = v.invested - cash_etf
+            stocks = sum(x for s, x in v.values.items() if self.members.get(s) is None
+                         or self.members[s].asset_class == gate.STOCK)
+            owed = f", dividends owed ${v.receivable:,.2f}" if v.receivable else ""
+            lines.append(f"  equity ${v.equity:,.2f} | cash ${v.cash:,.2f}{owed}, buying power ${float(bp):,.2f} | "
+                         f"in {u.cash_symbol} (swept cash) ${cash_etf:,.2f} | invested {risky / v.equity * 100:.1f}% "
+                         f"of equity (max {cfg.trading.max_gross_pct:.0f}%) | single stocks {stocks / v.equity * 100:.1f}% "
+                         f"(sleeve max {u.sleeve_pct:.0f}%)")
+        held = []
+        for s, p in positions.items():
+            q = marks.get(s)
+            if q is None or v is None:
+                held.append(f"{s} (no price)")
+                continue
+            cls = self.members[s].asset_class if s in self.members else "no longer a member: SELL or HOLD"
+            held.append(f"{s} {v.weights.get(s, 0) * 100:.1f}% of book ({cls}; avg cost ${float(p.avg_cost):,.2f}, "
+                        f"now ${q.bid:,.2f} {q.basis}, {(q.bid / float(p.avg_cost) - 1) * 100:+.1f}%)")
+        lines.append("  HOLDINGS: " + ("; ".join(held) or "none"))
         lines.append("  Risk-model target weight at conviction 1.0 (BUYs only top up to this): " + ", ".join(
-            f"{a} {gate.target_weight(self.cfg, a, av.vol, av.regime, 1.0) * 100:.1f}%"
-            for a, av in snap.assets.items()))
-        lines.append("  Per-asset caps: " + ", ".join(f"{a} {self.cfg.cap_pct(a):.0f}%" for a in self.cfg.universe))
+            f"{s} {gate.target_weight(cfg, s, av.asset_class, av.vol, av.regime, 1.0) * 100:.1f}%"
+            for s, av in snap.assets.items() if av.asset_class and s != u.cash_symbol))
+        caps = ", ".join(f"{c} {p:.0f}%" for c, p in sorted(cfg.caps.by_class.items()))
+        over = ", ".join(f"{s} {p:.0f}%" for s, p in sorted(cfg.caps.by_symbol.items()))
+        lines.append(f"  Caps (% of equity): {caps}" + (f"; overrides {over}" if over else "") +
+                     f"; {u.cash_symbol} uncapped")
+        blocked = self.buy_blocks(now)
+        if blocked:
+            lines.append("  BUYS BLOCKED (code drops these): " + "; ".join(f"{s} ({why})" for s, why in sorted(blocked.items())))
         lines.append(f"  Drawdown breaker: {'HALTED (BUYs blocked)' if st.halted else 'normal'}")
         recent = self.ledger.fills(5)
         if recent:
             lines.append("  RECENT FILLS: " + "; ".join(
-                f"{time.strftime('%m-%d %H:%M', time.gmtime(f['ts']))} {f['side']} {f['asset']} "
-                f"${float(f['notional']):,.0f} ({f['origin']})" for f in recent))
+                f"{_et(f['ts'])} {f['side']} {f['asset']} ${float(f['notional']):,.0f} ({f['origin']})" for f in recent))
         last = self.store.conn.execute(
             "SELECT record FROM meetings WHERE status='ok' ORDER BY ts DESC LIMIT 1").fetchone()
         if last:
@@ -274,13 +559,17 @@ class Engine:
         self._awaiting_orders.clear()
 
     async def _meeting(self, execute: bool, prog: MeetingProgress) -> Dict[str, Any]:
-        snap = await self.market.snapshot()
-        if all(v.quote is None for v in snap.assets.values()):
-            raise MarketDataError("no quotes for any asset")
+        now = self.clock.time()
+        traded = self.classes()
+        macro = macro_readings(self.store, self.cfg.events.macro, trade_day(now), self.cfg.events.macro_stale_days)
+        snap = await self.market.snapshot(traded, self.events, macro)
+        if all(v.price is None for v in snap.assets.values()):
+            raise MarketDataError("no price for any asset")
         context = snap.packet() + "\n\n" + self.book_context(snap)
         held = set(self.ledger.positions())
         rec = await self.council.run(context, held, meeting_id=prog.id,
-                                     observe=lambda kind, d: self._on_council(prog, kind, d))
+                                     observe=lambda kind, d: self._on_council(prog, kind, d),
+                                     universe=sorted(traded), blocked=self.buy_blocks(snap.as_of))
         rec["context"] = context
         with self.store.tx() as c:
             c.execute("INSERT INTO meetings(id,ts,status,packet,record) VALUES(?,?,?,?,?)",
@@ -309,7 +598,46 @@ class Engine:
                                       "trades": rec["trades"], "dropped": rec["dropped"]})
         return rec
 
-    # -- health ----------------------------------------------------------------------------
+    def next_meeting(self, after: float) -> float:
+        s = self.cfg.schedule
+        return next_meeting_at(self.market.calendar, after, s.meeting_times, s.min_before_close_min)
+
+    async def _council_loop(self) -> None:
+        while True:
+            try:
+                now = self.clock.time()
+                due = self.store.get_state(NEXT_MEETING)
+                if due is None:
+                    due = self.next_meeting(now)
+                    self.store.set_state(NEXT_MEETING, due)
+            except (MarketDataError, CalendarError) as e:
+                logger.warning("council schedule unknown (%s); retrying in a minute", e)
+                await asyncio.sleep(60)
+                continue
+            if now < due:
+                await asyncio.sleep(min(due - now, 60))
+                continue
+            try:
+                self.store.set_state(NEXT_MEETING, self.next_meeting(max(now, due)))
+            except CalendarError as e:
+                logger.warning("no council slot ahead in the calendar (%s); retrying in a minute", e)
+                await asyncio.sleep(60)
+                continue
+            if now - due > MEETING_GRACE_SEC or not self.market.calendar.state_at(now).is_open:
+                # The engine was down (or asleep) through the slot: a late meeting would trade
+                # into the close or a closed market, so wait for the next one instead.
+                logger.warning("skipped the council slot of %s ET: it passed while the engine was down",
+                               _et(due, "%Y-%m-%d %H:%M"))
+                self.store.audit("meeting_skipped", slot=due)
+                continue
+            try:
+                rec = await self.meeting(execute=True)
+                self._beat("council", rec["status"] == "ok", rec["status"])
+            except Exception as e:
+                logger.exception("meeting failed")
+                self._beat("council", False, f"{type(e).__name__}: {e}")
+
+    # -- health ------------------------------------------------------------------------------
     def _beat(self, task: str, ok: bool, detail: str = "") -> None:
         # A heartbeat write must never take its task down with it (e.g. a full disk).
         try:
@@ -370,41 +698,6 @@ class Engine:
                 self._beat("watchdog", False, f"{type(e).__name__}: {e}")
             await asyncio.sleep(iv)
 
-    # -- screener (advisory) ---------------------------------------------------------------
-    async def screen_tick(self) -> screen.ScreenResult:
-        """One screen: store it (history for P3), audit it, and post the digest."""
-        res = await self.screener()
-        d = res.to_dict()
-        top = res.candidates(self.cfg.screen.top_n)
-        with self.store.tx():
-            self.store.save_screen(d)
-            self.store.audit("screen", id=res.id, ranked=len(res.rows), errors=len(res.errors),
-                             candidates=[r.symbol for r in top])
-        if self.cfg.screen.post_to_discord:
-            self.alerts.event("screen", d)
-        return res
-
-    async def _screen_loop(self) -> None:
-        # Auxiliary: it never trades, so a failure only marks its heartbeat (a warning after
-        # 3 missed intervals) and can't take the engine down the way a core task would.
-        interval = self.cfg.screen.interval_hours * 3600
-        retry_at = 0.0
-        await asyncio.sleep(SCREEN_FIRST_DELAY)
-        while True:
-            last = (self.store.latest_screen() or {}).get("ts", 0.0)
-            due = max(last + interval, retry_at)
-            if time.time() < due:
-                await asyncio.sleep(min(due - time.time(), 600))
-                continue
-            try:
-                res = await self.screen_tick()
-                self._beat("screen", True, f"{len(res.rows)} ranked, "
-                                           f"{len(res.candidates(self.cfg.screen.top_n))} candidate(s)")
-            except Exception as e:
-                logger.warning("screen failed: %s", e, exc_info=not isinstance(e, MarketDataError))
-                self._beat("screen", False, f"{type(e).__name__}: {e}")
-                retry_at = time.time() + SCREEN_RETRY_SEC
-
     async def _watch_stop_file(self, stop: asyncio.Event) -> None:
         while not stop.is_set():
             if stop_requested(self.cfg.data_dir, self.started or 0.0):
@@ -414,7 +707,7 @@ class Engine:
                 return
             await asyncio.sleep(1.0)
 
-    # -- api -------------------------------------------------------------------------------
+    # -- api ---------------------------------------------------------------------------------
     async def _start_api(self) -> None:
         from ottr.api import ApiServer  # aiohttp is only imported when the API is on
         a = self.cfg.api
@@ -438,14 +731,16 @@ class Engine:
             await self.api.stop()
             self.api = None
 
-    # -- loop ------------------------------------------------------------------------------
-    async def _every(self, name: str, interval: float, fn, first_delay: float = 0.0) -> None:
+    # -- loop --------------------------------------------------------------------------------
+    async def _every(self, name: str, interval: float, fn: Callable[[], Awaitable[Any]],
+                     first_delay: float = 0.0) -> None:
         await asyncio.sleep(first_delay)
         while True:
             t0 = time.time()
             try:
-                await fn()
-                ok, detail = True, ""
+                out = await fn()
+                summary = getattr(out, "summary", None)
+                ok, detail = True, out if isinstance(out, str) else summary() if callable(summary) else ""
             except MarketDataError as e:  # an outage, not a bug: no traceback every minute
                 logger.warning("task %s: %s", name, e)
                 ok, detail = False, f"MarketDataError: {e}"
@@ -454,22 +749,6 @@ class Engine:
                 ok, detail = False, f"{type(e).__name__}: {e}"
             self._beat(name, ok, detail)
             await asyncio.sleep(max(1.0, interval - (time.time() - t0)))
-
-    async def _council_loop(self) -> None:
-        interval = self.cfg.council.interval_hours * 3600
-        while True:
-            due = self.store.get_state("next_meeting_at") or 0
-            wait = due - time.time()
-            if wait > 0:
-                await asyncio.sleep(min(wait, 60))
-                continue
-            self.store.set_state("next_meeting_at", time.time() + interval)
-            try:
-                rec = await self.meeting(execute=True)
-                self._beat("council", rec["status"] == "ok", rec["status"])
-            except Exception as e:
-                logger.exception("meeting failed")
-                self._beat("council", False, f"{type(e).__name__}: {e}")
 
     async def run(self, stop: Optional[asyncio.Event] = None, *, serve_api: Optional[bool] = None) -> int:
         """Run until `stop` is set, a signal arrives or a stop file is dropped.
@@ -497,19 +776,30 @@ class Engine:
                                                    "previous_alarms": previous})
                 if self.cfg.api.enabled if serve_api is None else serve_api:
                     await self._start_api()
-                e, m = self.cfg.engine, self.cfg.market
+                e = self.cfg.engine
+                try:
+                    # The first market tick fetches the calendar every other task needs.
+                    await self.market.refresh_calendar()
+                except MarketDataError as err:
+                    logger.warning("no calendar at start-up (%s); the market task keeps trying", err)
+                try:
+                    # Before any task reads the book: a split or dividend that took effect
+                    # while the engine was down is booked first.
+                    self.apply_corporate_actions()
+                except Exception:
+                    logger.exception("corporate actions at start-up; the jobs task keeps trying")
                 core = [
                     asyncio.create_task(self.executor.run(), name="executor"),
-                    asyncio.create_task(self._every("market", m.spot_ttl_sec, self.market_tick), name="market"),
+                    asyncio.create_task(self._every("market", e.market_interval_sec, self.market_tick), name="market"),
+                    asyncio.create_task(self._every("jobs", e.jobs_interval_sec, self.jobs_tick, 20), name="jobs"),
                     asyncio.create_task(self._every("risk", e.risk_interval_sec, self.risk_tick, 5), name="risk"),
                     asyncio.create_task(self._every("equity", e.equity_interval_sec, self.equity_tick, 10),
                                         name="equity"),
                     asyncio.create_task(self._council_loop(), name="council"),
+                    asyncio.create_task(self._screen_loop(), name="screen"),
                     asyncio.create_task(self._watchdog_loop(), name="watchdog"),
                 ]
                 aux = [asyncio.create_task(self._watch_stop_file(stop), name="stopfile")]
-                if self.cfg.screen.enabled:
-                    aux.append(asyncio.create_task(self._screen_loop(), name="screen"))
                 stopper = asyncio.create_task(stop.wait(), name="stop")
                 logger.info("engine running (dry_run=%s)", self.kill.engaged)
                 done, _ = await asyncio.wait({stopper, *core}, return_when=asyncio.FIRST_COMPLETED)

@@ -202,14 +202,14 @@ def build_tree(client: discord.Client, handlers: Handlers, guild_id: Optional[in
     async def meeting(interaction: discord.Interaction) -> None:
         await handlers.meeting(interaction)
 
-    @tree.command(name="screen", description="Other Kraken coins ranked by trend, strength vs BTC and liquidity",
+    @tree.command(name="screen", description="The weekly stock screen: satellites, changes and the top of the ranking",
                   **where)
     async def screen(interaction: discord.Interaction) -> None:
         await handlers.screen(interaction)
 
     @tree.command(name="ask", description="Ask about the book, positions or the last meeting (can't trade)",
                   **where)
-    @app_commands.describe(question="Your question, e.g. why did the council buy ETH?")
+    @app_commands.describe(question="Your question, e.g. why did the council buy TLT?")
     async def ask(interaction: discord.Interaction, question: app_commands.Range[str, 1, 1500]) -> None:
         await handlers.ask(interaction, question)
 

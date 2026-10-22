@@ -1,9 +1,9 @@
 """
 Read-only HTTP API for the P4 dashboard, plus an authenticated kill switch.
 
-What it does: serves JSON views of the book, positions, equity curve with benchmarks,
-fills, meetings (with every analyst's stance), audit log and health, from inside the
-engine process on 127.0.0.1. `POST /api/kill-switch` engages or releases the runtime dry
+What it does: serves JSON views of the book, positions, equity curve with the SPY and
+60/40 benchmarks, fills, meetings (with every analyst's stance), the universe, the audit
+log and health, from inside the engine process on 127.0.0.1. `POST /api/kill-switch` engages or releases the runtime dry
 run and needs `Authorization: Bearer $OTTR_API_KEY`.
 
 Why it can't corrupt anything: every GET reads through the API's own SQLite connection
@@ -34,18 +34,20 @@ from aiohttp import web
 
 from ottr import health
 from ottr.config import Config
-from ottr.engine.engine import Engine, benchmarks
+from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
 from ottr.engine.killswitch import KillSwitch
-from ottr.ledger.book import Ledger
+from ottr.ledger import tax
+from ottr.ledger.book import Ledger, trade_day
+from ottr.universe import db as udb
 from ottr.ledger.store import Store
 from ottr.market.types import Quote
-from ottr.risk.monitor import RiskState
+from ottr.risk.monitor import RiskState, cap_for
 
 logger = logging.getLogger(__name__)
 
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 MAX_BODY = 16 * 1024
-QUOTES_TIMEOUT = 5.0
+PRICES_TIMEOUT = 5.0
 KIND_RE = re.compile(r"^[a-z_]{1,40}$")
 MEETING_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 BY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
@@ -53,31 +55,39 @@ BY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
 ENDPOINTS = [
     "GET  /api/health           alarms, task heartbeats, ledger check, kill switch",
     "GET  /api/heartbeats       per-task heartbeat age vs its stale limit",
-    "GET  /api/book             equity, cash, P&L, risk state, benchmarks",
-    "GET  /api/positions        holdings marked at the bid, with stop levels",
-    "GET  /api/equity           equity curve + BTC and equal-weight benchmarks (?since=&until=&max_points=)",
+    "GET  /api/book             equity, cash, P&L, risk state, the market session, SPY and 60/40 benchmarks",
+    "GET  /api/positions        holdings marked (live, delayed or at the close), with stop levels",
+    "GET  /api/equity           equity curve + SPY and 60/40 benchmarks (?since=&until=&max_points=)",
     "GET  /api/fills            recent fills, newest first (?limit=&before=<id>)",
     "GET  /api/meetings         council meetings with analyst stances (?limit=&before=<ts>)",
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
     "GET  /api/council          whether a meeting is running now and how far it has got, the next and the last meeting",
-    "GET  /api/screen           the latest screener run: other Kraken pairs ranked (advisory, never traded)",
+    "GET  /api/universe         the members the desk trades: class, cap, buyable, fractional; the satellites",
+    "GET  /api/screen           the latest stock screen (counts, changes, the top of the ranking), recent changes",
     "GET  /api/kill-switch      kill switch state",
     "POST /api/kill-switch      {\"engaged\": true|false, \"reason\": \"...\", \"by\": \"...\"}; empty body engages. Bearer auth.",
 ]
+
+
+async def _no_benchmarks(base: Optional[dict]) -> Dict[str, Optional[float]]:
+    return {}
 
 
 @dataclass
 class ApiContext:
     cfg: Config
     reader: Store                                    # read-only connection
-    quotes: Callable[[], Awaitable[Dict[str, Quote]]]
+    marks: Callable[[], Awaitable[Dict[str, Quote]]]
     kill: KillSwitch
     set_kill: Callable[[bool, str, str], dict]       # (engaged, by, reason) -> state
     health: Callable[[Store], dict]
     api_key: Optional[str]
     meeting_started: Callable[[], Optional[float]] = lambda: None
     meeting_progress: Callable[[], Optional[dict]] = lambda: None
+    benchmarks: Callable[[Optional[dict]], Awaitable[Dict[str, Optional[float]]]] = _no_benchmarks
+    market_state: Callable[[], Optional[dict]] = lambda: None
+    members: Callable[[], Dict[str, dict]] = lambda: {}
 
     @classmethod
     def from_engine(cls, engine: Engine, reader: Store) -> "ApiContext":
@@ -104,9 +114,28 @@ class ApiContext:
             p = engine.progress
             return p.to_dict() if p is not None else None
 
-        return cls(cfg=engine.cfg, reader=reader, quotes=engine.market.quotes, kill=engine.kill,
+        def market_view() -> Optional[dict]:
+            try:
+                mt = engine.market.calendar.state_at(engine.clock.time())
+            except Exception:  # no calendar yet: the market task's alarm says why
+                return None
+            s, nxt = mt.session, mt.next_open
+            return {"state": mt.state.value, "open": mt.is_open,
+                    "session": {"day": s.day.isoformat(), "open_ts": s.open_ts, "close_ts": s.close_ts,
+                                "early_close": s.early_close} if s else None,
+                    "next_open_ts": nxt.open_ts if nxt else None}
+
+        def members_view() -> Dict[str, dict]:
+            return {s: {"class": m.asset_class, "state": m.state, "buyable": m.buyable,
+                        "fractionable": m.fractionable, "cap_pct": cap_for(engine.cfg, s, engine.classes())}
+                    for s, m in sorted(engine.members.items())}
+
+        # Looked up per request (not bound once): the engine's market is the one source.
+        return cls(cfg=engine.cfg, reader=reader, marks=lambda: engine.market.marks(), kill=engine.kill,
                    set_kill=set_kill, health=health_view, api_key=engine.cfg.api_key,
-                   meeting_started=lambda: engine.meeting_started, meeting_progress=progress_view)
+                   meeting_started=lambda: engine.meeting_started, meeting_progress=progress_view,
+                   benchmarks=lambda base: engine.market.benchmarks(base), market_state=market_view,
+                   members=members_view)
 
 
 CTX: web.AppKey = web.AppKey("ctx", ApiContext)
@@ -173,14 +202,14 @@ async def guard(request: web.Request, handler) -> web.StreamResponse:
     return resp
 
 
-async def _quotes(ctx: ApiContext) -> Tuple[Dict[str, Quote], Optional[str]]:
-    # Usually a cache hit. When it isn't and Kraken is slow (retries can take ~40s), answer
-    # unmarked after QUOTES_TIMEOUT instead of hanging the dashboard. shield(): the fetch
+async def _marks(ctx: ApiContext) -> Tuple[Dict[str, Quote], Optional[str]]:
+    # Usually a cache hit. When it isn't and Alpaca is slow (retries can take ~40s), answer
+    # unmarked after PRICES_TIMEOUT instead of hanging the dashboard. shield(): the fetch
     # itself carries on for the engine's own tasks waiting on the same lock.
     try:
-        return await asyncio.wait_for(asyncio.shield(ctx.quotes()), QUOTES_TIMEOUT), None
+        return await asyncio.wait_for(asyncio.shield(ctx.marks()), PRICES_TIMEOUT), None
     except asyncio.TimeoutError:
-        return {}, f"quotes took longer than {QUOTES_TIMEOUT:.0f}s"
+        return {}, f"prices took longer than {PRICES_TIMEOUT:.0f}s"
     except Exception as e:  # unmarked is a valid answer; the book is still readable
         return {}, f"{type(e).__name__}: {e}"
 
@@ -214,63 +243,73 @@ async def get_heartbeats(request: web.Request) -> web.Response:
     return ok({"ts": now, "tasks": tasks})
 
 
-def _position_rows(ctx: ApiContext, lg: Ledger, quotes: Dict[str, Quote], now: float) -> Tuple[list, Any]:
+def _position_rows(ctx: ApiContext, lg: Ledger, marks: Dict[str, Quote], now: float) -> Tuple[list, Any]:
     positions = lg.positions()
-    v = lg.value(quotes)
+    v = lg.value(marks)
     blind = ctx.reader.get_state("risk_blind") or {}
-    stop_pct = ctx.cfg.risk.trailing_stop_pct / 100
+    members = ctx.members()
+    classes = {s: m["class"] for s, m in members.items()}
     rows = []
     for a, p in positions.items():
-        q = quotes.get(a)
+        q = marks.get(a)
         value = float(p.qty) * q.bid if q else None
-        stop = p.high_water * (1 - stop_pct)
+        stop = p.stop_price  # None for the cash ETF, and until a new position's stop is set
         rows.append({
-            "asset": a, "qty": p.qty, "cost": p.cost, "avg_cost": p.avg_cost,
-            "opened_ts": p.opened_ts, "high_water": p.high_water, "trailing_stop": stop,
+            "asset": a, "class": classes.get(a), "member": a in members,
+            "qty": p.qty, "cost": p.cost, "avg_cost": p.avg_cost,
+            "opened_ts": p.opened_ts, "high_water": p.high_water, "stop_pct": p.stop_pct, "trailing_stop": stop,
             "bid": q.bid if q else None, "ask": q.ask if q else None,
-            "quote_source": q.source if q else None,
-            "quote_age_sec": round(q.age(now), 1) if q else None,
+            "price_basis": q.basis if q else None,
+            "price_age_sec": round(q.age(now), 1) if q else None,
             "value": value,
             "weight": v.weights.get(a) if v else None,
-            "cap_pct": ctx.cfg.cap_pct(a),
+            "cap_pct": cap_for(ctx.cfg, a, classes),
             "unrealized_pnl": value - float(p.cost) if value is not None else None,
             "unrealized_pct": (value / float(p.cost) - 1) if value is not None and p.cost > 0 else None,
-            "stop_distance_pct": (q.bid / stop - 1) if q and stop > 0 else None,
+            "stop_distance_pct": (q.bid / stop - 1) if q and stop else None,
             "risk_blind_since": blind.get(a),
         })
     return rows, v
 
 
+EQUITY_COLS = ("ts", "equity", "cash", "invested", "bench_spy", "bench_60_40", "after_tax")
+
+
 async def get_book(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
-    quotes, qerr = await _quotes(ctx)
+    marks, perr = await _marks(ctx)
     now = time.time()
     with ctx.reader.snapshot():
         lg = Ledger(ctx.reader)
         _require_book(lg)
         acct = lg.account()
-        rows, v = _position_rows(ctx, lg, quotes, now)
+        owed = lg.receivable()
+        rows, v = _position_rows(ctx, lg, marks, now)
+        after_tax = tax.after_tax_equity(ctx.cfg, ctx.reader, marks, v.equity, trade_day(now)) if v else None
         risk = RiskState.from_dict(ctx.reader.get_state("risk"))
-        base = ctx.reader.get_state("bench_base")
+        base = ctx.reader.get_state(BENCH_BASE)
         last = ctx.reader.conn.execute(
-            "SELECT ts,equity,cash,invested,bench_btc,bench_ew FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
-        next_meeting = ctx.reader.get_state("next_meeting_at")
-    b_btc, b_ew = benchmarks(base, quotes) if quotes else (None, None)  # same math as the equity tick
+            f"SELECT {','.join(EQUITY_COLS)} FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
+        next_meeting = ctx.reader.get_state(NEXT_MEETING)
+    try:  # the same math as the equity tick, at this moment's prices
+        bench = await asyncio.wait_for(ctx.benchmarks(base), PRICES_TIMEOUT)
+    except Exception:
+        bench = {}
     cost = sum((p["cost"] for p in rows), Decimal(0))
     invested = v.invested if v else None
     peak = risk.peak_equity
     return ok({
-        "as_of": now, "marked": v is not None, "quotes_error": qerr,
+        "as_of": now, "marked": v is not None, "prices_error": perr, "market": ctx.market_state(),
         "equity": v.equity if v else None, "cash": acct["cash"], "invested": invested,
+        "dividends_owed": owed, "after_tax_equity_estimate": after_tax,
         "invested_pct": invested / v.equity if v and v.equity > 0 else None,
         "cost_basis": cost, "unrealized_pnl": invested - float(cost) if v else None,
         "realized_pnl": acct["realized_pnl"], "fees": acct["fees"], "positions": len(rows),
         "risk": {"halted": risk.halted, "halted_since": risk.halted_since, "peak_equity": peak,
                  "drawdown": 1 - v.equity / peak if v and peak else None,
                  "cooldowns": risk.cooldowns},
-        "benchmarks": {"btc_hold": b_btc, "equal_weight_hold": b_ew, "base": base},
-        "last_equity_point": dict(zip(("ts", "equity", "cash", "invested", "bench_btc", "bench_ew"),
-                                      last)) if last else None,
+        "benchmarks": {"spy_hold": bench.get("spy"), "sixty_forty": bench.get("60_40"), "base": base},
+        "last_equity_point": dict(zip(EQUITY_COLS, last)) if last else None,
         "next_meeting_at": next_meeting,
         "kill_switch": ctx.kill.state(),
     })
@@ -278,13 +317,13 @@ async def get_book(request: web.Request) -> web.Response:
 
 async def get_positions(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
-    quotes, qerr = await _quotes(ctx)
+    marks, perr = await _marks(ctx)
     now = time.time()
     with ctx.reader.snapshot():
         lg = Ledger(ctx.reader)
         _require_book(lg)
-        rows, v = _position_rows(ctx, lg, quotes, now)
-    return ok({"as_of": now, "marked": v is not None, "quotes_error": qerr, "positions": rows})
+        rows, v = _position_rows(ctx, lg, marks, now)
+    return ok({"as_of": now, "marked": v is not None, "prices_error": perr, "positions": rows})
 
 
 async def get_equity(request: web.Request) -> web.Response:
@@ -292,11 +331,11 @@ async def get_equity(request: web.Request) -> web.Response:
     since = _num(request, "since", 0.0, 0.0, 1e11, float)
     until = _num(request, "until", 1e11, 0.0, 1e11, float)
     max_points = _num(request, "max_points", 1000, 2, 20000)
-    cols = ("ts", "equity", "cash", "invested", "bench_btc", "bench_ew")
+    cols = EQUITY_COLS
     with ctx.reader.snapshot():
         rows = ctx.reader.conn.execute(
             f"SELECT {','.join(cols)} FROM equity WHERE ts>=? AND ts<=? ORDER BY ts", (since, until)).fetchall()
-        base = ctx.reader.get_state("bench_base")
+        base = ctx.reader.get_state(BENCH_BASE)
     total = len(rows)
     if total > max_points:
         # Even stride, always keeping the newest point so the chart ends at "now".
@@ -404,23 +443,41 @@ async def get_council(request: web.Request) -> web.Response:
     started = ctx.meeting_started()
     progress = ctx.meeting_progress() if started is not None else None
     with ctx.reader.snapshot():
-        nxt = ctx.reader.get_state("next_meeting_at")
+        nxt = ctx.reader.get_state(NEXT_MEETING)
         last = ctx.reader.conn.execute("SELECT id, ts, status FROM meetings ORDER BY ts DESC LIMIT 1").fetchone()
     return ok({"as_of": now, "running": started is not None, "started_at": started,
                "running_sec": round(now - started, 1) if started is not None else None,
                "progress": progress,
-               "interval_hours": ctx.cfg.council.interval_hours, "timeout_sec": ctx.cfg.council.timeout_sec,
+               "meeting_times_et": list(ctx.cfg.schedule.meeting_times), "timeout_sec": ctx.cfg.council.timeout_sec,
                "next_meeting_at": nxt,
                "last_meeting": dict(zip(("id", "ts", "status"), last)) if last else None})
+
+
+def _satellite(s) -> dict:
+    return {"symbol": s.symbol, "state": s.state, "promoted_day": s.promoted_day.isoformat(),
+            "demoted_day": s.demoted_day.isoformat() if s.demoted_day else None, "score": s.score, "why": s.why}
+
+
+async def get_universe(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    u = ctx.cfg.universe
+    with ctx.reader.snapshot():
+        sats = udb.satellites(ctx.reader)
+    return ok({"members": ctx.members(), "cash_symbol": u.cash_symbol, "reference": list(u.reference),
+               "satellites_max": u.satellites_max, "sleeve_pct": u.sleeve_pct,
+               "satellites": [_satellite(s) for s in sats.values()]})
 
 
 async def get_screen(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
     with ctx.reader.snapshot():
-        d = ctx.reader.latest_screen()
-    if d is None:
-        raise web.HTTPNotFound(reason="no screen yet: the engine runs one a day, and `ottr screen` runs one now")
-    return ok(d)
+        last = udb.last_screen(ctx.reader)
+        sats = udb.satellites(ctx.reader)
+        changes = udb.events(ctx.reader, 20)
+    sc = ctx.cfg.screen
+    return ok({"screen": last, "satellites": [_satellite(s) for s in sats.values()], "changes": changes,
+               "schedule": f"{sc.weekday} {sc.at} ET weekly" if sc.enabled else "off",
+               "satellites_max": ctx.cfg.universe.satellites_max})
 
 
 async def get_kill(request: web.Request) -> web.Response:
@@ -475,6 +532,7 @@ def create_app(ctx: ApiContext) -> web.Application:
     app.router.add_get("/api/meetings/{id}", get_meeting)
     app.router.add_get("/api/audit", get_audit)
     app.router.add_get("/api/council", get_council)
+    app.router.add_get("/api/universe", get_universe)
     app.router.add_get("/api/screen", get_screen)
     app.router.add_get("/api/kill-switch", get_kill)
     app.router.add_post("/api/kill-switch", post_kill)

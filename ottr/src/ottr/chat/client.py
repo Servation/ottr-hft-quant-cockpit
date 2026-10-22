@@ -45,7 +45,7 @@ class DeskContext:
     meeting: Optional[dict] = None     # the latest council meeting, if any
     fills: Optional[dict] = None
     council: Optional[dict] = None
-    screen: Optional[dict] = None      # the latest screener run, if there is one yet
+    screen: Optional[dict] = None      # the satellites and the latest stock screen
     errors: Dict[str, str] = field(default_factory=dict)
 
 
@@ -102,20 +102,14 @@ class ApiClient:
         meetings = (await self.get("/meetings", {"limit": 1})).get("meetings") or []
         return meetings[0] if meetings else None
 
+    async def screen(self) -> dict:
+        return await self.get("/screen")
+
     async def fills(self, limit: int = 10) -> dict:
         return await self.get("/fills", {"limit": limit})
 
     async def kill_state(self, timeout: Optional[float] = None) -> dict:
         return await self.get("/kill-switch", timeout=timeout)
-
-    async def screen(self) -> Optional[dict]:
-        """The latest screener run, or None before the first one (not an error)."""
-        try:
-            return await self.get("/screen")
-        except ApiError as e:
-            if e.status == 404 and e.message.startswith("no screen yet"):
-                return None
-            raise  # including a bare 404 from an engine older than the screener
 
     async def desk_context(self) -> DeskContext:
         """All /ask sections, read concurrently. Partial failures are kept as `errors`;

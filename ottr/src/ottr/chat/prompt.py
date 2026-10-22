@@ -7,9 +7,9 @@ plain text, replays the last few answered questions in the channel (the model CL
 stateless, so this is the conversation's only memory), and states what the assistant
 can't do: it explains, it never trades.
 
-Why the size cap: Gemini's CLI takes the prompt as a command-line argument, and Windows
-caps a command line at 32,767 characters. History goes first when space runs short, then
-the data section is cut, so the question always fits.
+Why the size cap: a short prompt keeps an answer quick (chat runs at low effort). History
+goes first when space runs short, then the data section is cut, so the question always
+fits.
 """
 
 from __future__ import annotations
@@ -18,15 +18,16 @@ from typing import List
 
 from ottr.chat.client import DeskContext
 from ottr.chat.log import Turn
-from ottr.chat.render import clip, pct, signed_usd, usd, utc
+from ottr.chat.render import clip, et, pct, signed_usd, usd
 from ottr.health import fmt_age
 
 MAX_PROMPT_CHARS = 24_000
 HISTORY_ANSWER_CHARS = 1_200   # an old answer is context, not the point: keep it short
 
-INSTRUCTIONS = """You are the desk assistant for OTTR, a crypto PAPER-trading desk. A council of three \
-models (Claude, GPT, Gemini) meets on a schedule and proposes trades; deterministic code sizes, \
-risk-checks and paper-fills them. You answer the desk owner's questions in Discord.
+INSTRUCTIONS = """You are the desk assistant for OTTR, a US-markets PAPER-trading desk: ETFs across \
+stocks, bonds, commodities and real estate, plus a few single stocks. A council of three models (Claude, \
+GPT, Gemini) meets at fixed New York times on trading days and proposes trades; deterministic code sizes, \
+risk-checks and paper-fills them during market hours. You answer the desk owner's questions in Discord.
 
 What you can and can't do:
 - You only explain. You cannot place, change or cancel trades, change settings or touch the kill \
@@ -37,8 +38,8 @@ data doesn't answer the question, say what is missing. Never invent prices, fill
 - The data is a snapshot taken {now}. Earlier exchanges may quote older numbers; the DESK DATA wins.
 
 Style: Discord markdown, short paragraphs or bullets, no tables, under about 250 words unless the \
-owner asks for detail. Money as $1,234.56, times in UTC. Never use em dashes (the long dash); use \
-commas, colons or parentheses instead."""
+owner asks for detail. Money as $1,234.56, times in New York time (ET). Never use em dashes (the long \
+dash); use commas, colons or parentheses instead."""
 
 
 def _health(ctx: DeskContext, now: float) -> List[str]:
@@ -62,7 +63,7 @@ def _kill(ctx: DeskContext) -> str:
     parts = []
     if k.get("operator_engaged"):
         why = f" (reason: {clip(k.get('reason'), 150)})" if k.get("reason") else ""
-        parts.append(f"operator switch engaged by {k.get('by')} at {utc(k.get('since'))}{why}; the owner "
+        parts.append(f"operator switch engaged by {k.get('by')} at {et(k.get('since'))}{why}; the owner "
                      "can release it with /release")
     if k.get("config_dry_run"):
         parts.append("config or OTTR_DRY_RUN forces dry run on the host; chat can't change that")
@@ -80,10 +81,10 @@ def _book(ctx: DeskContext, now: float) -> List[str]:
                  f"{pct(b.get('invested_pct'))} | unrealized P&L {signed_usd(b.get('unrealized_pnl'))} | "
                  f"realized P&L {signed_usd(b.get('realized_pnl'))} | fees paid {usd(b.get('fees'))}"]
     else:
-        lines = [f"BOOK: equity unknown (no quotes: {b.get('quotes_error')}) | cash {usd(cash)} | "
+        lines = [f"BOOK: equity unknown (no price: {b.get('prices_error')}) | cash {usd(cash)} | "
                  f"realized P&L {signed_usd(b.get('realized_pnl'))}"]
     r = b.get("risk") or {}
-    risk = f"HALTED since {utc(r.get('halted_since'))} (BUYs blocked)" if r.get("halted") else "normal"
+    risk = f"HALTED since {et(r.get('halted_since'))} (BUYs blocked)" if r.get("halted") else "normal"
     if r.get("drawdown") is not None:
         risk += f" | drawdown {pct(r['drawdown'])} from peak {usd(r.get('peak_equity'))}"
     cools = sorted(a for a, until in (r.get("cooldowns") or {}).items() if until and until > now)
@@ -91,9 +92,14 @@ def _book(ctx: DeskContext, now: float) -> List[str]:
         risk += f" | in cooldown (no new BUYs): {', '.join(cools)}"
     lines.append(f"RISK: {risk}")
     bm = b.get("benchmarks") or {}
-    if bm.get("btc_hold") is not None or bm.get("equal_weight_hold") is not None:
-        lines.append(f"BENCHMARKS (same starting equity): BTC buy-and-hold {usd(bm.get('btc_hold'))} | "
-                     f"equal-weight buy-and-hold {usd(bm.get('equal_weight_hold'))}")
+    if bm.get("spy_hold") is not None or bm.get("sixty_forty") is not None:
+        lines.append(f"BENCHMARKS (same starting equity, dividends reinvested): SPY buy-and-hold "
+                     f"{usd(bm.get('spy_hold'))} | 60/40 SPY/IEF rebalanced monthly {usd(bm.get('sixty_forty'))}")
+    m = b.get("market")
+    if m:
+        s = m.get("session") or {}
+        lines.append(f"MARKET: open until {et(s.get('close_ts'))}" if m.get("open")
+                     else f"MARKET: closed; next open {et(m.get('next_open_ts'))}")
     return lines
 
 
@@ -104,15 +110,20 @@ def _positions(ctx: DeskContext) -> List[str]:
     rows = p.get("positions") or []
     if not rows:
         return ["POSITIONS: none (all cash)"]
-    lines = ["POSITIONS (marked at the bid):"]
+    lines = ["POSITIONS (priced live in session, else at a delayed print or the last close; the basis is "
+             "given per row):"]
     for r in rows:
-        stop = (f"trailing stop {r['trailing_stop']:,.6g} ({pct(r.get('stop_distance_pct'))} below the bid)"
-                if r.get("trailing_stop") is not None else "")
-        lines.append(f"  {r['asset']}: qty {float(r['qty']):.6g} | value {usd(r.get('value'))} "
-                     f"({pct(r.get('weight'))} of book, cap {r.get('cap_pct')}%) | avg cost "
-                     f"{float(r['avg_cost']):,.6g} | unrealized {signed_usd(r.get('unrealized_pnl'))} "
-                     f"({pct(r.get('unrealized_pct'), signed=True)}) | {stop}"
-                     + (" | RISK MONITOR BLIND (no fresh quote)" if r.get("risk_blind_since") else ""))
+        if r.get("trailing_stop") is not None:
+            stop = (f"trailing stop {r['trailing_stop']:,.2f} ({pct(r.get('stop_distance_pct'))} below the price; "
+                    f"{pct(r.get('stop_pct'))} under its high)")
+        else:
+            stop = "no stop (swept cash)" if r.get("class") == "cash_etf" else "stop not set yet"
+        cap = "uncapped" if r.get("cap_pct") is None else f"cap {r['cap_pct']:g}%"
+        lines.append(f"  {r['asset']} ({r.get('class') or 'not a member'}): qty {float(r['qty']):.6g} | value "
+                     f"{usd(r.get('value'))} ({pct(r.get('weight'))} of book, {cap}) | price "
+                     f"{usd(r.get('bid'))} {r.get('price_basis') or ''} | avg cost {usd(r.get('avg_cost'))} | "
+                     f"unrealized {signed_usd(r.get('unrealized_pnl'))} ({pct(r.get('unrealized_pct'), signed=True)}) "
+                     f"| {stop}" + (" | RISK MONITOR BLIND (no live quote)" if r.get("risk_blind_since") else ""))
     return lines
 
 
@@ -121,8 +132,9 @@ def _council(ctx: DeskContext, now: float) -> str:
     if not c:
         return f"COUNCIL: schedule unavailable ({ctx.errors.get('council', 'no answer')})"
     nxt = c.get("next_meeting_at")
-    when = f"next meeting {utc(nxt)} (in {fmt_age(nxt - now)})" if nxt and nxt > now else "next meeting due now"
-    return f"COUNCIL: meets every {c.get('interval_hours')}h | {when}"
+    when = f"next meeting {et(nxt)} (in {fmt_age(nxt - now)})" if nxt and nxt > now else "next meeting due now"
+    times = " and ".join(c.get("meeting_times_et") or []) or "the scheduled times"
+    return f"COUNCIL: meets at {times} ET on trading days | {when}"
 
 
 def _meeting(ctx: DeskContext, now: float) -> List[str]:
@@ -130,7 +142,7 @@ def _meeting(ctx: DeskContext, now: float) -> List[str]:
     if not m:
         why = ctx.errors.get("meeting")
         return [f"LATEST COUNCIL MEETING: unavailable ({why})" if why else "LATEST COUNCIL MEETING: none yet"]
-    lines = [f"LATEST COUNCIL MEETING {m.get('id')} at {utc(m.get('ts'))} ({fmt_age(now - m['ts'])} ago), "
+    lines = [f"LATEST COUNCIL MEETING {m.get('id')} at {et(m.get('ts'))} ({fmt_age(now - m['ts'])} ago), "
              f"status {m.get('status')}:"]
     if m.get("summary"):
         lines.append(f"  Chair summary: {clip(m['summary'], 800)}")
@@ -171,32 +183,29 @@ def _fills(ctx: DeskContext) -> List[str]:
     lines = ["RECENT FILLS (newest first):"]
     for r in rows:
         pnl = f", realized {signed_usd(r.get('realized_pnl'))}" if r.get("side") == "SELL" else ""
-        lines.append(f"  {utc(r['ts'])} {r['side']} {r['asset']} {usd(r.get('notional'))} at "
+        lines.append(f"  {et(r['ts'])} {r['side']} {r['asset']} {usd(r.get('notional'))} at "
                      f"{float(r['price']):,.6g} ({r.get('origin')}{pnl}): {clip(r.get('reason'), 160)}")
     return lines
 
 
-def _screen(ctx: DeskContext, now: float) -> List[str]:
-    from ottr.market import screen as sc
+def _screen(ctx: DeskContext) -> List[str]:
     d = ctx.screen
     if not d:
-        why = ctx.errors.get("screen")
-        return [f"SCREENER: unavailable ({why})" if why else "SCREENER: no run yet"]
-    lines = [f"SCREENER (code ranks liquid Kraken pairs OUTSIDE the universe, {fmt_age(now - d['ts'])} ago; "
-             "advisory: the desk cannot trade them unless the owner adds one to the universe). Score 0-100 "
-             "ranks trend, vs BTC, sizable, smoothness, diversification and volume. trend and vs BTC are "
-             "volatility-adjusted drift (0 flat, +1 a strong steady climb). sizable is the MOST the risk model "
-             "would hold at full conviction, a ceiling, not a recommended size:"]
-    top = sc.candidates(d, (d.get("settings") or {}).get("top_n", 5))
-    if top:
-        lines += [f"  qualifying: {sc.line(r)}" for r in top]
-    else:
-        lines.append("  none qualifies (up over 14, 30 and 90 days, ahead of BTC, near the 30-day high); "
-                     "strongest: " + "; ".join(f"{r['symbol']} score {r['score']:.0f} ({sc.why_not(r)})"
-                                                for r in sc.closest(d, 3)))
-    rows = d.get("rows", [])
-    lines.append("  universe ranks: " + ", ".join(f"{r['symbol']} #{r['rank']}" for r in rows if r["in_universe"])
-                 + f" of {len(rows)}")
+        return [f"SATELLITES: unavailable ({ctx.errors.get('screen', 'no answer')})"]
+    sats = d.get("satellites") or []
+    lines = [f"SATELLITES (stocks the weekly screener picked, at most {d.get('satellites_max')}; screened "
+             f"{d.get('schedule')}): " + ("; ".join(
+                 f"{s['symbol']} since {s.get('promoted_day')}" if s.get("state") == "active"
+                 else f"{s['symbol']} being sold off (demoted {s.get('demoted_day')}: {clip(s.get('why'), 120)})"
+                 for s in sats) or "none")]
+    last = d.get("screen")
+    if last:
+        dec = (last.get("result") or {}).get("decision") or {}
+        kind = "applied" if last.get("applied") else "a dry run that changed nothing"
+        parts = [f"{label} {sym} ({clip(why, 140)})" for label, key in
+                 (("promoted", "promote"), ("demoted", "demote"), ("passed over", "passed"))
+                 for sym, why in (dec.get(key) or [])[:5]]
+        lines.append(f"LATEST SCREEN ({et(last.get('ts'))}, {kind}): " + ("; ".join(parts) or "no changes"))
     return lines
 
 
@@ -209,18 +218,18 @@ def desk_data(ctx: DeskContext, now: float) -> str:
     lines.append(_council(ctx, now))
     lines += _meeting(ctx, now)
     lines += _fills(ctx)
-    lines += _screen(ctx, now)
+    lines += _screen(ctx)
     return "\n".join(lines)
 
 
 def _turn(t: Turn, now: float) -> str:
-    return (f"[{utc(t.ts)}, {fmt_age(now - t.ts)} ago] {t.user_name} asked: {clip(t.question, 600)}\n"
+    return (f"[{et(t.ts)}, {fmt_age(now - t.ts)} ago] {t.user_name} asked: {clip(t.question, 600)}\n"
             f"You answered: {clip(t.answer, HISTORY_ANSWER_CHARS)}")
 
 
 def build(ctx: DeskContext, history: List[Turn], question: str, asker: str, now: float,
           max_chars: int = MAX_PROMPT_CHARS) -> str:
-    head = INSTRUCTIONS.format(now=utc(now))
+    head = INSTRUCTIONS.format(now=et(now))
     tail = f"Question from {asker} (now): {question.strip()}"
     data = desk_data(ctx, now)
     room = max_chars - len(head) - len(tail) - 200  # 200: section markers and blank lines
@@ -234,7 +243,7 @@ def build(ctx: DeskContext, history: List[Turn], question: str, asker: str, now:
             break
         turns.insert(0, block)
         room -= len(block) + 2
-    parts = [head, f"=== DESK DATA ({utc(now)}) ===\n{data}\n=== END DESK DATA ==="]
+    parts = [head, f"=== DESK DATA ({et(now)}) ===\n{data}\n=== END DESK DATA ==="]
     if turns:
         parts.append("=== EARLIER IN THIS CHANNEL (oldest first) ===\n" + "\n\n".join(turns)
                      + "\n=== END EARLIER ===")

@@ -2,11 +2,14 @@
 Executor: the single path from an Intent to a paper fill.
 
 What it does: one consumer drains a priority queue (protective exits first). For each
-intent it claims the idempotency key, refreshes the quote, rebuilds the gate context
-from the live book, and either rejects, records a dry-run verdict, or books the fill.
-The fill, order status, cooldown and audit commit in ONE transaction. Why: v1 had several
-code paths that could trade and needed a separate idempotency guard; here there is one,
-and a crash at any point either fully booked the trade or left no trace of it.
+intent it claims the idempotency key, asks the desk for a fresh context (quote, book,
+risk state), runs the desk's gate, and either rejects, records a dry-run verdict, or books
+the fill through the desk. The fill, order status, cooldown and audit commit in ONE
+transaction. A BUY that is short of cash while the desk holds its cash ETF is funded first
+(the desk names the SELL), then checked again, once. Why: v1 had several code paths that
+could trade and needed a separate idempotency guard; here there is one, and a crash at any
+point either fully booked the trade or left no trace of it. The market-specific parts live
+in engine/desks.py, so every invariant here holds whatever the broker.
 """
 
 from __future__ import annotations
@@ -18,21 +21,14 @@ import logging
 import time
 from typing import Awaitable, Callable, Optional
 
-from ottr.config import Config
 from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store, dumps
-from ottr.market.service import MarketData, build_view
 from ottr.market.types import MarketDataError
-from ottr.risk import gate
 from ottr.risk.monitor import RiskState
 from ottr.risk.types import PROTECTIVE, Intent, Verdict
 
 logger = logging.getLogger(__name__)
-
-# Rejections that can clear on their own: leave the key retryable instead of terminal.
-TRANSIENT = ("no_quote", "stale_quote", "book_unmarkable", "market_data_error")
-REFRESH_IF_OLDER_SEC = 10.0
 
 Notifier = Callable[[str, dict], Awaitable[None]]
 # on_outcome(intent, status, verdict) after every decision, once it is committed. Status:
@@ -41,9 +37,9 @@ OutcomeHook = Callable[[Intent, str, Verdict], None]
 
 
 class Executor:
-    def __init__(self, cfg: Config, store: Store, ledger: Ledger, market: MarketData,
+    def __init__(self, cfg, store: Store, ledger: Ledger, desk,
                  notify: Optional[Notifier] = None, kill: Optional[KillSwitch] = None) -> None:
-        self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
+        self.cfg, self.store, self.ledger, self.desk = cfg, store, ledger, desk
         self.notify = notify
         self.on_outcome: Optional[OutcomeHook] = None
         # Read at every decision, so engaging the switch stops the very next fill.
@@ -108,56 +104,41 @@ class Executor:
         except Exception:
             logger.warning("order outcome hook failed for %s", intent.idem_key, exc_info=True)
 
-    async def _context(self, intent: Intent) -> gate.GateContext:
-        quotes = await self.market.quotes()
-        q = quotes.get(intent.asset)
-        if q is None or q.age() > REFRESH_IF_OLDER_SEC:
-            quotes = await self.market.quotes(force=True)
-        snap_view = None
-        try:
-            candles = await self.market.candles()
-            btc = [c for _, c in candles.get("BTC", [])]
-            snap_view = build_view(intent.asset, quotes.get(intent.asset),
-                                   candles.get(intent.asset, []), btc, self.cfg)
-        except Exception:
-            logger.warning("candles unavailable; sizing with unknown vol/regime", exc_info=True)
-        st = RiskState.from_dict(self.store.get_state("risk"))
-        since = self.store.conn.execute(
-            "SELECT 1 FROM fills WHERE asset=? AND origin IN (%s) AND ts>=? LIMIT 1"
-            % ",".join("?" * len(PROTECTIVE)),
-            (intent.asset, *PROTECTIVE, intent.created_ts)).fetchone()
-        return gate.GateContext(
-            cfg=self.cfg, now=time.time(), quote=quotes.get(intent.asset),
-            vol=snap_view.vol if snap_view else None,
-            regime=snap_view.regime if snap_view else "UNKNOWN",
-            valuation=self.ledger.value(quotes),
-            position=self.ledger.positions().get(intent.asset),
-            halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0),
-            risk_event_since_intent=since is not None,
-        )
+    def _reject(self, intent: Intent, verdict: Verdict) -> Verdict:
+        status = "deferred" if verdict.reason in self.desk.transient else "rejected"
+        with self.store.tx():
+            self._finish(intent, status, verdict)
+            self.store.audit("order_rejected", idem_key=intent.idem_key, origin=intent.origin,
+                             asset=intent.asset, side=intent.side, reason=verdict.reason,
+                             notes=list(verdict.notes), status=status)
+        logger.info("%s %s %s %s: %s %s", intent.origin, intent.side, intent.asset, status,
+                    verdict.reason, "; ".join(verdict.notes))
+        self._outcome(intent, status, verdict)
+        return verdict
 
-    async def process(self, intent: Intent) -> Verdict:
+    async def _decide(self, intent: Intent):
+        try:
+            ctx = await self.desk.context(intent)
+            return ctx, self.desk.evaluate(intent, ctx)
+        except MarketDataError as e:
+            return None, Verdict.reject(intent, "market_data_error", str(e))
+
+    async def process(self, intent: Intent, _funding: bool = True) -> Verdict:
         dup = self._claim(intent)
         if dup:
             self._outcome(intent, "duplicate", dup)
             return dup
-        try:
-            ctx = await self._context(intent)
-            verdict = gate.evaluate(intent, ctx)
-        except MarketDataError as e:
-            verdict = Verdict.reject(intent, "market_data_error", str(e))
+        ctx, verdict = await self._decide(intent)
 
+        if verdict.reason == "needs_cash" and _funding and not self.kill.engaged:
+            fund = self.desk.funding(intent, verdict, ctx)
+            if fund is not None:
+                logger.info("funding %s %s: %s", intent.side, intent.asset, fund.reason)
+                funded = await self.process(fund, _funding=False)
+                if funded.approved:
+                    ctx, verdict = await self._decide(intent)
         if not verdict.approved:
-            status = "deferred" if verdict.reason in TRANSIENT else "rejected"
-            with self.store.tx():
-                self._finish(intent, status, verdict)
-                self.store.audit("order_rejected", idem_key=intent.idem_key, origin=intent.origin,
-                                 asset=intent.asset, side=intent.side, reason=verdict.reason,
-                                 notes=list(verdict.notes), status=status)
-            logger.info("%s %s %s rejected: %s %s", intent.origin, intent.side, intent.asset,
-                        verdict.reason, "; ".join(verdict.notes))
-            self._outcome(intent, status, verdict)
-            return verdict
+            return self._reject(intent, verdict)
 
         if self.kill.engaged:
             with self.store.tx():
@@ -170,16 +151,26 @@ class Executor:
             return verdict
 
         with self.store.tx():
-            fill = self.ledger.apply_fill(
-                idem_key=intent.idem_key, asset=intent.asset, side=verdict.side,
-                quantity=verdict.quantity, price=verdict.price, fee_pct=self.cfg.trading.fee_pct,
-                quote_source=verdict.quote_source, origin=intent.origin, ref=intent.ref,
-                reason=intent.reason)
-            self._finish(intent, "filled", verdict)
-            if intent.origin in PROTECTIVE:
-                st = RiskState.from_dict(self.store.get_state("risk"))
-                st.cooldowns[intent.asset] = time.time() + self.cfg.risk.cooldown_sec
-                self.store.set_state("risk", st.to_dict())
+            booked = self.desk.book(intent, verdict, ctx)
+            if booked.fill is None:
+                # The broker didn't fill (e.g. the quote moved past the limit): the
+                # transaction holds no fill, so record the outcome and let it retry.
+                refused = Verdict.reject(intent, booked.reason or "broker_rejected")
+                self._finish(intent, "deferred" if refused.reason in self.desk.transient else "rejected", refused)
+            else:
+                self._finish(intent, "filled", verdict)
+                if intent.origin in PROTECTIVE:
+                    st = RiskState.from_dict(self.store.get_state("risk"))
+                    st.cooldowns[intent.asset] = time.time() + self.cfg.risk.cooldown_sec
+                    self.store.set_state("risk", st.to_dict())
+        if booked.fill is None:
+            status = "deferred" if refused.reason in self.desk.transient else "rejected"
+            self.store.audit("order_rejected", idem_key=intent.idem_key, origin=intent.origin, asset=intent.asset,
+                             side=intent.side, reason=refused.reason, notes=[], status=status)
+            logger.info("%s %s %s %s by the broker: %s", intent.origin, intent.side, intent.asset, status, refused.reason)
+            self._outcome(intent, status, refused)
+            return refused
+        fill = booked.fill
         logger.info("FILLED %s %s %s @ %s ($%s, fee $%s, pnl $%s) [%s]", fill.side, fill.qty,
                     fill.asset, fill.price, fill.notional, fill.fee, fill.realized_pnl, intent.origin)
         self._outcome(intent, "filled", verdict)

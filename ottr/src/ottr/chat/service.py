@@ -172,7 +172,7 @@ class ChatService:
         question = question.strip()
         if not question:
             return self._refuse(asker, question, "empty", "Ask me something about the desk, for example "
-                                "`/ask why did the council buy ETH?`")
+                                "`/ask why did the council buy TLT?`")
         now = self.clock()
         if self._busy_since is not None:
             return self._refuse(asker, question, "busy", (

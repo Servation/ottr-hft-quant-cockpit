@@ -161,9 +161,28 @@ def format_event(kind: str, d: dict) -> str:
     if kind == "meeting_live":
         return _live_meeting(d)
     if kind == "risk_halt":
-        return f"**Drawdown breaker tripped**: {d['drawdown'] * 100:.1f}% off peak. BUYs blocked."
+        sells = f" Selling part of {', '.join(d['derisk'])} until it fills." if d.get("derisk") else ""
+        return f"**Drawdown breaker tripped**: {d['drawdown'] * 100:.1f}% off peak. BUYs blocked.{sells}"
+    if kind == "risk_gap":
+        return (f"**{d['asset']} gapped through its stop**: bid {float(d['bid']):,.2f} vs stop "
+                f"{float(d['stop']):,.2f} (last close {float(d['close']):,.2f}). Selling at the bid.")
     if kind == "risk_resume":
         return f"**Breaker resumed** ({d['why']})."
+    if kind == "screen":
+        k = d.get("counts") or {}
+        title = "Weekly stock screen" if d.get("applied", True) else "Stock screen (dry run, nothing changed)"
+        out = [f"**{title}** {d.get('day')}: {k.get('ranked', 0):,} of {k.get('measured', 0):,} measured stocks "
+               f"passed the gates as operating companies ({k.get('liquid', 0):,} liquid)."]
+        for label, key in (("Promoted", "promote"), ("Demoted", "demote"), ("Kept", "keep"), ("Passed over", "passed")):
+            for sym, why in d.get(key) or []:
+                out.append(f"- {label} {sym}: {why}")
+        if not (d.get("promote") or d.get("demote")):
+            out.append("No membership changes.")
+        if d.get("errors"):
+            out.append(f"({d['errors']} data error(s); see `ottr status` and the log)")
+        return no_em_dash("\n".join(out))
+    if kind == "corporate_action":
+        return f"**{d['symbol']}** corporate action: {no_em_dash(d['note'])}"
     if kind == "alarm":
         return f"**ALARM** ({d['severity']}): {d['message']}"
     if kind == "alarm_remind":
@@ -198,9 +217,6 @@ def format_event(kind: str, d: dict) -> str:
             return f"**{label} failed to start** ({d['error']}); the supervisor retries in {d['delay']}."
         return (f"**{label} exited** with code {d['rc']} after {d['runtime']}; the supervisor "
                 f"restarts it in {d['delay']}.{tail}")
-    if kind == "screen":
-        from ottr.market.screen import digest
-        return digest(d, d.get("settings", {}).get("top_n", 5))
     if kind == "kill_switch":
         why = f" ({d['reason']})" if d.get("reason") else ""
         if d["engaged"]:

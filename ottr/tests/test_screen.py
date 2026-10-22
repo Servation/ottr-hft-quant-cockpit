@@ -1,222 +1,239 @@
 """
-Screener tests on synthetic candles and a fake Kraken: which pairs are eligible (and why
-not), what qualifies (every horizon up, ahead of BTC, near the 30-day high), the flags that
-halve a score (pulling back, overextended), the rank-based score, the full run, the digest,
-and the engine's daily task (stored, audited, posted, never fatal). Nothing touches the
-network.
+The stock screener (ottr/universe): the measures and gates, the ranking, the membership
+rules with their hysteresis, and a full run against FakeAlpaca and a fake SEC through the
+engine: satellites promoted, tracked and traded as stocks, demoted ones sold off and
+retired, the digest in Discord, the stored screen behind /api/screen and /screen, the
+`ottr screen` report and the weekly schedule's health.
 """
 
 import asyncio
 import dataclasses
-import json
-import time
+import math
+import random
+from datetime import date, timedelta
 
+import aiohttp
 import pytest
 
-from ottr import config as cfgmod
 from ottr import health
-from ottr.config import ConfigError
-from ottr.engine import engine as engmod
+from ottr.api import ApiServer
+from ottr.chat import render
+from ottr.cli import screen_report
+from ottr.config import Alerts as Limits
 from ottr.engine.engine import Engine
-from ottr.market import screen
-from ottr.market.kraken import KrakenError
-from ottr.market.screen import Row, measure
-from ottr.market.types import MarketDataError
-from ottr.notify import Alerts
-from tests.fakes import DAY, PRICES, FakeMarket, sample_screen, sample_screen_result, trend_rows
+from ottr.events import db
+from ottr.events.earnings import EarningsDate
+from ottr.events.refresh import Sources
+from ottr.events.sec import Listing, Sec
+from ottr.events.view import FEED_EARNINGS
+from ottr.ledger.book import trade_day
+from ottr.market.http import RateLimiter
+from ottr.notify import Alerts, format_event
+from ottr.universe import last_slot
+from ottr.universe import db as udb
+from ottr.universe.db import Satellite
+from ottr.universe.run import ScreenError
+from ottr.universe.screen import Row, measure, percentiles, score
+from ottr.universe.select import decide
+from tests.fake_feeds import FakeSec
+from tests.fakes import et, market_rig, no_corporate_actions
+from tests.nyse import sessions_2026
+
+SAT = et(2026, 10, 24, 8)                 # the weekly slot: Saturday 08:00 New York
+FRIDAY = date(2026, 10, 23)
 
 
-@pytest.fixture
-def scfg(cfg):
-    return dataclasses.replace(cfg, screen=dataclasses.replace(cfg.screen, enabled=True))
+def trading_days(last: date, n: int):
+    """n trading days ending at `last`: the 2026 calendar, then weekdays before it."""
+    out = [s.day for s in sessions_2026() if s.day <= last]
+    d = out[0] - timedelta(days=1)
+    while len(out) < n:
+        if d.weekday() < 5:
+            out.insert(0, d)
+        d -= timedelta(days=1)
+    return out[-n:]
 
 
-BTC = trend_rows(drift=0.001, noise=0.02)
+def walk(days, start, drift, vol, seed):
+    """A seeded random walk: `drift` and `vol` a year."""
+    rng, p, out = random.Random(seed), start, {}
+    for d in days:
+        out[d] = round(p, 4)
+        p *= math.exp(drift / 252 + vol / math.sqrt(252) * rng.gauss(0, 1))
+    return out
 
 
-def pump_then_dump():
-    rows = trend_rows(n=170, drift=0.001, noise=0.01)
-    px, ts = rows[-1][1], rows[-1][0]
-    for i in range(23):    # +150% in about three weeks
-        px *= 1.041
-        ts += DAY
-        rows.append((ts, px, 5e6))
-    for i in range(7):     # then -35% in a week
-        px *= 0.94
-        ts += DAY
-        rows.append((ts, px, 5e6))
-    return rows
+DAYS = trading_days(FRIDAY, 300)
 
 
-# -- eligibility -----------------------------------------------------------------------------
-def test_listings_keep_tradable_usd_spot_pairs():
-    pairs = {
-        "XXBTZUSD": {"wsname": "XBT/USD", "altname": "XBTUSD", "status": "online"},
-        "NEARUSD": {"wsname": "NEAR/USD", "altname": "NEARUSD", "status": "online"},
-        "NEARUSD.d": {"wsname": "NEAR/USD", "altname": "NEARUSD.d", "status": "online"},
-        "NEAREUR": {"wsname": "NEAR/EUR", "altname": "NEAREUR", "status": "online"},
-        "USDTZUSD": {"wsname": "USDT/USD", "altname": "USDTZUSD", "status": "online"},
-        "ZEURZUSD": {"wsname": "EUR/USD", "altname": "ZEURZUSD", "status": "online"},
-        "OLDUSD": {"wsname": "OLD/USD", "altname": "OLDUSD", "status": "cancel_only"},
-    }
-    found, dropped = screen.listings(pairs)
-    assert set(found) == {"BTC", "NEAR"} and found["BTC"].pair == "XBTUSD" and found["BTC"].key == "XXBTZUSD"
-    assert dropped == {"stablecoin or fiat": 2, "not trading (cancel or post only)": 1}
+# -- measuring ------------------------------------------------------------------------------
+def daily(closes, volume=2_000_000):
+    return [(d, c, volume) for d, c in sorted(closes.items())]
 
 
-def tick(bid, ask, base_vol, vwap):
-    return {"b": [str(bid), "1", "1"], "a": [str(ask), "1", "1"], "v": ["0", str(base_vol)], "p": ["0", str(vwap)]}
+def spy_rows():
+    return sorted(walk(DAYS, 500, 0.10, 0.15, 1).items())
 
 
-def test_prefilter_keeps_the_liquid_tight_pairs_most_liquid_first(scfg):
-    cfg = dataclasses.replace(scfg, screen=dataclasses.replace(scfg.screen, max_pairs=2))
-    found = {s: screen.Listing(s, f"{s}USD", f"{s}USD") for s in ("AAA", "BBB", "CCC", "WIDE", "THIN", "BTC")}
-    tickers = {"AAAUSD": tick(10, 10.01, 3e5, 10), "BBBUSD": tick(5, 5.001, 2e5, 5),
-               "CCCUSD": tick(1, 1.0005, 9e6, 1), "WIDEUSD": tick(1, 1.02, 9e6, 1),
-               "THINUSD": tick(1, 1.001, 1e4, 1), "BTCUSD": tick(1, 1, 1e9, 1)}
-    keep, dropped = screen.prefilter(found, tickers, cfg, skip=["BTC"])
-    assert [k.symbol for k in keep] == ["CCC", "AAA"]  # by 24h USD volume, capped at max_pairs
-    assert dropped == {"spread too wide": 1, "too illiquid": 1, "beyond the scan limit (max_pairs)": 1}
+def recent():
+    return DAYS[-60:]
 
 
-def test_ineligible_pairs_say_why(scfg):
-    def why(rows, **kw):
-        return measure("X", "XUSD", rows, BTC, scfg, in_universe=kw.get("in_universe", False)).reason
-
-    assert why(trend_rows(n=100)).startswith("new listing (100 days")
-    gappy = trend_rows()
-    gappy = gappy[:-20] + [(ts + DAY, c, v) for ts, c, v in gappy[-20:]]
-    assert why(gappy) == "gaps in its daily candles"
-    assert why(trend_rows(drift=0.0, noise=0.001, start=1.0)).startswith("pegged")
-    assert why(trend_rows(usd=2e5)).startswith("too illiquid ($200,000/day")
-    assert why(trend_rows(usd=2e5), in_universe=True) == ""  # the desk already trades it
+def test_a_steady_uptrend_passes_and_its_measures_add_up(cfg):
+    r = measure(cfg, "UP", daily(walk(DAYS, 50, 0.50, 0.20, 7)), spy_rows(), recent(), 20)
+    assert r.passed and r.sessions == 300 and r.price > 10 and r.dollar_volume > 50e6
+    assert 0.08 < r.vol < 0.40 and r.momentum > 0 and r.momentum_return > 0 and r.near_high <= 1
+    assert r.sizable == pytest.approx(min(0.015 / max(r.vol, 0.15) * (1 if r.regime == "TRENDING" else 0.25), 0.08))
+    assert r.entry_problem() == ""
 
 
-# -- what qualifies --------------------------------------------------------------------------
-def test_a_steady_trend_ahead_of_btc_qualifies(scfg):
-    r = measure("NEAR", "NEARUSD", trend_rows(drift=0.006, noise=0.01, phase=1), BTC, scfg, in_universe=False)
-    assert r.eligible and r.qualifies and r.regime == "TRENDING" and not r.flags
-    assert all(z > 0 for z in r.trend_by_horizon) and r.vs_btc > 0 and r.pullback > -0.2
-    assert 0 < r.sizable <= scfg.cap_pct("NEAR") / 100 and screen.why_not(dataclasses.asdict(r)) == ""
+@pytest.mark.parametrize("setup, gate", [
+    (lambda c: dict(list(c.items())[-200:]), "200 sessions of history (needs 273)"),
+    (lambda c: {d: v for d, v in c.items() if d != DAYS[-10]}, "no bar for 1 of the last 60 sessions"),
+    (lambda c: {d: v / 10 for d, v in c.items()}, "price $"),
+    (lambda c: {d: v for d, v in c.items()}, "a day traded"),
+])
+def test_hard_gates(cfg, setup, gate):
+    closes = setup(walk(DAYS, 50, 0.50, 0.20, 7))
+    volume = 100_000 if gate == "a day traded" else 2_000_000
+    r = measure(cfg, "X", daily(closes, volume), spy_rows(), recent(), 20)
+    assert gate in r.gate
 
 
-def test_a_pump_that_is_reversing_is_flagged_not_promoted(scfg):
-    r = measure("PUMP", "PUMPUSD", pump_then_dump(), BTC, scfg, in_universe=False)
-    assert r.eligible and r.chg_30d > 0.5  # still up a lot on the month...
-    assert "pulling back" in r.flags and not r.qualifies  # ...but 35% off its high
-    assert screen.why_not(dataclasses.asdict(r)).startswith("pulling back (-")
+def test_a_downtrend_is_under_its_average_and_a_wild_stock_outside_the_vol_band(cfg):
+    down = measure(cfg, "DN", daily(walk(DAYS, 80, -0.40, 0.20, 3)), spy_rows(), recent(), 20)
+    assert "under its 200-session average" in down.gate
+    wild = measure(cfg, "WILD", daily(walk(DAYS, 50, 0.9, 1.2, 4)), spy_rows(), recent(), 20)
+    assert "outside 8-70%" in wild.gate
 
 
-def test_a_fresh_dip_in_a_long_uptrend_does_not_qualify(scfg):
-    rows = trend_rows(n=186, drift=0.006, noise=0.01)
-    px, ts = rows[-1][1], rows[-1][0]
-    for _ in range(14):    # two soft weeks: about -8%, not a 20% pullback
-        px *= 0.994
-        ts += DAY
-        rows.append((ts, px, 5e6))
-    r = measure("DIP", "DIPUSD", rows, BTC, scfg, in_universe=False)
-    assert r.trend_by_horizon[0] < 0 < r.trend_by_horizon[2] and "pulling back" not in r.flags
-    assert not r.qualifies and screen.why_not(dataclasses.asdict(r)).startswith("not up over 14d")
+def test_entry_checks_are_not_gates(cfg):
+    r = measure(cfg, "UP", daily(walk(DAYS, 50, 0.50, 0.20, 7)), spy_rows(), recent(), 3)
+    assert r.passed and r.entry_problem() == "reports in 3 sessions"
+    assert dataclasses.replace(r, earnings_sessions=None).entry_problem() == "no known report date"
+    assert dataclasses.replace(r, flags=("overextended",)).entry_problem() == "overextended"
 
 
-def test_a_spike_is_flagged_overextended(scfg):
-    rows = trend_rows(n=193, drift=0.0, noise=0.01)
-    px, ts = rows[-1][1], rows[-1][0]
-    for _ in range(7):
-        px *= 1.06
-        ts += DAY
-        rows.append((ts, px, 5e6))
-    assert "overextended" in measure("HOT", "HOTUSD", rows, BTC, scfg, in_universe=False).flags
+def test_a_spike_is_overextended_and_a_drop_is_pulling_back(cfg):
+    closes = walk(DAYS, 50, 0.40, 0.20, 7)
+    spiked = dict(closes)
+    for d in DAYS[-3:]:
+        spiked[d] = spiked[d] * 1.25
+    assert "overextended" in measure(cfg, "S", daily(spiked), spy_rows(), recent(), 20).flags
+    dropped = dict(closes)
+    for i, d in enumerate(DAYS[-6:]):
+        dropped[d] = dropped[d] * (1 - 0.04 * (i + 1))      # a slide of 24% over six sessions
+    assert "pulling back" in measure(cfg, "D", daily(dropped), spy_rows(), recent(), 20).flags
 
 
-def test_btc_is_its_own_benchmark(scfg):
-    r = measure("BTC", "XBTUSD", BTC, BTC, scfg, in_universe=True)
-    assert r.vs_btc == 0.0 and r.corr_btc == 1.0 and not r.qualifies
+def test_percentiles_share_ties_and_rank_unknowns_last():
+    assert percentiles([3.0, 1.0, None, 2.0, 2.0]) == [1.0, 0.25, 0.0, 0.625, 0.625]
+    assert percentiles([5.0]) == [0.5]
 
 
-# -- score -----------------------------------------------------------------------------------
-def test_percentiles_handle_ties_and_unknowns():
-    assert screen._percentiles([1.0]) == [0.5]
-    assert screen._percentiles([3.0, 1.0, 2.0]) == [1.0, 0.0, 0.5]
-    assert screen._percentiles([1.0, 1.0, None]) == [0.75, 0.75, 0.0]  # unknown ranks below known
-    assert screen._percentiles([None, 2.0, None]) == [0.25, 1.0, 0.25]
+def test_the_score_ranks_the_passers_and_flags_halve_it():
+    rows = [Row("A", momentum=3, residual=2, efficiency=0.5, near_high=0.99, sizable=0.08, corr_spy=0.2,
+                participation=1.2),
+            Row("B", momentum=1, residual=0.5, efficiency=0.3, near_high=0.9, sizable=0.05, corr_spy=0.6,
+                participation=1.0),
+            Row("C", momentum=3, residual=2, efficiency=0.5, near_high=0.99, sizable=0.08, corr_spy=0.2,
+                participation=1.2, flags=("overextended",)),
+            Row("GATED", momentum=9, gate="below")]
+    ranked = score(rows)
+    assert [(r.symbol, r.rank) for r in ranked] == [("A", 1), ("C", 2), ("B", 3)]
+    assert ranked[1].score == pytest.approx(ranked[0].score / 2)
 
 
-def test_score_ranks_the_better_pair_first_and_halves_flagged_ones():
-    def row(sym, v, flags=()):
-        return Row(symbol=sym, pair=sym, in_universe=False, eligible=True, trend=v, vs_btc=v, sizable=v, er=v,
-                   corr_btc=1 - v, participation=v, flags=flags)
-
-    ranked = screen.score([row("LOW", 0.1), row("HIGH", 0.9), row("MID", 0.5),
-                           Row(symbol="OUT", pair="OUT", in_universe=False, eligible=False)])
-    assert [r.symbol for r in ranked] == ["HIGH", "MID", "LOW"] and [r.rank for r in ranked] == [1, 2, 3]
-    assert ranked[0].score == 100.0 and ranked[-1].score == 0.0
-    flagged = screen.score([row("A", 0.9, ("pulling back",)), row("B", 0.7), row("C", 0.5), row("D", 0.1)])
-    assert [r.symbol for r in flagged] == ["B", "A", "C", "D"]  # best on every measure, but halved
-    assert next(r for r in flagged if r.symbol == "A").score == 50.0
+# -- the rules -----------------------------------------------------------------------------
+TODAY = date(2026, 10, 24)
 
 
-# -- the run ---------------------------------------------------------------------------------
-class FakeKraken:
-    def __init__(self, candles, fail_pairs=(), fail_listing=False):
-        self.candles, self.fail_pairs, self.fail_listing = candles, set(fail_pairs), fail_listing
-        self.ohlc_calls = []
-
-    async def asset_pairs(self):
-        if self.fail_listing:
-            raise KrakenError("AssetPairs failed: HTTP 503")
-        pairs = {"XXBTZUSD": {"wsname": "XBT/USD", "altname": "XBTUSD", "status": "online"},
-                 "USDCUSD": {"wsname": "USDC/USD", "altname": "USDCUSD", "status": "online"}}
-        for a in self.candles:
-            if a != "XBTUSD":
-                pairs[a] = {"wsname": f"{a[:-3]}/USD", "altname": a, "status": "online"}
-        return pairs
-
-    async def tickers(self):
-        return {("XXBTZUSD" if a == "XBTUSD" else a): tick(1, 1.0005, 1e8, 1) for a in self.candles}
-
-    async def daily_ohlc(self, pair):
-        self.ohlc_calls.append(pair)
-        if pair in self.fail_pairs or pair not in self.candles:
-            raise KrakenError(f"OHLC failed for {pair}")
-        return self.candles[pair]
+def sat(symbol, days_ago=60, state="active", demoted=None):
+    return Satellite(symbol, state, 0.0, TODAY - timedelta(days=days_ago), None,
+                     TODAY - timedelta(days=demoted) if demoted is not None else None, 50.0, "test")
 
 
-async def test_a_full_run_ranks_candidates_against_the_universe(scfg):
-    cfg = dataclasses.replace(scfg, universe=["BTC", "ETH"])
-    k = FakeKraken({"XBTUSD": BTC, "ETHUSD": trend_rows(drift=-0.002, noise=0.025),
-                    "NEARUSD": trend_rows(drift=0.006, noise=0.01, phase=1),
-                    "PUMPUSD": pump_then_dump(), "NEWUSD": trend_rows(n=60), "BADUSD": BTC},
-                   fail_pairs={"BADUSD"})
-    res = await screen.run(k, cfg, pause=0)
-    by = {r.symbol: r for r in res.rows}
-    assert set(by) == {"BTC", "ETH", "NEAR", "PUMP"} and by["BTC"].in_universe and not by["NEAR"].in_universe
-    assert [r.symbol for r in res.candidates(5)] == ["NEAR"]
-    assert [r.symbol for r in res.rejected] == ["NEW"] and res.rejected[0].reason.startswith("new listing")
-    assert res.errors == ("BAD: OHLC failed for BADUSD",)
-    assert res.excluded == {"stablecoin or fiat": 1} and res.listed == 6
-    assert k.ohlc_calls.count("XBTUSD") == 1  # BTC is fetched once and reused as the benchmark
-    d = res.to_dict()
-    assert json.loads(json.dumps(d))["rows"][0]["symbol"] == res.rows[0].symbol  # storable as JSON
+def ranked_rows(*symbols, earnings=20):
+    rows = [Row(s, momentum=1.0, earnings_sessions=earnings) for s in symbols]
+    return [dataclasses.replace(r, score=round(100 - 5 * i, 1), rank=i + 1) for i, r in enumerate(rows)]
 
 
-async def test_a_run_without_the_pair_list_fails_cleanly(scfg):
-    with pytest.raises(MarketDataError, match="could not list Kraken pairs"):
-        await screen.run(FakeKraken({}, fail_listing=True), scfg, pause=0)
+def run_decide(cfg, ranked, current=(), cooling=(), corr=None, unfit=None, core=("SPY",)):
+    measured = {r.symbol: r for r in ranked}
+    return decide(cfg, ranked, measured, {s.symbol: s for s in current}, {s.symbol: s for s in cooling}, TODAY,
+                  corr or (lambda a, b: 0.1), list(core), unfit or {})
 
 
-def test_the_digest_lists_candidates_or_says_none_qualify(scfg):
-    yes = screen.digest(sample_screen(scfg), 5)
-    assert yes.startswith("**Screener**: 2 candidate(s)") and "**NEAR**" in yes and "Advisory" in yes
-    no = screen.digest(sample_screen(scfg, qualifying=False), 5)
-    assert "no pair outside the universe qualifies" in no and "Closest: NEAR" in no
-    assert "\u2014" not in yes + no
-    assert screen.promote_hint({"symbol": "NEAR", "pair": "NEARUSD"}) == (
-        'To trade NEAR: add it to `universe`, `NEAR = 10.0` under [caps] and `NEAR = "NEARUSD"` under '
-        "[pairs] in config.toml, then `ottr service restart`.")
+def test_empty_slots_fill_with_the_best_candidates_free_of_the_change_limit(cfg):
+    d = run_decide(cfg, ranked_rows(*"ABCDEFGH"))
+    assert [s for s, _ in d.promote] == list("ABCDEF") and d.changes == 0
+    assert d.passed[0] == ("G", "no slot: every satellite is in its first weeks")
 
 
-# -- the engine's daily task -----------------------------------------------------------------
+def test_a_satellite_is_kept_in_its_tenure_and_while_it_ranks_in_the_top_12(cfg):
+    rows = ranked_rows(*"ABCDEFGHIJKLMN")
+    patient = dataclasses.replace(cfg, screen=dataclasses.replace(cfg.screen, challenger_margin=100))
+    d = run_decide(patient, rows, current=[sat("N", days_ago=5), sat("L"), sat("C")])
+    keep = dict(d.keep)
+    assert keep["N"] == "#14, score 35; in its first 14 days" and keep["L"] == "#12, score 45" and "C" in keep
+    assert d.demote == [] and [s for s, _ in d.promote] == ["A", "B", "D"]
+    assert d.passed[0] == ("E", "beats the weakest satellite L by 35 points (needs 100)")
+    # Without the patience, a strong enough challenger takes the weakest tenured place.
+    d = run_decide(cfg, rows, current=[sat("N", days_ago=5), sat("L"), sat("C")])
+    assert dict(d.demote)["L"].startswith("replaced by E") and d.changes == 1
+
+
+def test_rank_outs_are_limited_to_two_a_week_worst_first(cfg):
+    rows = ranked_rows(*[f"S{i:02d}" for i in range(20)])
+    current = [sat(s) for s in ("S19", "S18", "S17", "S01")]
+    d = run_decide(cfg, rows, current=current)
+    assert [s for s, _ in d.demote] == ["S19", "S18"] and d.changes == 2
+    assert "this week's changes are used" in dict(d.keep)["S17"]
+    assert [s for s, _ in d.promote] == ["S00", "S02", "S03", "S04"]     # the freed slots refill
+
+
+def test_a_hard_gate_or_unfitness_demotes_at_once_without_using_a_change(cfg):
+    rows = ranked_rows(*"ABCDEF")
+    measured_gate = dataclasses.replace(Row("G"), gate="at or under its 200-session average (1 vs 2)")
+    d = decide(cfg, rows, {**{r.symbol: r for r in rows}, "G": measured_gate},
+               {"G": sat("G"), "H": sat("H", days_ago=3)}, {}, TODAY, lambda a, b: 0.1, ["SPY"],
+               {"H": "not tradable at Alpaca"})
+    assert dict(d.demote) == {"G": "hard gate: at or under its 200-session average (1 vs 2)",
+                              "H": "hard gate: not tradable at Alpaca"}
+    assert d.changes == 0 and len(d.promote) == 6
+
+
+def test_a_challenger_needs_the_margin_and_a_free_change(cfg):
+    current = [sat(s) for s in "BCDEFG"]
+    rows = ranked_rows("A", "B", "C", "D", "E", "F", "G")       # A 100 vs the weakest G 70
+    d = run_decide(cfg, rows, current=current)
+    assert ("A", "ranks #1, score 100: replaces G") in d.promote
+    assert dict(d.demote)["G"] == "replaced by A (#1, score 100 vs #7, score 70)" and d.changes == 1
+    close = [dataclasses.replace(r, score=75.0 if r.symbol == "A" else r.score) for r in rows]
+    d = run_decide(cfg, close, current=current)
+    assert d.promote == [] and dict(d.passed)["A"] == "beats the weakest satellite G by 5 points (needs 15)"
+
+
+def test_cooldown_correlation_and_entry_checks_pass_a_candidate_over(cfg):
+    rows = ranked_rows("COOL", "TWIN", "SOON", "OK") + []
+    rows[2] = dataclasses.replace(rows[2], earnings_sessions=2)
+    corr = lambda a, b: 0.9 if {a, b} == {"TWIN", "SPY"} else 0.1
+    d = run_decide(cfg, rows, cooling=[sat("COOL", state="removed", demoted=10)], corr=corr)
+    assert dict(d.passed) == {"COOL": f"cooling off since its demotion on {TODAY - timedelta(days=10)}",
+                              "TWIN": "moves with SPY (correlation 0.90)", "SOON": "reports in 2 sessions"}
+    assert [s for s, _ in d.promote] == ["OK"]
+
+
+# -- a full run through the engine ------------------------------------------------------------
+STOCKS = {   # symbol: (start price, drift, vol, seed)
+    "AAPL": (150, 0.55, 0.22, 11), "MSFT": (300, 0.45, 0.20, 12), "NVDA": (90, 0.80, 0.35, 13),
+    "AMZN": (120, 0.40, 0.25, 14), "META": (280, 0.60, 0.28, 15), "AVGO": (900, 0.50, 0.25, 16),
+    "COST": (600, 0.35, 0.18, 17), "LLY": (500, 0.42, 0.22, 18), "SOON": (60, 0.70, 0.22, 19),
+    "DOWN": (80, -0.45, 0.22, 20), "NEWCO": (40, 0.6, 0.3, 21), "THIN": (40, 0.5, 0.2, 22),
+    "PENY": (6, 0.5, 0.2, 23), "ETFX": (40, 0.5, 0.2, 24), "FUNDY": (40, 0.5, 0.2, 25), "TRST": (40, 0.5, 0.2, 26),
+}
+
+
 class Recorder:
     def __init__(self):
         self.posts = []
@@ -226,71 +243,177 @@ class Recorder:
         return True
 
 
-async def test_the_engine_stores_audits_and_posts_each_screen(scfg, store, ledger):
-    async def screener():
-        return sample_screen_result(scfg)
-
+async def screen_rig(cfg, store, now=SAT):
+    no_corporate_actions(store, cfg.core, now)
+    rig = market_rig(cfg, store, now=now)
+    f = rig.fake
+    spy = walk(DAYS, 500, 0.12, 0.15, 1)
+    f.add_daily_bars("SPY", spy)
+    sec, listings = FakeSec(), {}
+    for i, (sym, (p0, drift, vol, seed)) in enumerate(STOCKS.items()):
+        closes = walk(DAYS[-100:] if sym == "NEWCO" else DAYS, p0, drift, vol, seed)
+        f.add_daily_bars(sym, closes, volume=20_000 if sym == "THIN" else 3_000_000)
+        f.add_asset(sym, exchange="NASDAQ", name="Leveraged 2X ETF" if sym == "ETFX" else f"{sym} Inc.")
+        cik = 1000 + i
+        listings[sym] = Listing(sym, cik, f"{sym} INC", "Nasdaq")
+        sec.add_company(sym, cik, f"{sym} INC", sic="6221" if sym == "TRST" else "3571")
+    twin = {d: round(c * (1 + 0.0005 * ((i % 3) - 1)), 4) for i, (d, c) in
+            enumerate(walk(DAYS, 150, 0.55, 0.22, 11).items())}     # AAPL plus a hair of noise
+    f.add_daily_bars("TWIN", twin, volume=3_000_000)
+    f.add_asset("TWIN", exchange="NYSE", name="Twin Corp")
+    listings["TWIN"] = Listing("TWIN", 2000, "TWIN CORP", "NYSE")
+    sec.add_company("TWIN", 2000, "TWIN CORP", "NYSE")
+    db.save_sec_lists(store, listings, {"QQQ", "SGOV", "FUNDY"})
+    today = trade_day(now)
+    reports = [EarningsDate(s, today + timedelta(days=3 if s == "SOON" else 40)) for s in [*STOCKS, "TWIN"]]
+    db.save_earnings(store, reports, today, now)
+    db.record_feed(store, FEED_EARNINGS, True, "test", now)
+    rig.requote()
+    await rig.ready()
+    client = Sec("Test Person test@example.com", client=sec.client(), limiter=RateLimiter(1e6), backoff=0)
     rec = Recorder()
-    eng = Engine(scfg, store, FakeMarket(scfg, PRICES), alerts=Alerts(rec), screener=screener)
-    async with eng.alerts.running():
-        await eng.screen_tick()
-    assert store.latest_screen()["id"] == "s-test"
-    (audit,) = store.audits("screen")
-    assert audit["candidates"] == ["NEAR", "XMR"]
-    assert rec.posts and rec.posts[0].startswith("**Screener**: 2 candidate(s)")
+    eng = Engine(cfg, store, rig.market, sources=Sources(sec=client), alerts=Alerts(rec, Limits()), clock=rig.clock)
+    return eng, rig, rec
 
 
-async def test_a_failing_screen_marks_its_heartbeat_and_keeps_the_engine_going(scfg, store, ledger, monkeypatch):
-    monkeypatch.setattr(engmod, "SCREEN_FIRST_DELAY", 0)
-    calls = []
+def drain(alerts):
+    out = []
+    while not alerts.queue.empty():
+        out.append(alerts.queue.get_nowait())
+    return out
 
-    async def broken():
-        calls.append(time.time())
-        raise MarketDataError("screen: could not list Kraken pairs: HTTP 503")
 
-    eng = Engine(scfg, store, FakeMarket(scfg, PRICES), screener=broken)
-    task = asyncio.create_task(eng._screen_loop())
-    for _ in range(100):
-        if store.heartbeats().get("screen"):
+async def test_the_weekly_screen_promotes_satellites_the_desk_then_trades_as_stocks(cfg, store, ledger):
+    eng, rig, rec = await screen_rig(cfg, store)
+    res = await eng.screen(apply=True)
+    k = res.counts
+    assert (k["listed"], k["liquid"], k["measured"], k["passed"], k["ranked"]) == (15, 13, 13, 11, 10)
+    assert "TRST" not in res.rows                   # a commodity trust: never ranked as a company
+    assert {r.symbol for r in res.rows.values() if not r.passed} == {"DOWN", "NEWCO"}
+    promoted = [s for s, _ in res.decision.promote]
+    assert len(promoted) == 6 and "SOON" not in promoted and len({"AAPL", "TWIN"} & set(promoted)) == 1
+    passed = dict(res.decision.passed)
+    assert passed["SOON"] == "reports in 2 sessions"
+    twin = ({"AAPL", "TWIN"} - set(promoted)).pop()
+    assert passed[twin].startswith("moves with ")
+    # Members, market data and the council see them as stocks.
+    assert set(promoted) <= set(eng.members) and all(eng.members[s].asset_class == "stock" for s in promoted)
+    assert set(promoted) <= set(rig.market.tracked())
+    assert all(len(rig.market.adjusted(s)) > 60 for s in promoted)     # history loaded for Monday's meeting
+    for s in promoted:
+        assert (await rig.market.vol_regime(s))[0] is not None
+    assert set(udb.satellites(store)) == set(promoted)
+    # Stored for /screen and the API, and the digest is in Discord.
+    last = udb.last_screen(store)
+    assert last["applied"] and last["result"]["decision"]["promote"][0][0] == promoted[0]
+    (post,) = drain(eng.alerts)
+    assert post.startswith(f"**Weekly stock screen** {FRIDAY + timedelta(days=1)}: 10 of 13 measured stocks "
+                           "passed the gates as operating companies (13 liquid).")
+    assert f"- Promoted {promoted[0]} (12-1 " in post and "- Passed over SOON: reports in 2 sessions" in post
+    assert "—" not in post
+    assert screen_report(res, 5).count("\n") > 5
+
+
+async def test_a_satellite_that_fails_a_gate_is_sold_off_then_leaves(cfg, store, ledger):
+    eng, rig, _ = await screen_rig(cfg, store)
+    udb.promote(store, "DOWN", 50.0, "test", SAT - 30 * 86400)
+    with store.tx():
+        ledger.apply_fill(idem_key="b", asset="DOWN", side="BUY", quantity="5", price="40", quote_source="test",
+                          origin="test", now=SAT - 29 * 86400)
+    res = await eng.screen(apply=True)
+    assert dict(res.decision.demote)["DOWN"].startswith("hard gate: at or under its 200-session average")
+    assert udb.satellites(store)["DOWN"].state == "sunset"
+    assert not eng.members["DOWN"].buyable                      # SELL or HOLD only
+    with store.tx():
+        ledger.apply_fill(idem_key="s", asset="DOWN", side="SELL", quantity="5", price="30", quote_source="test",
+                          origin="test", now=SAT)
+    await eng.refresh_members()
+    assert "DOWN" not in eng.members and udb.satellites(store, ("removed",))["DOWN"].state == "removed"
+    assert [e["change"] for e in udb.events(store) if e["symbol"] == "DOWN"] == ["removed", "demoted", "promoted"]
+
+
+async def test_a_dry_run_changes_nothing_and_a_screen_without_sec_lists_refuses(cfg, store, ledger):
+    eng, rig, _ = await screen_rig(cfg, store)
+    res = await eng.screen(apply=False, kind="dry_run")
+    assert res.decision.promote and udb.satellites(store) == {} and udb.last_applied_ts(store) is None
+    assert udb.last_screen(store)["kind"] == "dry_run"
+    assert "(dry run, nothing changed)" in drain(eng.alerts)[0]
+    store.conn.execute("DELETE FROM sec_funds")
+    with pytest.raises(ScreenError, match="lists aren't loaded"):
+        await eng.screen()
+
+
+async def test_the_api_and_chat_show_the_screen(cfg, store, ledger):
+    eng, rig, _ = await screen_rig(cfg, store)
+    await eng.screen(apply=True)
+    server = ApiServer(eng, "127.0.0.1", 0)
+    await server.start()
+    try:
+        async with aiohttp.ClientSession(f"http://127.0.0.1:{server.port}") as s:
+            async with s.get("/api/screen") as r:
+                d = await r.json()
+            async with s.get("/api/universe") as r:
+                u = await r.json()
+    finally:
+        await server.stop()
+    assert d["schedule"] == "Sat 08:00 ET weekly" and len(d["satellites"]) == 6 and d["screen"]["applied"]
+    assert {x["symbol"] for x in u["satellites"]} == {x["symbol"] for x in d["satellites"]}
+    text = render.screen(d, SAT)
+    assert text.startswith("**Satellites** (6 of 6, screened Sat 08:00 ET weekly):")
+    assert "**Latest screen**" in text and "Passed over SOON: reports in 2 sessions" in text
+
+
+async def test_the_weekly_schedule_and_its_health(cfg, store, ledger):
+    sc = cfg.screen
+    assert last_slot(sc, SAT) == SAT and last_slot(sc, SAT - 1) == SAT - 7 * 86400
+    assert last_slot(sc, et(2026, 11, 2, 12)) == et(2026, 10, 31, 8)       # across the DST change
+    eng, rig, _ = await screen_rig(cfg, store, now=SAT + 4 * 3600)
+    now = SAT + 4 * 3600
+    stale = health.screen_health(cfg, store, None, now, epoch=now - 5 * 3600)
+    assert not stale.healthy and stale.problem == "screen missed the Sat 10-24 08:00 ET run (no screen was applied)"
+    assert health.screen_health(cfg, store, None, now, epoch=now - 600).healthy      # a fresh start's grace
+    loop = asyncio.create_task(eng._screen_loop())
+    for _ in range(200):
+        if udb.last_applied_ts(store):
             break
-        await asyncio.sleep(0.02)
-    hb = store.heartbeats()["screen"]
-    assert hb["ok"] is False and "HTTP 503" in hb["detail"] and not task.done()
-    await asyncio.sleep(0.2)
-    assert len(calls) == 1  # retried after SCREEN_RETRY_SEC, not in a tight loop
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+        await asyncio.sleep(0.05)
+    loop.cancel()
+    assert udb.last_applied_ts(store) == now
+    assert health.screen_health(cfg, store, None, now, epoch=now - 5 * 3600).healthy
+    off = dataclasses.replace(cfg, screen=dataclasses.replace(cfg.screen, enabled=False))
+    assert health.screen_health(off, store, None, now + 30 * 86400, None).expect == "off"
 
 
-def test_the_screen_heartbeat_is_a_warning_only_when_enabled(cfg, scfg):
-    assert "screen" not in health.intervals(cfg)
-    assert health.intervals(scfg)["screen"] == 24 * 3600 and health.SEVERITY["screen"] == health.WARNING
+def test_the_discord_digest():
+    d = {"day": "2026-10-24", "applied": True, "counts": {"ranked": 3, "measured": 5, "liquid": 9},
+         "promote": [["NVDA (12-1 +85%)", "ranks #1, score 91: fills an open slot"]], "demote": [], "keep": [],
+         "passed": [], "errors": 0}
+    assert format_event("screen", d) == ("**Weekly stock screen** 2026-10-24: 3 of 5 measured stocks passed the gates "
+                                         "as operating companies (9 liquid).\n- Promoted NVDA (12-1 +85%): ranks #1, "
+                                         "score 91: fills an open slot")
 
 
-# -- config ----------------------------------------------------------------------------------
-def _toml(tmp_path, old, new):
-    p = tmp_path / "c.toml"
-    text = cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8")
-    assert old in text
-    p.write_text(text.replace(old, new), encoding="utf-8")
-    return p
+def test_ask_sees_the_satellites_and_the_latest_screen():
+    from ottr.chat.client import DeskContext
+    from ottr.chat.prompt import desk_data
+    ctx = DeskContext(screen={
+        "schedule": "Sat 08:00 ET weekly", "satellites_max": 6,
+        "satellites": [{"symbol": "NVDA", "state": "active", "promoted_day": "2026-10-24"},
+                       {"symbol": "XYZ", "state": "sunset", "demoted_day": "2026-10-24", "why": "hard gate: thin"}],
+        "screen": {"ts": SAT, "applied": True, "result": {"decision": {
+            "promote": [["NVDA", "ranks #1, score 91: fills an open slot"]], "demote": [["XYZ", "hard gate: thin"]],
+            "passed": [["MSFT", "moves with QQQ (correlation 0.81)"]]}}}})
+    text = desk_data(ctx, SAT)
+    assert ("SATELLITES (stocks the weekly screener picked, at most 6; screened Sat 08:00 ET weekly): NVDA since "
+            "2026-10-24; XYZ being sold off (demoted 2026-10-24: hard gate: thin)") in text
+    assert ("promoted NVDA (ranks #1, score 91: fills an open slot); demoted XYZ (hard gate: thin); passed over "
+            "MSFT (moves with QQQ (correlation 0.81))") in text
+    assert "SATELLITES: unavailable (down)" in desk_data(DeskContext(errors={"screen": "down"}), SAT)
 
 
-def test_a_universe_asset_needs_a_kraken_pair(tmp_path):
-    p = _toml(tmp_path, '"LINK", "AVAX"]', '"LINK", "AVAX", "NEAR"]')
-    with pytest.raises(ConfigError, match=r"no Kraken pair for \['NEAR'\].*NEAR = \"NEARUSD\""):
-        cfgmod.load(p, data_dir=tmp_path)
-    p.write_text(p.read_text(encoding="utf-8") + '\n[pairs]\nnear = "NEARUSD"\n', encoding="utf-8")
-    c = cfgmod.load(p, data_dir=tmp_path)
-    assert c.kraken_pair("NEAR") == "NEARUSD" and c.kraken_pair("BTC") == "XBTUSD"
-
-
-@pytest.mark.parametrize("old,new,match", [
-    ("min_history_days = 120", "min_history_days = 30", "min_history_days"),
-    ("top_n = 5", "top_n = 0", "top_n"),
-    ("max_spread_pct = 0.30", "max_spread_pct = 0", "max_spread_pct"),
-    ("max_pairs = 60", "max_pairz = 60", r"\[screen\] unknown keys"),
-])
-def test_bad_screen_config_fails_loudly(tmp_path, old, new, match):
-    with pytest.raises(ConfigError, match=match):
-        cfgmod.load(_toml(tmp_path, old, new), data_dir=tmp_path)
+async def test_without_the_sec_no_stock_is_assumed_to_be_a_company(cfg, store, ledger):
+    eng, rig, _ = await screen_rig(cfg, store)
+    eng.sources = Sources()                       # no SEC_USER_AGENT, nothing cached
+    with pytest.raises(ScreenError, match="no operating company confirmed among 11 stocks that passed the gates"):
+        await eng.screen()
+    assert udb.satellites(store) == {}

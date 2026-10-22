@@ -1,6 +1,7 @@
 """
-CLI tests through `main()`: `ottr status` exit codes and JSON, the env-file loader, the
-config guards (loopback-only API, key length), and `service install --dry-run`.
+CLI tests through `main()`: `ottr init`, `ottr status` exit codes, JSON and offline marks,
+the env-file loader, the config guards (loopback-only API, key length), and
+`service install --dry-run`.
 """
 
 import json
@@ -10,10 +11,13 @@ import pytest
 
 from ottr import cli, health
 from ottr import config as cfgmod
-from ottr.config import ConfigError, load_env_file
+from ottr.config import ConfigError, load_env_file, read_env_file
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store
-from ottr.market.types import MarketDataError
+from ottr.market import history
+from ottr.market.types import Bar
+from tests.fakes import et
+from tests.nyse import calendar_2026
 
 
 @pytest.fixture
@@ -42,23 +46,32 @@ def test_status_json_engine_down(book, capsys):
     assert d["kill_switch"]["effective_dry_run"] is False
 
 
-def test_status_healthy_engine_exits_0(book, capsys, monkeypatch):
+def test_status_healthy_engine_exits_0(book, capsys):
     book.set_state("engine", {"running": True, "epoch": time.time() - 30})
-    for t in ("watchdog", "market", "risk", "equity", "council"):
+    for t in ("watchdog", "market", "jobs", "risk", "equity", "council"):
         book.heartbeat(t, True)
-
-    class NoNetwork:
-        def __init__(self, cfg):
-            pass
-
-        async def quotes(self):
-            raise MarketDataError("offline in tests")
-
-    monkeypatch.setattr(cli, "MarketData", NoNetwork)
     assert status() == health.EXIT_OK
     out = capsys.readouterr().out
-    assert out.startswith("OTTR OK (exit 0)") and "live quotes unavailable" in out
-    assert "task risk     ok" in out
+    assert out.startswith("OTTR OK (exit 0)") and "equity $10,000.00  cash $10,000.00" in out
+    assert "task risk     ok" in out and "(every 60s)" in out
+    assert "task council  ok" in out and "(at 10:15 and 15:15 ET on trading days)" in out
+
+
+def test_status_marks_holdings_from_stored_closes_without_keys(book, capsys, monkeypatch):
+    """No Alpaca keys and a closed market: the stored official close prices the book."""
+    from decimal import Decimal
+    sat = et(2026, 10, 24, 12)
+    with book.tx():
+        Ledger(book).apply_fill(idem_key="b", asset="SPY", side="BUY", quantity=Decimal("2"), price=700,
+                                quote_source="t", origin="t", now=et(2026, 10, 20, 11))
+    history.save_calendar(book, calendar_2026())
+    from datetime import date
+    history.save_bars(book, {"SPY": [Bar(date(2026, 10, 22), 760, 760, 760, 760, 1), Bar(date(2026, 10, 23), 770, 770, 770, 770, 1)]})
+    monkeypatch.setattr(cli.time, "time", lambda: sat)
+    status()
+    out = capsys.readouterr().out
+    assert "market closed; next open Mon 2026-10-26 09:30 ET" in out
+    assert "equity $10,140.00" in out and "SPY    qty 2.0000  avg $700.00  $770.00 close" in out
 
 
 def test_status_ledger_problem_exits_2(book, capsys):
@@ -80,6 +93,14 @@ def test_env_file_fills_only_unset_variables(tmp_path, monkeypatch):
     (tmp_path / "bad.env").write_text("NOT A PAIR\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="bad.env:1"):
         load_env_file(tmp_path / "bad.env")
+
+
+def test_env_values_keep_inner_spaces_with_or_without_quotes(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("SEC_USER_AGENT=Jane Q Doe jane@example.com  \n"
+                 "A2=\"Jane Q Doe jane@example.com\"\nA2=second line ignored\n", encoding="utf-8")
+    got = read_env_file(f)
+    assert got["SEC_USER_AGENT"] == got["A2"] == "Jane Q Doe jane@example.com"
 
 
 def test_main_reads_the_env_file(book, tmp_path, monkeypatch, capsys):
@@ -169,20 +190,39 @@ def test_chat_refuses_to_start_when_disabled(tmp_path, monkeypatch):
     assert cli.main(["--config", str(p), "chat"]) == 78
 
 
-def test_screen_prints_the_ranking_and_stores_nothing(tmp_path, monkeypatch, capsys):
-    from ottr.market import screen
-    from tests.fakes import sample_screen_result
+def test_init_opens_the_book_once(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+    assert cli.main(["init"]) == 0
+    assert "Book opened: $10,000.00 in a margin_1x account" in capsys.readouterr().out
+    assert cli.main(["init"]) == 1 and "already initialized" in capsys.readouterr().out
+    s = Store(tmp_path / "ottr.db", writer=False)
+    try:
+        assert Ledger(s).cash() == 10000 and Ledger(s).check() == []
+    finally:
+        s.close()
+    with pytest.raises(SystemExit, match="No Alpaca keys"):
+        cli.main(["screen"])                       # the stock screener needs the Alpaca keys
 
-    async def fake_run(kraken, cfg, pause=1.1):
-        return sample_screen_result(cfg)
 
-    monkeypatch.setattr(screen, "run", fake_run)
-    assert cli.main(["screen"]) == 0
-    out = capsys.readouterr().out
-    assert out.startswith("Scanning Kraken USD pairs") and "OTTR screener, live (not stored" in out
-    assert "QUALIFIES" in out
-    assert "candidates: NEAR, XMR" in out and 'NEAR = "NEARUSD"' in out
-    assert not (tmp_path / "ottr.db").exists()
-    assert cli.main(["screen", "--json"]) == 0
-    assert json.loads(capsys.readouterr().out)["id"] == "s-test"
+def test_a_book_this_version_cannot_open_is_a_message_not_a_traceback(tmp_path, monkeypatch, capsys):
+    import sqlite3
+    from ottr import cli
+    db = tmp_path / "ottr.db"
+    c = sqlite3.connect(db)
+    c.executescript("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT); "
+                    "INSERT INTO meta VALUES ('schema_version', '2');")
+    c.commit()
+    c.close()
+    monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+    assert cli.main(["status"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("ottr: ") and "schema v2 book" in err and "Traceback" not in err
+
+
+def test_a_bad_config_is_a_message_not_a_traceback(tmp_path, capsys):
+    bad = tmp_path / "config.toml"
+    bad.write_text(cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8").replace(
+        "stop_vol_mult = 2.0", "stop_vol_mult = 2.0\ntrailing_stop_pct = 10.0"), encoding="utf-8")
+    assert cli.main(["--config", str(bad), "status"]) == 2
+    err = capsys.readouterr().err
+    assert err.startswith("ottr: config.toml: [risk] unknown keys: ['trailing_stop_pct']") and "Traceback" not in err
