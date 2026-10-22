@@ -10,7 +10,7 @@ import pytest
 
 from ottr import cli, health
 from ottr import config as cfgmod
-from ottr.config import ConfigError, load_env_file
+from ottr.config import ConfigError, load_env_file, read_env_file
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store
 from ottr.market.types import MarketDataError
@@ -80,6 +80,14 @@ def test_env_file_fills_only_unset_variables(tmp_path, monkeypatch):
     (tmp_path / "bad.env").write_text("NOT A PAIR\n", encoding="utf-8")
     with pytest.raises(ConfigError, match="bad.env:1"):
         load_env_file(tmp_path / "bad.env")
+
+
+def test_env_values_keep_inner_spaces_with_or_without_quotes(tmp_path):
+    f = tmp_path / ".env"
+    f.write_text("SEC_USER_AGENT=Jane Q Doe jane@example.com  \n"
+                 "A2=\"Jane Q Doe jane@example.com\"\nA2=second line ignored\n", encoding="utf-8")
+    got = read_env_file(f)
+    assert got["SEC_USER_AGENT"] == got["A2"] == "Jane Q Doe jane@example.com"
 
 
 def test_main_reads_the_env_file(book, tmp_path, monkeypatch, capsys):

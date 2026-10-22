@@ -36,12 +36,12 @@ def isolated_env(tmp_path, monkeypatch, request):
         monkeypatch.delenv(var, raising=False)
     monkeypatch.setenv("OTTR_ENV_FILE", str(tmp_path / "no-such.env"))
     env_file = cfgmod.ROOT / ".env"
-    if live and env_file.exists():
+    if live:
         # Only the read-only keys: the file's other secrets (a webhook) stay out of tests.
-        for line in env_file.read_text(encoding="utf-8").splitlines():
-            key, _, value = line.partition("=")
-            if key.strip() in LIVE_READ_ONLY_VARS and value.strip() and key.strip() not in os.environ:
-                monkeypatch.setenv(key.strip(), value.strip())
+        # Parsed exactly as the CLI parses it (quotes, `export`, comments).
+        for key, value in cfgmod.read_env_file(env_file).items():
+            if key in LIVE_READ_ONLY_VARS and value and key not in os.environ:
+                monkeypatch.setenv(key, value)
 
 
 @pytest.fixture(autouse=True)

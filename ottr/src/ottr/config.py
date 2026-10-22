@@ -209,17 +209,13 @@ def _env_ids(name: str) -> Tuple[int, ...]:
     return tuple(_discord_id(name, part) for part in raw.replace(",", " ").split())
 
 
-def load_env_file(path: Path) -> List[str]:
-    """Read KEY=VALUE lines into os.environ without overriding variables already set.
-
-    Why: the scheduled task gets the user's registry environment, not a shell's, so
-    secrets (DISCORD_WEBHOOK_URL, OTTR_API_KEY) live in a gitignored ottr/.env instead.
-    Only the CLI entry point calls this; tests and library code never read the file.
-    Returns the keys it set.
-    """
+def read_env_file(path: Path) -> Dict[str, str]:
+    """KEY -> VALUE from a .env file, or {} if there is none. Blank lines and # comments
+    are skipped, an `export ` prefix is allowed, and matching quotes around a value are
+    removed; spaces inside a value are kept. The first line for a key wins."""
     if not path.is_file():
-        return []
-    set_keys = []
+        return {}
+    out: Dict[str, str] = {}
     for n, line in enumerate(path.read_text(encoding="utf-8-sig").splitlines(), 1):
         line = line.strip()
         if not line or line.startswith("#"):
@@ -232,6 +228,20 @@ def load_env_file(path: Path) -> List[str]:
             raise ConfigError(f"{path}:{n}: expected KEY=VALUE")
         if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
             value = value[1:-1]
+        out.setdefault(key, value)
+    return out
+
+
+def load_env_file(path: Path) -> List[str]:
+    """Read KEY=VALUE lines into os.environ without overriding variables already set.
+
+    Why: the scheduled task gets the user's registry environment, not a shell's, so
+    secrets (DISCORD_WEBHOOK_URL, OTTR_API_KEY) live in a gitignored ottr/.env instead.
+    Only the CLI entry point calls this (live tests read the feed keys with
+    `read_env_file`). Returns the keys it set.
+    """
+    set_keys = []
+    for key, value in read_env_file(path).items():
         if key not in os.environ:
             os.environ[key] = value
             set_keys.append(key)
