@@ -1,0 +1,138 @@
+# OTTR US-markets desk configuration (loaded by config.load_us). At the cutover this file
+# becomes config.toml and the crypto configuration is retired. Env overrides as in
+# config.toml: OTTR_DRY_RUN, MAX_TRADE_USD, OTTR_DATA_DIR, DISCORD_WEBHOOK_URL,
+# OTTR_API_KEY, DISCORD_BOT_TOKEN, CEO_DISCORD_ID, OTTR_CHAT_ALLOWED_IDS, DISCORD_GUILD_ID.
+# Alpaca keys (APCA_API_KEY_ID / APCA_API_SECRET_KEY) are read by the data client itself.
+
+[account]
+# margin_1x: an Alpaca margin account set to max_margin_multiplier = 1 with shorting off.
+# No leverage, no shorting, sale proceeds usable at once, no day-trade limit; it is also
+# the account type Alpaca's level 3 option spreads need (phase 2). "cash" spends only
+# settled (T+1) funds, which makes a good-faith violation impossible.
+type = "margin_1x"
+starting_cash = 10000.0
+
+[universe]
+# The traded core: symbol -> asset class. Satellites (screener-picked stocks) live in the
+# database, not here.
+cash_symbol = "SGOV"        # where idle cash is swept; must be in the core as cash_etf
+satellites_max = 6
+sleeve_pct = 40.0           # satellites (including ones being sold off) at most this % of equity
+# Data only, never traded: equal-weight S&P and the sector SPDRs, for breadth. XLE, the
+# energy sector, is in the traded core below, so it isn't repeated here.
+reference = ["RSP", "XLB", "XLC", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
+
+[universe.core]
+SPY = "equity_etf"
+QQQ = "equity_etf"
+IWM = "equity_etf"
+EFA = "equity_etf"
+EEM = "equity_etf"
+SGOV = "cash_etf"
+IEF = "bond_etf"
+TLT = "bond_etf"
+TIP = "bond_etf"
+LQD = "bond_etf"
+HYG = "bond_etf"
+GLD = "commodity_etf"
+SLV = "commodity_etf"
+PDBC = "commodity_etf"
+XLE = "equity_etf"
+VNQ = "real_estate_etf"
+
+[trading]
+dry_run = false            # true: record "would fill" verdicts, never fill
+min_trade_usd = 100.0
+max_trade_usd = 2500.0     # ceiling per BUY (code sizes BUYs, so this clamps); 0 = none
+max_gross_pct = 90.0       # invested (excluding the cash ETF) never above this % of equity
+cash_reserve_pct = 2.0     # never spend the last 2% of equity on a BUY
+max_trades_per_meeting = 3
+decision_ttl_sec = 900     # drop council decisions older than this
+slippage_pct = 0.0         # IEX spreads already sit at or outside the national best
+no_buy_last_min = 10       # no new BUYs in the session's last 10 minutes
+
+[sizing]
+target_risk_pct = 1.5      # risk budget per position: % of equity / annualized vol
+choppy_regime_factor = 0.25
+max_position_pct = 25.0
+missing_vol = 0.80         # assumed annualized vol when unknown: sizes small, never large
+
+[sizing.vol_floor]         # vol never counted below this, per class (stops a calm ETF ballooning)
+equity_etf = 0.10
+bond_etf = 0.04
+cash_etf = 0.005
+commodity_etf = 0.12
+real_estate_etf = 0.12
+stock = 0.15
+
+[caps]                     # max % of equity per position, by class; the cash ETF is uncapped
+equity_etf = 25.0
+bond_etf = 25.0
+commodity_etf = 20.0
+real_estate_etf = 20.0
+stock = 8.0
+
+[caps.symbol]              # per-symbol overrides
+EEM = 15.0
+SLV = 10.0
+PDBC = 15.0
+
+[risk]
+enabled = true
+trailing_stop_pct = 10.0
+drawdown_halt_pct = 15.0
+drawdown_resume_pct = 10.0
+drawdown_derisk = true
+drawdown_derisk_pct = 25.0
+halt_max_hours = 72
+trim_band_pct = 5.0
+cooldown_sec = 900
+min_equity_points = 24
+
+[schedule]
+meeting_times = ["10:15", "15:15"]   # New York time, trading days only
+min_before_close_min = 45            # on early closes a later slot moves back to this
+
+[data]
+feed = "iex"               # live quotes: iex (free) or sip (paid)
+history_days = 400         # calendar days of daily bars loaded (>= 273 sessions)
+max_spread_pct = 1.0       # a wider IEX quote isn't a market: the order defers
+max_quote_age_sec = 120
+max_trade_gap_pct = 2.0
+max_close_gap_pct = 25.0
+
+[council]
+analysts = ["claude", "gpt", "gemini"]
+chair = "claude"
+min_analysts = 2
+timeout_sec = 300
+claude_model = "opus"
+gemini_model = "gemini-3.8-flash-high"
+reasoning_effort = "high"
+
+[engine]
+risk_interval_sec = 60
+equity_interval_sec = 900
+watchdog_interval_sec = 60
+alarm_clear_sec = 300
+
+[alerts]
+burst = 10
+per_hour = 30
+alarm_repeat_sec = 1800
+alarm_remind_sec = 21600
+live_meeting = true
+live_edit_sec = 3
+
+[api]
+enabled = true
+host = "127.0.0.1"
+port = 8765
+
+[chat]
+enabled = true
+model = "claude"
+effort = "low"
+per_hour = 20
+history_turns = 6
+timeout_sec = 180
