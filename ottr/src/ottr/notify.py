@@ -168,6 +168,8 @@ def format_event(kind: str, d: dict) -> str:
                 f"{float(d['stop']):,.2f} (last close {float(d['close']):,.2f}). Selling at the bid.")
     if kind == "risk_resume":
         return f"**Breaker resumed** ({d['why']})."
+    if kind == "corporate_action":
+        return f"**{d['symbol']}** corporate action: {no_em_dash(d['note'])}"
     if kind == "alarm":
         return f"**ALARM** ({d['severity']}): {d['message']}"
     if kind == "alarm_remind":

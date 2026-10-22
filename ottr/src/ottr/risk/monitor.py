@@ -21,6 +21,9 @@ risk state, high-water updates, events).
   state and their SELLs are re-issued on every check under one stable key until they
   fill, so a sale that couldn't fill (a bad quote, the close, a restart) still happens the
   next session. The executor's idempotency makes the repeats harmless.
+- Corporate exits: a holding facing an action the book can't model (a stock merger, a
+  spin-off) is sold whole from the session before it takes effect (the engine names them,
+  see `ledger/corporate.exits_due`), under one key per action until it fills.
 - The cash ETF is swept cash: never stopped, trimmed, de-risked or reported blind.
 
 Drawdown deadlock fix (v1 bug): the breaker only blocks BUYs. It resumes when drawdown
@@ -103,9 +106,12 @@ def cap_for(cfg, symbol: str, classes: Mapping[str, str]) -> Optional[float]:
 
 def check(cfg, now: float, positions: Mapping[str, Position], valuation: Optional[Valuation],
           quotes: Mapping[str, Quote], state: RiskState, equity_points: int,
-          classes: Mapping[str, str], prev_close: Optional[Mapping[str, float]] = None) -> MonitorResult:
+          classes: Mapping[str, str], prev_close: Optional[Mapping[str, float]] = None,
+          exits: Optional[Mapping[str, Tuple[str, str]]] = None) -> MonitorResult:
     """`quotes`: live quotes that passed the sanity check. `classes`: member -> asset class.
-    `prev_close`: each holding's last official close (to tell a gap from an intraday fall)."""
+    `prev_close`: each holding's last official close in today's share basis (to tell a gap
+    from an intraday fall). `exits`: holdings to sell ahead of a corporate action the book
+    can't model, asset -> (action id, why)."""
     r = cfg.risk
     prev_close = prev_close or {}
     st = RiskState.from_dict(state.to_dict())
@@ -142,6 +148,13 @@ def check(cfg, now: float, positions: Mapping[str, Position], valuation: Optiona
             why = f"bid {q.bid:.2f} <= stop {stop_px:.2f} ({pct * 100:.1f}% off high {new_hwm:.2f})"
         intents.append(Intent(origin="stop", asset=a, side="SELL", fraction=1.0, ref="trailing_stop",
                               idem_key=f"stop:{a}:{p.opened_ts:.0f}", created_ts=now, reason=why))
+
+    for a, (action_id, why) in sorted((exits or {}).items()):
+        # Issued whether or not there is a quote right now: the gate defers it until there is.
+        if a in positions and a not in exiting:
+            exiting.add(a)
+            intents.append(Intent(origin="corp_exit", asset=a, side="SELL", fraction=1.0, ref=action_id,
+                                  idem_key=f"corp_exit:{a}:{action_id}", created_ts=now, reason=why))
 
     if valuation is None:
         return MonitorResult(intents, st, hwm, events)

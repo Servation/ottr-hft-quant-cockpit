@@ -26,6 +26,12 @@ Conventions, chosen to match how a US broker reports a taxable account:
   than a year). Wash sales, which can move basis and holding period between lots, come in
   the tax PR and adjust these lots rather than replace them.
 - Holdings are marked at the BID: what the position could actually be sold for.
+- Corporate actions (`ledger/corporate.py` decides; the methods here book): a split
+  multiplies each open lot's remaining shares (cost and holding period unchanged), one
+  `lot_adjustments` row per lot, which `check()` replays in sequence with the fills; a
+  dividend is owed from its ex-date (a receivable, counted in equity) and paid as cash on
+  its pay date; cash in lieu and cash mergers are SELL fills with origin
+  `corporate_action`, so lots, P&L and tax follow a sale's rules.
 """
 
 from __future__ import annotations
@@ -47,8 +53,7 @@ USD = Decimal("0.01")
 QTY = Decimal("0.000000001")      # 1e-9 shares: Alpaca's fractional precision
 ZERO = Decimal(0)
 # Cash event kinds that move cash. Others (deposit_in_kind) record holdings only.
-# Dividends, fee charges and interest join this set in the PRs that book them.
-CASH_KINDS = frozenset({"deposit", "fee"})
+CASH_KINDS = frozenset({"deposit", "fee", "dividend"})
 EVENT_KINDS = CASH_KINDS | {"deposit_in_kind"}
 
 
@@ -161,6 +166,7 @@ class Valuation:
     invested: float
     weights: Dict[str, float]
     values: Dict[str, float]
+    receivable: float = 0.0     # dividends owed (past the ex-date, not yet paid)
 
 
 def _lot(r) -> Lot:
@@ -212,7 +218,8 @@ class Ledger:
         return [Closure(r[0], r[1], date.fromisoformat(r[2]), D(r[3]), D(r[4]), D(r[5]), D(r[6]), r[7]) for r in rows]
 
     def value(self, quotes: Mapping[str, Quote]) -> Optional[Valuation]:
-        """Mark to the bid. Returns None if any held asset has no quote (unknown, not 0)."""
+        """Mark to the bid. Returns None if any held asset has no quote (unknown, not 0).
+        Dividends owed count: from the ex-date the price no longer includes them."""
         cash = float(self.cash())
         values: Dict[str, float] = {}
         for a, p in self.positions().items():
@@ -221,9 +228,47 @@ class Ledger:
                 return None
             values[a] = float(p.qty) * q.bid
         invested = sum(values.values())
-        equity = cash + invested
+        owed = float(self.receivable())
+        equity = cash + invested + owed
         weights = {a: (v / equity if equity > 0 else 0.0) for a, v in values.items()}
-        return Valuation(equity=equity, cash=cash, invested=invested, weights=weights, values=values)
+        return Valuation(equity=equity, cash=cash, invested=invested, weights=weights, values=values,
+                         receivable=owed)
+
+    def receivable(self) -> Decimal:
+        """Dividends owed: past their ex-date, not yet paid."""
+        return sum((D(r[0]) for r in self.store.conn.execute("SELECT amount FROM dividends WHERE status='owed'")),
+                   ZERO)
+
+    def held_before(self, asset: str, day: date) -> Decimal:
+        """Shares of `asset` held at the end of the last trade day before `day`, replayed
+        from the log (deposits in kind, fills, split adjustments): what a dividend going ex
+        on `day` is paid on, whenever it is asked."""
+        d, c = day.isoformat(), self.store.conn
+        n = sum((D(r[0]) for r in c.execute(
+            "SELECT qty FROM cash_events WHERE kind='deposit_in_kind' AND asset=? AND day<?", (asset, d))), ZERO)
+        for side, q in c.execute("SELECT side, qty FROM fills WHERE asset=? AND day<?", (asset, d)):
+            n += D(q) if side == "BUY" else -D(q)
+        for before, after in c.execute(
+                "SELECT a.qty_before, a.qty_after FROM lot_adjustments a JOIN corporate_entries e "
+                "ON e.action_id=a.action_id WHERE e.symbol=? AND e.day<?", (asset, d)):
+            n += D(after) - D(before)
+        return n
+
+    def corporate_entries(self, symbol: Optional[str] = None) -> List[Dict[str, object]]:
+        q = "SELECT action_id,kind,symbol,day,ts,outcome,qty,after_fill,detail FROM corporate_entries"
+        rows = (self.store.conn.execute(q + " WHERE symbol=? ORDER BY day, action_id", (symbol,)) if symbol
+                else self.store.conn.execute(q + " ORDER BY day, action_id"))
+        cols = ("action_id", "kind", "symbol", "day", "ts", "outcome", "qty", "after_fill", "detail")
+        return [{**dict(zip(cols, r)), "qty": D(r[6]), "day": date.fromisoformat(r[3]), "detail": json.loads(r[8])}
+                for r in rows]
+
+    def dividends(self, status: Optional[str] = None) -> List[Dict[str, object]]:
+        q = "SELECT action_id,symbol,kind,ex_day,qty,rate,amount,status,cash_event_id FROM dividends"
+        rows = (self.store.conn.execute(q + " WHERE status=? ORDER BY ex_day, action_id", (status,)) if status
+                else self.store.conn.execute(q + " ORDER BY ex_day, action_id"))
+        return [{"action_id": r[0], "symbol": r[1], "kind": r[2], "ex_day": date.fromisoformat(r[3]),
+                 "qty": D(r[4]), "rate": D(r[5]), "amount": D(r[6]), "status": r[7], "cash_event_id": r[8]}
+                for r in rows]
 
     # -- setup ----------------------------------------------------------------------------
     def initialize(self, cash, note: str = "initial deposit",
@@ -261,13 +306,16 @@ class Ledger:
                    quote_source: str, origin: str, fee_pct: float = 0.0,
                    fees: Optional[Mapping[str, object]] = None,
                    accrued: Optional[Mapping[str, object]] = None, quote: Optional[Quote] = None,
-                   ref: str = "", reason: str = "", now: Optional[float] = None) -> Fill:
+                   ref: str = "", reason: str = "", now: Optional[float] = None,
+                   day: Optional[date] = None) -> Fill:
         """Book one fill. Raises LedgerError (rolling back the caller's tx) on any violation.
 
         Fees: either `fees`, a breakdown in dollars ({"sec": 0.0021, "taf": 0.000195}) whose
         total is charged rounded to the cent, or `fee_pct` of the notional. The breakdown is
         stored with the fill either way. `accrued` is the regulatory fees the fill owes
         (exact, from broker.fees); they are not charged now but by `charge_fees` at the close.
+        `day` is the trade date when it isn't now's: a corporate action booked late (the
+        engine was down) is dated when it took effect.
         """
         if not self.store._depth:
             raise LedgerError("apply_fill must run inside store.tx() so the fill commits atomically")
@@ -278,7 +326,7 @@ class Ledger:
         if q <= 0 or px <= 0:
             raise LedgerError("fill needs positive quantity and price")
         now = time.time() if now is None else now
-        day = trade_day(now)
+        day = day or trade_day(now)
         notional = usd(q * px)
         if fees is not None:
             detail = {k: D(v) for k, v in fees.items()}
@@ -443,13 +491,111 @@ class Ledger:
             return c.execute("UPDATE positions SET stop_pct=? WHERE asset=? AND stop_pct IS NULL",
                              (pct, asset)).rowcount == 1
 
+    # -- corporate actions (ledger/corporate.py decides; call inside store.tx(), then check()) --
+    def _in_tx(self, what: str) -> None:
+        if not self.store._depth:
+            raise LedgerError(f"{what} must run inside store.tx() so the action commits atomically")
+
+    def record_corporate(self, action_id: str, kind: str, symbol: str, day: date, outcome: str,
+                         held: Decimal, detail: Mapping[str, object], now: float) -> None:
+        """Record what was done about one action, once. Its `after_fill` is the newest fill
+        now, so split adjustments written after this replay right after that fill."""
+        self._in_tx("record_corporate")
+        c = self.store.conn
+        if c.execute("SELECT 1 FROM corporate_entries WHERE action_id=?", (action_id,)).fetchone():
+            raise LedgerError(f"corporate action {action_id} is already recorded")
+        after = c.execute("SELECT COALESCE(MAX(id), 0) FROM fills").fetchone()[0]
+        c.execute("INSERT INTO corporate_entries(action_id,kind,symbol,day,ts,outcome,qty,after_fill,detail) "
+                  "VALUES(?,?,?,?,?,?,?,?,?)",
+                  (action_id, kind, symbol, day.isoformat(), now, outcome, str(held), after, dumps(dict(detail))))
+        self.store.audit("corporate_action", action_id=action_id, action=kind, symbol=symbol, day=day.isoformat(),
+                         outcome=outcome, qty=held, detail=dict(detail))
+
+    def split_lots(self, action_id: str, asset: str, ratio: Decimal) -> Tuple[Decimal, Decimal]:
+        """Multiply each open lot of `asset` by `ratio` (shares to 1e-9; cost unchanged) and
+        divide the high-water mark by it, so the stop moves with the price. The action must
+        be recorded first. Returns the position's (shares before, shares after)."""
+        self._in_tx("split_lots")
+        if ratio <= 0:
+            raise LedgerError(f"split ratio {ratio} for {asset} must be positive")
+        pos = self.positions().get(asset)
+        if pos is None:
+            raise LedgerError(f"no {asset} position to split")
+        c = self.store.conn
+        if c.execute("SELECT 1 FROM corporate_entries WHERE action_id=?", (action_id,)).fetchone() is None:
+            raise LedgerError(f"split {action_id} must be recorded before its lots are adjusted")
+        total = ZERO
+        for lot in self.lots(asset):
+            new = qty(lot.qty_remaining * ratio)
+            if new <= 0:
+                raise LedgerError(f"lot {lot.id}: {lot.qty_remaining} shares x {ratio} rounds to nothing")
+            c.execute("UPDATE lots SET qty_remaining=? WHERE id=?", (str(new), lot.id))
+            c.execute("INSERT INTO lot_adjustments(action_id,lot_id,qty_before,qty_after) VALUES(?,?,?,?)",
+                      (action_id, lot.id, str(lot.qty_remaining), str(new)))
+            total += new
+        c.execute("UPDATE positions SET qty=?, high_water=? WHERE asset=?",
+                  (str(total), pos.high_water / float(ratio), asset))
+        return pos.qty, total
+
+    def owe_dividend(self, action_id: str, symbol: str, kind: str, ex_day: date, held: Decimal,
+                     rate: Decimal) -> Decimal:
+        """A dividend owed on `held` shares from its ex-date. Returns the amount (cents)."""
+        self._in_tx("owe_dividend")
+        if held <= 0 or rate <= 0:
+            raise LedgerError(f"dividend {action_id}: {held} shares at {rate} owes nothing")
+        amount = usd(held * rate)
+        self.store.conn.execute(
+            "INSERT INTO dividends(action_id,symbol,kind,ex_day,qty,rate,amount,status) VALUES(?,?,?,?,?,?,?,'owed')",
+            (action_id, symbol, kind, ex_day.isoformat(), str(held), str(rate), str(amount)))
+        return amount
+
+    def restate_dividend(self, action_id: str, rate: Decimal) -> Tuple[Decimal, Decimal]:
+        """Follow a rate the source corrected before payment. Returns (old, new) amounts."""
+        self._in_tx("restate_dividend")
+        r = self.store.conn.execute("SELECT qty, amount FROM dividends WHERE action_id=? AND status='owed'",
+                                    (action_id,)).fetchone()
+        if r is None or rate <= 0:
+            raise LedgerError(f"dividend {action_id} isn't owed (or rate {rate} is bad)")
+        amount = usd(D(r[0]) * rate)
+        self.store.conn.execute("UPDATE dividends SET rate=?, amount=? WHERE action_id=?",
+                                (str(rate), str(amount), action_id))
+        return D(r[1]), amount
+
+    def pay_dividend(self, action_id: str, pay_day: date, now: float) -> Decimal:
+        """Turn an owed dividend into cash, as a 'dividend' cash event dated its pay date."""
+        self._in_tx("pay_dividend")
+        c = self.store.conn
+        r = c.execute("SELECT symbol, kind, qty, amount FROM dividends WHERE action_id=? AND status='owed'",
+                      (action_id,)).fetchone()
+        if r is None:
+            raise LedgerError(f"dividend {action_id} isn't owed")
+        amount = D(r[3])
+        event = c.execute("INSERT INTO cash_events(ts,day,kind,asset,qty,amount,note) VALUES(?,?,?,?,?,?,?)",
+                          (now, pay_day.isoformat(), "dividend", r[0], r[2], str(amount),
+                           f"{r[1]} {action_id}")).lastrowid
+        c.execute("UPDATE account SET cash=? WHERE id=1", (str(self.cash() + amount),))
+        c.execute("UPDATE dividends SET status='paid', cash_event_id=? WHERE action_id=?", (event, action_id))
+        return amount
+
+    def cancel_dividend(self, action_id: str) -> Decimal:
+        """Drop an owed dividend whose action was withdrawn. Returns what was owed."""
+        self._in_tx("cancel_dividend")
+        r = self.store.conn.execute("SELECT amount FROM dividends WHERE action_id=? AND status='owed'",
+                                    (action_id,)).fetchone()
+        if r is None:
+            raise LedgerError(f"dividend {action_id} isn't owed")
+        self.store.conn.execute("UPDATE dividends SET status='cancelled' WHERE action_id=?", (action_id,))
+        return D(r[0])
+
     # -- audit ----------------------------------------------------------------------------
     def check(self) -> List[str]:
         """Rebuild cash, fees, realized P&L, every lot and every position from the event log
-        (cash events, then fills in order) and compare them to the stored rows.
+        (cash events, then fills in order, with each split's lot adjustments replayed right
+        after the fill it followed) and compare them to the stored rows.
 
         Also verifies the FIFO discipline: each SELL must consume the oldest open lots, in
-        order, fully except possibly the last.
+        order, fully except possibly the last; and that every dividend paid is one cash
+        event of exactly the amount owed.
         """
         c = self.store.conn
         problems: List[str] = []
@@ -481,6 +627,28 @@ class Ledger:
         if init_lots != in_kind:
             problems.append(f"init lots {init_lots} != deposit_in_kind events {in_kind}")
 
+        # Split adjustments, by the fill they came after (0: before any fill).
+        splits: Dict[int, list] = {}
+        for lid, after_fill, before, after in c.execute(
+                "SELECT a.lot_id, e.after_fill, a.qty_before, a.qty_after FROM lot_adjustments a "
+                "LEFT JOIN corporate_entries e ON e.action_id=a.action_id ORDER BY a.id"):
+            if after_fill is None:
+                problems.append(f"lot {lid} adjusted by a split that has no corporate entry")
+                continue
+            splits.setdefault(after_fill, []).append((lid, D(before), D(after)))
+
+        def replay_splits(after_fill: int) -> None:
+            for lid, before, after in splits.pop(after_fill, []):
+                if lid not in rem or rem[lid][0] <= 0:
+                    problems.append(f"lot {lid} adjusted by a split while it wasn't open")
+                elif rem[lid][0] != before:
+                    problems.append(f"lot {lid}: a split adjusted {before} shares, the replay holds {rem[lid][0]}")
+                elif after <= 0:
+                    problems.append(f"lot {lid}: a split left {after} shares")
+                else:
+                    rem[lid][0] = after
+
+        replay_splits(0)
         closures: Dict[int, list] = {}
         realized_all = ZERO
         for row in c.execute("SELECT id,lot_id,fill_id,qty,proceeds,cost,realized FROM lot_closures ORDER BY id"):
@@ -507,6 +675,7 @@ class Ledger:
                     rem[lid] = [D(r[5]), D(r[6])]
                 if mine:
                     problems.append(f"BUY fill {fid} has lot closures")
+                replay_splits(fid)
                 continue
             cash += notional - fee
             if opened:
@@ -530,10 +699,13 @@ class Ledger:
                     problems.append(f"lot {lid}: fully consumed but cost {ccost} != remaining {rem[lid][1]}")
                 rem[lid][0] -= cq
                 rem[lid][1] -= ccost
+            replay_splits(fid)
         for fid in by_open_fill:
             problems.append(f"lots opened by unknown fill {fid}")
         for fid in closures:
             problems.append(f"closures on unknown fill {fid}")
+        for fid in splits:
+            problems.append(f"split adjustments after unknown fill {fid}")
 
         held: Dict[str, List[Decimal]] = {}
         for lid, r in lots.items():
@@ -560,6 +732,7 @@ class Ledger:
         if acct["cash"] < 0:
             problems.append(f"negative cash {acct['cash']}")
         problems += self._check_fee_accruals()
+        problems += self._check_dividends()
         fees += sum((-D(r[0]) for r in c.execute("SELECT amount FROM cash_events WHERE kind='fee'")), ZERO)
         if fees != acct["fees"]:
             problems.append(f"fees {acct['fees']} != replayed {fees}")
@@ -600,6 +773,31 @@ class Ledger:
         for day, total in zero_days.items():
             if total != 0:
                 problems.append(f"{day}: fees of {total} marked charged without a charge")
+        return problems
+
+    def _check_dividends(self) -> List[str]:
+        """Each dividend is its shares x rate; each paid one is exactly one 'dividend' cash
+        event of that amount for that symbol; no dividend event pays nothing."""
+        c = self.store.conn
+        problems: List[str] = []
+        events = {r[0]: (r[1], D(r[2])) for r in c.execute(
+            "SELECT id, asset, amount FROM cash_events WHERE kind='dividend'")}
+        used: set = set()
+        for aid, sym, q, rate, amount, status, event in c.execute(
+                "SELECT action_id,symbol,qty,rate,amount,status,cash_event_id FROM dividends ORDER BY action_id"):
+            if D(amount) <= 0 or usd(D(q) * D(rate)) != D(amount):
+                problems.append(f"dividend {aid}: {amount} isn't {q} shares x {rate}")
+            if status != "paid":
+                if event is not None:
+                    problems.append(f"dividend {aid} is {status} but points at cash event {event}")
+                continue
+            if events.get(event) != (sym, D(amount)):
+                problems.append(f"dividend {aid}: owes {amount} on {sym}, cash event {event} is {events.get(event)}")
+            if event in used:
+                problems.append(f"cash event {event} pays two dividends")
+            used.add(event)
+        for eid in sorted(set(events) - used):
+            problems.append(f"dividend cash event {eid} pays no dividend")
         return problems
 
     def fills(self, limit: int = 50) -> List[Dict[str, str]]:

@@ -10,7 +10,7 @@ import pytest
 from ottr.broker.base import round_against_us
 from ottr.ledger.book import Position, Valuation
 from ottr.risk import gate, monitor
-from ottr.risk.types import Intent
+from ottr.risk.types import PROTECTIVE, Intent
 from ottr.universe import SUNSET, Member
 from tests.conftest import quote
 from tests.fakes import OPEN, et
@@ -161,9 +161,17 @@ def test_whole_share_sales_round_to_the_nearest_share_not_to_a_full_exit(cfg, he
 def test_a_small_protective_sale_is_never_refused_but_a_small_council_one_is(cfg):
     c = ctx(cfg, side="SELL", position=pos(q="10", cost="900"))         # $900 held
     assert gate.evaluate(sell(fraction=0.08), c).reason == "below_min_trade"           # $72 council sale
-    for origin in ("stop", "trim", "derisk"):
+    for origin in PROTECTIVE:
         v = gate.evaluate(sell(fraction=0.08, origin=origin), c)
         assert v.approved and v.quantity == Decimal("0.8")
+
+
+def test_an_unapplied_corporate_action_defers_the_order(cfg):
+    behind = "forward split effective 2026-10-21 not applied to the book yet"
+    for intent, c in ((buy(), ctx(cfg, unapplied=behind)),
+                      (sell(), ctx(cfg, side="SELL", position=pos(), unapplied=behind))):
+        v = gate.evaluate(intent, c)
+        assert (v.approved, v.reason, v.notes) == (False, "corporate_action_unapplied", (behind,))
 
 
 def test_a_sell_needs_a_position(cfg):

@@ -280,6 +280,7 @@ async def get_book(request: web.Request) -> web.Response:
         lg = Ledger(ctx.reader)
         _require_book(lg)
         acct = lg.account()
+        owed = lg.receivable()
         rows, v = _position_rows(ctx, lg, marks, now)
         risk = RiskState.from_dict(ctx.reader.get_state("risk"))
         base = ctx.reader.get_state(BENCH_BASE)
@@ -296,6 +297,7 @@ async def get_book(request: web.Request) -> web.Response:
     return ok({
         "as_of": now, "marked": v is not None, "prices_error": perr, "market": ctx.market_state(),
         "equity": v.equity if v else None, "cash": acct["cash"], "invested": invested,
+        "dividends_owed": owed,
         "invested_pct": invested / v.equity if v and v.equity > 0 else None,
         "cost_basis": cost, "unrealized_pnl": invested - float(cost) if v else None,
         "realized_pnl": acct["realized_pnl"], "fees": acct["fees"], "positions": len(rows),

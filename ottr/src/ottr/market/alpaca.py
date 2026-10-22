@@ -328,12 +328,14 @@ class QuoteLimits:
 
 
 def check_quote(symbol: str, snap: Optional[dict], now: float,
-                limits: QuoteLimits = QuoteLimits()) -> Tuple[Optional[Quote], str]:
+                limits: QuoteLimits = QuoteLimits(), split: float = 1.0) -> Tuple[Optional[Quote], str]:
     """A tradeable Quote from a snapshot, or (None, reason). Never repairs a bad quote.
 
     Reasons: no_snapshot, no_quote, one_sided, crossed, too_wide, stale, off_market. The
     Quote's `ts` is the exchange's quote time (not when we fetched it), so staleness is
-    measured against the market, not against our own poll.
+    measured against the market, not against our own poll. `split` is the share multiple
+    of a split effective since the previous close: on its ex-date that close may still be
+    in the old shares, so a move the split explains is not off-market.
     """
     if not snap:
         return None, "no_snapshot"
@@ -360,7 +362,7 @@ def check_quote(symbol: str, snap: Optional[dict], now: float,
             return None, f"off_market ({gap:.1f}% from last trade)"
     prev = float((snap.get("prevDailyBar") or {}).get("c") or 0)
     if prev > 0:
-        gap = abs(mid / prev - 1) * 100
+        gap = min(abs(mid / prev - 1), abs(mid * split / prev - 1)) * 100
         if gap > limits.max_close_gap_pct:
             return None, f"off_market ({gap:.1f}% from previous close)"
     return Quote(asset=normalize(symbol), bid=bid, ask=ask, last=last or mid, ts=qts, source="alpaca",

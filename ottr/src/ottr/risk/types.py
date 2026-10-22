@@ -14,17 +14,20 @@ from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from typing import Tuple
 
-PROTECTIVE = ("stop", "trim", "derisk")
+# Code-originated sells that cut risk: never refused for size, and a BUY decided before
+# one of them fills can't reopen the position. `corp_exit` leaves a holding ahead of a
+# corporate action the book can't model.
+PROTECTIVE = ("stop", "trim", "derisk", "corp_exit")
 # Origins whose size is set by code, not by conviction: the end-of-day cash sweep.
 CODE_SIZED = ("sweep",)
 # Lower runs first: protective exits always jump ahead of new entries; the sweep goes last.
-PRIORITY = {"stop": 0, "derisk": 1, "trim": 1, "operator": 2, "council_sell": 3, "council_buy": 5,
+PRIORITY = {"stop": 0, "derisk": 1, "trim": 1, "corp_exit": 1, "operator": 2, "council_sell": 3, "council_buy": 5,
             "sweep": 6}
 
 
 @dataclass(frozen=True)
 class Intent:
-    origin: str                 # council | stop | trim | derisk | operator | sweep
+    origin: str                 # council | stop | trim | derisk | corp_exit | operator | sweep
     asset: str
     side: str                   # BUY | SELL
     idem_key: str

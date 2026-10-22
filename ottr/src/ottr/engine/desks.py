@@ -24,7 +24,8 @@ from ottr.broker.account import buying_power
 from ottr.broker.base import Order
 from ottr.broker.sim import SimBroker
 from ottr.clock import SYSTEM, Clock
-from ottr.ledger.book import Fill, Ledger
+from ottr.ledger import corporate
+from ottr.ledger.book import Fill, Ledger, trade_day
 from ottr.ledger.store import Store
 from ottr.market.calendar import TradingCalendar
 from ottr.market.types import Quote
@@ -81,7 +82,7 @@ class Events(Protocol):
 
 class Desk:
     transient = ("market_closed", "no_quote", "book_unmarkable", "market_data_error",
-                 "limit_not_marketable", "needs_cash")
+                 "limit_not_marketable", "needs_cash", "corporate_action_unapplied")
 
     def __init__(self, cfg, store: Store, ledger: Ledger, market: Market, broker: SimBroker,
                  members: Mapping[str, Member], events: Events, clock: Clock = SYSTEM) -> None:
@@ -104,6 +105,10 @@ class Desk:
                          if self.members.get(a) is None or self.members[a].asset_class == gate.STOCK)
         vol, regime = await self.market.vol_regime(intent.asset)
         st, hit = risk_flags(self.store, intent)
+        behind = corporate.unapplied(self.store, trade_day(now))
+        unapplied = behind.get(intent.asset)
+        if unapplied is None and intent.side == "BUY":
+            unapplied = next((f"{s}: {why}" for s, why in sorted(behind.items()) if s in positions), None)
         return gate.GateContext(
             cfg=self.cfg, now=now, market=cal.state_at(now), member=member,
             quote=quote, quote_problem=problem,
@@ -113,7 +118,8 @@ class Desk:
             cash_etf_value=values.get(cash_symbol, 0.0), satellites_value=satellites,
             earnings_sessions=self.events.earnings_sessions(intent.asset, now),
             corp_action=self.events.corp_action(intent.asset, now),
-            halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0), risk_event_since_intent=hit)
+            halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0), risk_event_since_intent=hit,
+            unapplied=unapplied)
 
     def evaluate(self, intent: Intent, ctx: gate.GateContext) -> Verdict:
         return gate.evaluate(intent, ctx)

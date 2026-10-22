@@ -2,7 +2,9 @@
 Pre-trade gate: turns an Intent into an exact order Verdict for a US equity. Pure.
 
 What it does, for every order: a council decision must still be fresh, the market must be
-in its regular session, and the quote must have passed the data layer's sanity check.
+in its regular session, the quote must have passed the data layer's sanity check, and the
+book must be current for the asset (a corporate action in effect but not yet applied
+defers it; for a BUY, one on any holding does, since equity is wrong until then).
 A SELL then needs only a position: limits exist to stop risk going up, never down, and a
 symbol that left the universe can always be sold. A BUY must also:
 - be for an active member (not a sunset one being sold off);
@@ -62,6 +64,7 @@ class GateContext:
     halted: bool = False
     cooldown_until: float = 0.0
     risk_event_since_intent: bool = False
+    unapplied: Optional[str] = None           # a corporate action in effect the book hasn't applied
 
 
 def target_weight(cfg, symbol: str, asset_class: str, vol: Optional[float], regime: str,
@@ -88,6 +91,8 @@ def evaluate(intent: Intent, ctx: GateContext) -> Verdict:
         return Verdict.reject(intent, "market_closed", ctx.market.state.value)
     if ctx.quote is None or ctx.limit_price is None:
         return Verdict.reject(intent, "no_quote", ctx.quote_problem or "no quote")
+    if ctx.unapplied:
+        return Verdict.reject(intent, "corporate_action_unapplied", ctx.unapplied)
     if intent.side == "SELL":
         return _sell(intent, ctx)
     if intent.side == "BUY":

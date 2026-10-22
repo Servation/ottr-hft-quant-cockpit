@@ -8,8 +8,9 @@ unhealthy when its last SUCCESS (not just its last report) is older than 3x its 
 because a task that fails every tick still writes a heartbeat. The council is judged by its
 schedule instead: the newest meeting slot that has passed (plus time to finish) must have a
 successful meeting after it. A stale corporate-actions or earnings feed is an alarm too,
-since it blocks the BUYs it guards. The Watchdog adds clear-hysteresis on top so a value
-hovering at a threshold can't raise and resolve an alarm every minute.
+since it blocks the BUYs it guards, and so is a corporate action the book hasn't applied
+or can't model. The Watchdog adds clear-hysteresis on top so a value hovering at a
+threshold can't raise and resolve an alarm every minute.
 
 Why one module: v1 died for three months unnoticed. Every observer must agree on what
 "stale" means, and the in-engine watchdog and the external `ottr status` both need it
@@ -203,6 +204,15 @@ def feed_alarms(cfg: Config, store: Store, now: float, epoch: Optional[float]) -
     return out
 
 
+def corporate_alarms(store: Store, now: float) -> List[Alarm]:
+    """Corporate actions that need a person: one in effect the book hasn't applied, a
+    holding facing (or carried through) one the book can't model, or one applied and then
+    withdrawn or changed by the source. See `ledger/corporate.problems`."""
+    from ottr.ledger import corporate
+    return [Alarm(key, CRITICAL if critical else WARNING, message)
+            for key, critical, message in corporate.problems(store, now)]
+
+
 def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_engine: bool,
              epoch: Optional[float] = None, extra: Iterable[Alarm] = ()) -> HealthReport:
     """Point-in-time health. Inside the engine the caller passes its own epoch; outside,
@@ -243,6 +253,7 @@ def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_e
                                     f"{fmt_age(now - oldest)}: no live quote, so trailing stops and "
                                     "trims are not enforced"))
         alarms += feed_alarms(cfg, store, now, epoch)
+        alarms += corporate_alarms(store, now)
 
     problems: List[str] = []
     lg = Ledger(store)

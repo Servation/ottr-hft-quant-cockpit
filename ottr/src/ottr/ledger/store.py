@@ -128,9 +128,33 @@ CREATE TABLE IF NOT EXISTS macro_obs (
 CREATE TABLE IF NOT EXISTS earnings (
     symbol TEXT NOT NULL, day TEXT NOT NULL, time_of_day TEXT NOT NULL, fiscal_end TEXT,
     estimate REAL, fetched_ts REAL NOT NULL, PRIMARY KEY (symbol, day));
+-- What the ledger did about each corporate action (by its corporate_actions id), written
+-- once, when the action takes effect, so none is applied twice. `outcome`: applied (shares
+-- or cash moved), owed (a dividend now receivable), not_held, or unmodeled (held through an
+-- action the ledger can't follow). `qty` is the holding it acted on; `after_fill` is the
+-- newest fill id when it ran, which places its lot adjustments in the fill sequence for
+-- `Ledger.check`. `detail` keeps the rate or ratio, which also restates the last close.
+CREATE TABLE IF NOT EXISTS corporate_entries (
+    action_id TEXT PRIMARY KEY, kind TEXT NOT NULL, symbol TEXT NOT NULL, day TEXT NOT NULL,
+    ts REAL NOT NULL, outcome TEXT NOT NULL, qty TEXT NOT NULL, after_fill INTEGER NOT NULL,
+    detail TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS corporate_entries_symbol ON corporate_entries (symbol, day);
+-- A split's effect on each open lot: its remaining shares before and after (the cost and
+-- the holding period don't change).
+CREATE TABLE IF NOT EXISTS lot_adjustments (
+    id INTEGER PRIMARY KEY, action_id TEXT NOT NULL REFERENCES corporate_entries(action_id),
+    lot_id INTEGER NOT NULL REFERENCES lots(id), qty_before TEXT NOT NULL, qty_after TEXT NOT NULL);
+-- Cash dividends and capital gains distributions on the shares held into the ex-date: owed
+-- (a receivable, counted in equity) from the ex-date, paid as a 'dividend' cash event on
+-- the pay date, or cancelled if the action is withdrawn first.
+CREATE TABLE IF NOT EXISTS dividends (
+    action_id TEXT PRIMARY KEY REFERENCES corporate_entries(action_id), symbol TEXT NOT NULL,
+    kind TEXT NOT NULL, ex_day TEXT NOT NULL, qty TEXT NOT NULL, rate TEXT NOT NULL,
+    amount TEXT NOT NULL, status TEXT NOT NULL CHECK (status IN ('owed','paid','cancelled')),
+    cash_event_id INTEGER REFERENCES cash_events(id));
 -- Corporate actions by Alpaca id, for the symbol whose holders they affect. One that drops
 -- out of the feed (a cancelled deal) is marked withdrawn, never deleted. What the ledger
--- has applied (PR 9) is kept apart, keyed by the same id.
+-- did about each is kept apart, in corporate_entries, keyed by the same id.
 CREATE TABLE IF NOT EXISTS corporate_actions (
     id TEXT PRIMARY KEY, kind TEXT NOT NULL, symbol TEXT NOT NULL, effective_day TEXT,
     process_day TEXT, ex_day TEXT, record_day TEXT, pay_day TEXT, detail TEXT NOT NULL,

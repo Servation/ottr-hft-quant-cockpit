@@ -152,22 +152,30 @@ def _day(s: Optional[str]) -> Optional[date]:
     return date.fromisoformat(s) if s else None
 
 
-def _action(r) -> CorporateAction:
+def action_from_row(r) -> CorporateAction:
+    """A CorporateAction from a corporate_actions row selected as ACTION_COLS."""
     return CorporateAction(id=r[0], kind=r[1], symbol=r[2], effective=_day(r[3]), process=_day(r[4]),
                            ex=_day(r[5]), record=_day(r[6]), pay=_day(r[7]), detail=json.loads(r[8]))
 
 
-_ACTION_COLS = "id,kind,symbol,effective_day,process_day,ex_day,record_day,pay_day,detail"
+ACTION_COLS = "id,kind,symbol,effective_day,process_day,ex_day,record_day,pay_day,detail"
+
+
+def get_action(store: Store, action_id: str) -> Optional[Tuple[CorporateAction, Optional[float]]]:
+    """An action by id as stored now, and when it was withdrawn (None: still live)."""
+    r = store.conn.execute(f"SELECT {ACTION_COLS}, withdrawn_ts FROM corporate_actions WHERE id=?",
+                           (action_id,)).fetchone()
+    return (action_from_row(r), r[9]) if r else None
 
 
 def actions_for(store: Store, symbol: str, since: Optional[date] = None) -> List[CorporateAction]:
     """Live (not withdrawn) actions for `symbol` booked on or after `since`, or with no
     process date, ordered by effective date."""
     rows = store.conn.execute(
-        f"SELECT {_ACTION_COLS} FROM corporate_actions WHERE symbol=? AND withdrawn_ts IS NULL "
+        f"SELECT {ACTION_COLS} FROM corporate_actions WHERE symbol=? AND withdrawn_ts IS NULL "
         "AND (process_day IS NULL OR process_day>=?) ORDER BY effective_day, id",
         (symbol, (since or date.min).isoformat()))
-    return [_action(r) for r in rows]
+    return [action_from_row(r) for r in rows]
 
 
 def pending_actions(store: Store, symbol: str, today: date) -> List[CorporateAction]:

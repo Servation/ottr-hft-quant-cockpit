@@ -6,10 +6,12 @@ What it does: core tasks run on fixed cadences (so `health.task_health` stays me
 and branch on the session, because nights, weekends and holidays are normal states:
 - market (60s): the calendar and asset records (daily), the daily bars (after each close)
   and, in session, proof that live quotes are arriving.
-- jobs (60s): the close-of-day fee charge, the cash sweep before the close, the events
-  feeds that are due, and, in session, retries of orders deferred by a bad quote or a
-  closed market.
-- risk (60s): the protective monitor, in session only (a stop needs a live bid to sell at).
+- jobs (60s): corporate actions in effect (dividends owed and paid, splits, cash
+  mergers; also once at start-up, before any task reads the book), the close-of-day fee
+  charge, the cash sweep before the close, the events feeds that are due, and, in
+  session, retries of orders deferred by a bad quote or a closed market.
+- risk (60s): the protective monitor, in session only (a stop needs a live bid to sell at),
+  including the exit from a holding ahead of a corporate action the book can't model.
 - equity (15m): a point in session, and one at each close, with the SPY and 60/40
   benchmarks measured from the first close after the book opened.
 - council: meetings at the configured New York times on trading days.
@@ -46,7 +48,8 @@ from ottr.engine.jobs import close_of_day, sweep_intent
 from ottr.engine.killswitch import KillSwitch
 from ottr.engine.progress import MeetingProgress
 from ottr.events.refresh import Sources, refresh_due
-from ottr.events.view import StoredEvents, macro_readings
+from ottr.events.view import FEED_CORPORATE, StoredEvents, macro_readings
+from ottr.ledger import corporate
 from ottr.ledger.book import Ledger, trade_day
 from ottr.ledger.marks import SIP_FINAL_AFTER_SEC
 from ottr.ledger.store import Store, dumps
@@ -154,6 +157,9 @@ class Engine:
             ca = self.events.corp_action(s, now)
             if ca:
                 out[s] = ca
+        for s, why in corporate.unapplied(self.store, trade_day(now)).items():
+            if s in self.members:
+                out.setdefault(s, why)
         return out
 
     # -- market ------------------------------------------------------------------------------
@@ -186,6 +192,28 @@ class Engine:
             raise MarketDataError("; ".join(problems))
         return detail
 
+    # -- corporate actions -------------------------------------------------------------------
+    def _fractionable(self, symbol: str) -> bool:
+        """Whether the broker keeps fractional shares of `symbol`: a member's flag, else its
+        stored asset record. Unknown counts as whole shares only (a fraction is paid out)."""
+        m = self.members.get(symbol)
+        if m is not None:
+            return m.fractionable
+        rec = ((self.store.get_state("assets") or {}).get("assets") or {}).get(symbol) or {}
+        return bool(rec.get("fractionable"))
+
+    def _close_before(self, symbol: str, day) -> Optional[float]:
+        done = [b for b in self.market.raw_bars(symbol, since=day - timedelta(days=10)) if b.day < day]
+        return done[-1].close if done else None
+
+    def apply_corporate_actions(self) -> corporate.Applied:
+        """Book the corporate actions in effect and settle the dividends owed. Each holding
+        it changed is announced; what couldn't be applied is alarmed by health."""
+        res = corporate.apply_due(self.store, self.clock.time(), self._fractionable, self._close_before)
+        for symbol, note in res.notes:
+            self.alerts.event("corporate_action", {"symbol": symbol, "note": note})
+        return res
+
     # -- jobs --------------------------------------------------------------------------------
     async def jobs_tick(self) -> str:
         """The day's scheduled work. Events feeds that fail are recorded in `feeds` (and
@@ -193,6 +221,7 @@ class Engine:
         now = self.clock.time()
         cal = self.market.calendar
         notes: List[str] = []
+        ca = self.apply_corporate_actions()
         for day, amount in close_of_day(self.ledger, cal, now):
             logger.info("regulatory fees for %s charged: $%s", day, amount)
             self.store.audit("fees_charged", day=str(day), amount=str(amount))
@@ -208,6 +237,15 @@ class Engine:
         held = set(self.ledger.positions())
         for r in await refresh_due(self.cfg, self.store, self.sources, sorted(set(self.members) | held), now):
             notes.append(f"{r.feed} refreshed" if r.ok else f"{r.feed} feed: {r.detail}")
+            if r.ok and r.feed == FEED_CORPORATE:
+                # An action that arrives already in effect is booked now, not a tick later.
+                more = self.apply_corporate_actions()
+                ca.notes.extend(more.notes)
+                ca.failed = more.failed
+        if ca.notes:
+            notes.append(f"{len(ca.notes)} corporate action update(s)")
+        if ca.failed:
+            notes.append(f"{len(ca.failed)} corporate action(s) not applied")
         return "; ".join(notes) or "nothing due"
 
     async def _retry_deferred(self) -> int:
@@ -262,6 +300,8 @@ class Engine:
             return f"the open: stops wait until {_et(start, '%H:%M')} ET"
         await self._ensure_stops()
         positions = self.ledger.positions()
+        behind = corporate.unapplied(self.store, mt.session.day)
+        current = {s: p for s, p in positions.items() if s not in behind}
         cash_symbol = self.cfg.universe.cash_symbol
         try:
             quotes = await self.market.live_quotes()
@@ -270,16 +310,21 @@ class Engine:
             # No quotes at all: every holding is unprotected, which the watchdog must see.
             self.store.set_state("risk_blind", self._blind_state(set(positions) - {cash_symbol}, now))
             raise
-        valuation = self.ledger.value(marks)
+        # A holding whose corporate action isn't applied yet has shares or cash that aren't
+        # current: no stop on it, and no trim or breaker decision on equity until it is.
+        valuation = self.ledger.value(marks) if len(current) == len(positions) else None
         state = RiskState.from_dict(self.store.get_state("risk"))
         points = self.store.conn.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
         prev_close = {}
-        for s in positions:
+        for s in current:
             done = [b for b in self.market.raw_bars(s, since=mt.session.day - timedelta(days=10))
                     if b.day < mt.session.day]
             if done:
-                prev_close[s] = done[-1].close
-        res = monitor.check(self.cfg, now, positions, valuation, quotes, state, points, self.classes(), prev_close)
+                changes = corporate.restatements(self.store, [s], done[-1].day).get(s, [])
+                prev_close[s] = corporate.restate(done[-1].close, changes)
+        exits = corporate.exits_due(self.store, self.market.calendar, mt.session.day, current)
+        res = monitor.check(self.cfg, now, current, valuation, quotes, state, points, self.classes(), prev_close,
+                            exits)
         blind = self._blind_state({d["asset"] for k, d in res.events if k == "risk_blind"}, now)
         with self.store.tx():
             for a, h in res.high_water.items():
@@ -307,6 +352,10 @@ class Engine:
             last = self.store.conn.execute("SELECT MAX(ts) FROM equity").fetchone()[0]
             if final is None or (last is not None and last >= final.close_ts + SIP_FINAL_AFTER_SEC):
                 return "market closed; the last close is recorded"
+        behind = sorted(s for s in corporate.unapplied(self.store, trade_day(now)) if s in self.ledger.positions())
+        if behind:
+            raise MarketDataError(f"a corporate action on {', '.join(behind)} isn't applied yet; equity unknown "
+                                  "(not recorded)")
         marks = await self.market.marks()
         v = self.ledger.value(marks)
         if v is None:
@@ -319,8 +368,10 @@ class Engine:
             self.store.set_state(BENCH_BASE, base)
             logger.info("benchmarks start from the %s close at $%.2f", final.day, v.equity)
         bench = await self.market.benchmarks(base)
-        self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"],
-                              {"weights": v.weights, "basis": {s: m.basis for s, m in marks.items()}})
+        detail = {"weights": v.weights, "basis": {s: m.basis for s, m in marks.items()}}
+        if v.receivable:
+            detail["receivable"] = v.receivable
+        self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail)
         return f"equity ${v.equity:,.2f}"
 
     # -- council -----------------------------------------------------------------------------
@@ -340,7 +391,8 @@ class Engine:
             risky = v.invested - cash_etf
             stocks = sum(x for s, x in v.values.items() if self.members.get(s) is None
                          or self.members[s].asset_class == gate.STOCK)
-            lines.append(f"  equity ${v.equity:,.2f} | cash ${v.cash:,.2f}, buying power ${float(bp):,.2f} | "
+            owed = f", dividends owed ${v.receivable:,.2f}" if v.receivable else ""
+            lines.append(f"  equity ${v.equity:,.2f} | cash ${v.cash:,.2f}{owed}, buying power ${float(bp):,.2f} | "
                          f"in {u.cash_symbol} (swept cash) ${cash_etf:,.2f} | invested {risky / v.equity * 100:.1f}% "
                          f"of equity (max {cfg.trading.max_gross_pct:.0f}%) | single stocks {stocks / v.equity * 100:.1f}% "
                          f"(sleeve max {u.sleeve_pct:.0f}%)")
@@ -662,6 +714,12 @@ class Engine:
                     await self.market.refresh_calendar()
                 except MarketDataError as err:
                     logger.warning("no calendar at start-up (%s); the market task keeps trying", err)
+                try:
+                    # Before any task reads the book: a split or dividend that took effect
+                    # while the engine was down is booked first.
+                    self.apply_corporate_actions()
+                except Exception:
+                    logger.exception("corporate actions at start-up; the jobs task keeps trying")
                 core = [
                     asyncio.create_task(self.executor.run(), name="executor"),
                     asyncio.create_task(self._every("market", e.market_interval_sec, self.market_tick), name="market"),

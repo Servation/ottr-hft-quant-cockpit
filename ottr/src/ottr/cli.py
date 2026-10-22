@@ -39,6 +39,7 @@ from ottr import health
 from ottr.engine.engine import Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.events.refresh import Sources
+from ottr.ledger import corporate
 from ottr.ledger.book import Ledger
 from ottr.ledger.marks import mark
 from ottr.ledger.store import LockError, SchemaError, Store
@@ -132,6 +133,8 @@ async def _marks(cfg, store: Store) -> Tuple[Dict[str, Quote], Optional[str]]:
     except Exception as e:
         return {}, str(e)
     out = {s: m for s in held if (m := mark(s, mt, None, None, raw_bars(store, s))) is not None}
+    if not mt.is_open and mt.last_close is not None:
+        out = corporate.restate_marks(store, out, mt.last_close.day)
     return out, None if len(out) == len(held) else "live prices need the Alpaca keys"
 
 
@@ -140,7 +143,8 @@ def _print_book(store: Store, marks: Dict[str, Quote]) -> None:
     v = lg.value(marks)
     acct = lg.account()
     if v:
-        print(f"equity ${v.equity:,.2f}  cash ${v.cash:,.2f}  invested ${v.invested:,.2f}  "
+        owed = f"  dividends owed ${v.receivable:,.2f}" if v.receivable else ""
+        print(f"equity ${v.equity:,.2f}  cash ${v.cash:,.2f}  invested ${v.invested:,.2f}{owed}  "
               f"realized ${float(acct['realized_pnl']):+,.2f}  fees ${float(acct['fees']):,.2f}")
     else:
         print(f"equity unknown (a holding has no price)  cash ${float(acct['cash']):,.2f}  "
