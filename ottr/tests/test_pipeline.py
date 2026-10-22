@@ -12,6 +12,7 @@ benchmarks; and a clean stop.
 
 import asyncio
 import dataclasses
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -219,3 +220,101 @@ async def test_the_engine_stops_cleanly_on_a_stop_event(cfg, store, ledger, rig)
     asyncio.get_running_loop().call_later(0.3, stop.set)
     assert await asyncio.wait_for(eng.run(stop), timeout=10) == 0
     assert "engine_stop" in [a["kind"] for a in store.audits()]
+
+
+# -- PR 8: the protective monitor in the engine -----------------------------------------------------
+async def test_stops_and_trims_wait_out_the_opening_auction(cfg, store, ledger, rig):
+    rig.at(et(2026, 10, 21, 9, 32))
+    assert await engine(cfg, store, rig).risk_tick() == "the open: stops wait until 09:35 ET"
+
+
+async def test_the_opening_buy_sets_the_stop_and_an_add_keeps_it(cfg, store, ledger, rig):
+    from ottr.risk.monitor import entry_stop_pct
+    eng = engine(cfg, store, rig)
+    await eng.refresh_members()                                         # Alpaca's fractional-share flags
+    ex = eng.executor
+    await ex.process(buy(conviction=0.4, key="open"))
+    vol, _ = await rig.market.vol_regime("TLT")
+    first = ledger.positions()["TLT"].stop_pct
+    assert first == pytest.approx(entry_stop_pct(cfg.risk, vol)) and 0.03 <= first <= 0.15
+    store.conn.execute("UPDATE adj_closes SET close = close * (1 + (rowid % 2) * 0.05) WHERE symbol='TLT'")
+    await ex.process(buy(conviction=1.0, key="add"))                        # an add, at a different vol
+    assert ledger.positions()["TLT"].stop_pct == first
+    await ex.process(Intent(origin="sweep", asset="SGOV", side="BUY", usd=500.0, idem_key="sw", created_ts=OPEN))
+    assert ledger.positions()["SGOV"].stop_pct is None                     # swept cash has no stop
+
+
+async def test_a_breached_stop_sells_the_position_at_the_bid(cfg, store, ledger, rig):
+    eng = engine(cfg, store, rig)
+    await eng.executor.process(buy())
+    stop = ledger.positions()["TLT"].stop_price
+    p = round(stop * 0.99, 2)
+    rig.fake.add_quote("TLT", p, p + 0.02, age=2)
+    rig.market._snaps_ts = 0
+    res = await eng.risk_tick()
+    assert [i.origin for i in res.intents] == ["stop"] and res.summary() == "stop TLT"
+    await eng.executor.drain()
+    sell = store.conn.execute("SELECT price, origin FROM fills WHERE side='SELL'").fetchone()
+    assert (float(sell[0]), sell[1]) == (p, "stop") and "TLT" not in ledger.positions()
+
+
+async def test_a_gap_through_the_stop_is_flagged_audited_and_posted(cfg, store, ledger, rig):
+    from ottr.config import Alerts as Limits
+    from ottr.notify import Alerts
+    posts = []
+
+    async def hook(text):
+        posts.append(text)
+        return True
+
+    eng = Engine(cfg, store, rig.market, alerts=Alerts(hook, Limits()), clock=rig.clock)
+    await eng.executor.process(buy())
+    stop = ledger.positions()["TLT"].stop_price
+    rig.at(et(2026, 10, 22, 9, 36))                                      # next morning: Wed closed above the stop
+    from ottr.market.types import Bar
+    from ottr.market import history
+    history.save_bars(store, {"TLT": [Bar(date(2026, 10, 21), stop * 1.03, stop * 1.04, stop * 1.02, stop * 1.03, 1)]})
+    gapped = round(stop * 0.95, 2)
+    rig.fake.add_quote("TLT", gapped, gapped + 0.02, age=2)
+    rig.market._snaps_ts = 0
+    await eng.risk_tick()
+    gap = store.audits("risk_gap")
+    assert gap and gap[0]["asset"] == "TLT" and gap[0]["close"] == pytest.approx(stop * 1.03)
+    while not eng.alerts.queue.empty():
+        posts.append(eng.alerts.queue.get_nowait())
+    assert any(p.startswith("**TLT gapped through its stop**") for p in posts)
+
+
+async def test_the_breakers_sale_survives_the_night(cfg, store, ledger, rig):
+    eng = engine(cfg, store, rig)
+    await eng.refresh_members()                                         # fractional TLT: a 25% sale is exact
+    await eng.executor.process(buy())
+    for i in range(cfg.risk.min_equity_points):
+        store.add_equity(OPEN - 3600 + i, 10000.0, 0, 0, None, None, {})
+    store.set_state("risk", {"peak_equity": 20000.0})                    # equity is half the peak
+    p = rig.price("TLT")
+    rig.fake.add_quote("TLT", p * 0.97, p * 1.03, age=2)                 # no usable quote: the sale defers...
+    rig.fake.add_minute_bar("TLT", OPEN - 20 * 60, p)                    # ...but a delayed print still values the book
+    rig.market._snaps_ts = 0
+    await eng.risk_tick()
+    await eng.executor.drain()
+    assert store.get_state("risk")["halted"] and store.get_state("risk")["derisk"] == ["TLT"]
+    key = store.conn.execute("SELECT idem_key, status FROM orders WHERE origin='derisk'").fetchone()
+    assert key[1] == "deferred"
+    qty_before = ledger.positions()["TLT"].qty
+    rig.at(et(2026, 10, 22, 9, 40))                                      # the next morning, a sane quote
+    await eng.risk_tick()
+    await eng.executor.drain()
+    assert store.conn.execute("SELECT status FROM orders WHERE idem_key=?", (key[0],)).fetchone()[0] == "filled"
+    assert float(ledger.positions()["TLT"].qty) == pytest.approx(float(qty_before) * 0.75, rel=1e-6)
+    await eng.risk_tick()
+    await eng.executor.drain()                                           # re-issued, answered "duplicate"
+    assert store.conn.execute("SELECT COUNT(*) FROM fills WHERE origin='derisk'").fetchone()[0] == 1
+
+
+async def test_holdings_brought_in_at_init_get_their_stop_at_the_first_check(cfg, store, rig):
+    lg = Ledger(store)
+    lg.initialize(Decimal("9000"), holdings={"GLD": (Decimal("2"), rig.price("GLD"))}, now=OPEN - 7 * 86400)
+    assert lg.positions()["GLD"].stop_pct is None
+    await engine(cfg, store, rig).risk_tick()
+    assert 0.03 <= lg.positions()["GLD"].stop_pct <= 0.15

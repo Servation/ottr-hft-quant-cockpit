@@ -28,7 +28,14 @@ DEFAULT_CONFIG = ROOT / "config.toml"
 @dataclass(frozen=True)
 class Risk:
     enabled: bool = True
-    trailing_stop_pct: float = 10.0
+    # Trailing stop, set once when a position opens: stop_vol_mult x the move the asset's
+    # volatility implies over stop_horizon_sessions, clamped to [stop_min_pct, stop_max_pct].
+    stop_vol_mult: float = 2.0
+    stop_horizon_sessions: int = 10
+    stop_min_pct: float = 3.0
+    stop_max_pct: float = 15.0
+    stop_unknown_vol_pct: float = 10.0    # when the volatility is unknown
+    open_delay_min: float = 5.0           # stops and trims wait this long after the open
     drawdown_halt_pct: float = 15.0
     drawdown_resume_pct: float = 10.0
     drawdown_derisk: bool = True
@@ -229,8 +236,13 @@ def _validate_shared(cfg) -> None:
         raise ConfigError("chat.timeout_sec must be in (0, 600]")
     if ch.enabled and not cfg.api.enabled:
         raise ConfigError("chat.enabled needs api.enabled: the chat bot reads the book through the API")
-    if cfg.risk.drawdown_resume_pct >= cfg.risk.drawdown_halt_pct:
+    r = cfg.risk
+    if r.drawdown_resume_pct >= r.drawdown_halt_pct:
         raise ConfigError("risk.drawdown_resume_pct must be below drawdown_halt_pct")
+    if not 0 < r.stop_min_pct <= r.stop_unknown_vol_pct <= r.stop_max_pct <= 50:
+        raise ConfigError("risk: 0 < stop_min_pct <= stop_unknown_vol_pct <= stop_max_pct <= 50")
+    if r.stop_vol_mult <= 0 or not 1 <= r.stop_horizon_sessions <= 63 or not 0 <= r.open_delay_min <= 60:
+        raise ConfigError("risk: stop_vol_mult > 0, stop_horizon_sessions in 1..63, open_delay_min in 0..60")
     if cfg.council.min_analysts < 1 or cfg.council.min_analysts > len(cfg.council.analysts):
         raise ConfigError("council.min_analysts must be between 1 and the analyst count")
 

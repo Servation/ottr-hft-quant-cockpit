@@ -86,7 +86,10 @@ async def test_positions_carry_marks_and_stop_levels(api):
     (p,) = d["positions"]
     assert p["asset"] == "TLT" and p["class"] == "bond_etf" and float(p["qty"]) > 0
     assert p["bid"] < p["ask"] and p["price_basis"] == "live"
-    assert p["trailing_stop"] == pytest.approx(p["high_water"] * 0.9)
+    from ottr.risk.monitor import entry_stop_pct
+    vol, _ = await eng.market.vol_regime("TLT")
+    assert p["stop_pct"] == pytest.approx(entry_stop_pct(eng.cfg.risk, vol))      # set by the opening BUY
+    assert p["trailing_stop"] == pytest.approx(p["high_water"] * (1 - p["stop_pct"]))
     assert p["cap_pct"] == 25.0 and p["risk_blind_since"] is None
 
 

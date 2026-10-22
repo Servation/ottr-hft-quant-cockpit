@@ -113,8 +113,11 @@ def _positions(ctx: DeskContext) -> List[str]:
     lines = ["POSITIONS (priced live in session, else at a delayed print or the last close; the basis is "
              "given per row):"]
     for r in rows:
-        stop = (f"trailing stop {r['trailing_stop']:,.2f} ({pct(r.get('stop_distance_pct'))} below the price)"
-                if r.get("trailing_stop") is not None else "no stop (swept cash)")
+        if r.get("trailing_stop") is not None:
+            stop = (f"trailing stop {r['trailing_stop']:,.2f} ({pct(r.get('stop_distance_pct'))} below the price; "
+                    f"{pct(r.get('stop_pct'))} under its high)")
+        else:
+            stop = "no stop (swept cash)" if r.get("class") == "cash_etf" else "stop not set yet"
         cap = "uncapped" if r.get("cap_pct") is None else f"cap {r['cap_pct']:g}%"
         lines.append(f"  {r['asset']} ({r.get('class') or 'not a member'}): qty {float(r['qty']):.6g} | value "
                      f"{usd(r.get('value'))} ({pct(r.get('weight'))} of book, {cap}) | price "

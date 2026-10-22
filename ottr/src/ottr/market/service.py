@@ -193,8 +193,8 @@ class MarketData:
             logger.info("no %s bar yet for %s", final.day, ", ".join(missing))
         return n
 
-    def raw_bars(self, symbol: str) -> List[Bar]:
-        return history.raw_bars(self.store, symbol)
+    def raw_bars(self, symbol: str, since=None) -> List[Bar]:
+        return history.raw_bars(self.store, symbol, since)
 
     def adjusted(self, symbol: str) -> List[Tuple]:
         return history.adjusted_closes(self.store, symbol)

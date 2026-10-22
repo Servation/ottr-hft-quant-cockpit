@@ -28,7 +28,7 @@ import json
 import logging
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Union
 
 from ottr import health
@@ -235,12 +235,32 @@ class Engine:
             logger.info("risk monitor can see %s again", a)
         return cur
 
+    async def _ensure_stops(self) -> None:
+        """Give every holding without a stop its entry stop (the BUY that opens a position
+        sets it; holdings brought in at `ottr init` get theirs here, from today's vol)."""
+        for s, p in self.ledger.positions().items():
+            if s == self.cfg.universe.cash_symbol or p.stop_pct is not None:
+                continue
+            vol, _ = await self.market.vol_regime(s)
+            pct = monitor.entry_stop_pct(self.cfg.risk, vol)
+            if self.ledger.set_stop(s, pct):
+                logger.info("stop for %s set at %.1f%% under its high (vol %s)", s, pct * 100,
+                            f"{vol:.0%}" if vol else "unknown")
+
     async def risk_tick(self) -> Union[monitor.MonitorResult, str]:
         """The protective monitor in session (its result), or why it rested (a string)."""
         now = self.clock.time()
-        if not self.market.calendar.state_at(now).is_open:
+        mt = self.market.calendar.state_at(now)
+        if not mt.is_open:
             self.store.set_state("risk_blind", {})  # no market to see: nothing is blind
             return "market closed: stops wait for the open"
+        start = mt.session.open_ts + self.cfg.risk.open_delay_min * 60
+        if now < start:
+            # The opening auction's first prints are noise; a gap is still caught (and sold
+            # at the bid) at the first check after this.
+            self.store.set_state("risk_blind", {})
+            return f"the open: stops wait until {_et(start, '%H:%M')} ET"
+        await self._ensure_stops()
         positions = self.ledger.positions()
         cash_symbol = self.cfg.universe.cash_symbol
         try:
@@ -253,7 +273,13 @@ class Engine:
         valuation = self.ledger.value(marks)
         state = RiskState.from_dict(self.store.get_state("risk"))
         points = self.store.conn.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
-        res = monitor.check(self.cfg, now, positions, valuation, quotes, state, points, self.classes())
+        prev_close = {}
+        for s in positions:
+            done = [b for b in self.market.raw_bars(s, since=mt.session.day - timedelta(days=10))
+                    if b.day < mt.session.day]
+            if done:
+                prev_close[s] = done[-1].close
+        res = monitor.check(self.cfg, now, positions, valuation, quotes, state, points, self.classes(), prev_close)
         blind = self._blind_state({d["asset"] for k, d in res.events if k == "risk_blind"}, now)
         with self.store.tx():
             for a, h in res.high_water.items():

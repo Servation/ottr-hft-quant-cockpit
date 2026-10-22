@@ -244,18 +244,17 @@ def _position_rows(ctx: ApiContext, lg: Ledger, marks: Dict[str, Quote], now: fl
     positions = lg.positions()
     v = lg.value(marks)
     blind = ctx.reader.get_state("risk_blind") or {}
-    stop_pct = ctx.cfg.risk.trailing_stop_pct / 100
     members = ctx.members()
     classes = {s: m["class"] for s, m in members.items()}
     rows = []
     for a, p in positions.items():
         q = marks.get(a)
         value = float(p.qty) * q.bid if q else None
-        stop = None if a == ctx.cfg.universe.cash_symbol else p.high_water * (1 - stop_pct)
+        stop = p.stop_price  # None for the cash ETF, and until a new position's stop is set
         rows.append({
             "asset": a, "class": classes.get(a), "member": a in members,
             "qty": p.qty, "cost": p.cost, "avg_cost": p.avg_cost,
-            "opened_ts": p.opened_ts, "high_water": p.high_water, "trailing_stop": stop,
+            "opened_ts": p.opened_ts, "high_water": p.high_water, "stop_pct": p.stop_pct, "trailing_stop": stop,
             "bid": q.bid if q else None, "ask": q.ask if q else None,
             "price_basis": q.basis if q else None,
             "price_age_sec": round(q.age(now), 1) if q else None,

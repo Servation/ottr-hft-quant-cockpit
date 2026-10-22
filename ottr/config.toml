@@ -128,7 +128,15 @@ source = "Alpaca brokerage fee schedule (Oct 12 2026)"
 
 [risk]
 enabled = true
-trailing_stop_pct = 10.0
+# Trailing stops (ottr/risk/monitor.py), set once when a position opens and never loosened:
+# 2x the move its volatility implies over 10 sessions, clamped to 3%..15%. SPY at 15% vol
+# gets about 6%; a bond ETF the 3% floor; silver the 15% ceiling. The cash ETF has none.
+stop_vol_mult = 2.0
+stop_horizon_sessions = 10
+stop_min_pct = 3.0
+stop_max_pct = 15.0
+stop_unknown_vol_pct = 10.0
+open_delay_min = 5         # stops and trims wait 5 minutes after the open (the opening auction)
 drawdown_halt_pct = 15.0
 drawdown_resume_pct = 10.0
 drawdown_derisk = true
