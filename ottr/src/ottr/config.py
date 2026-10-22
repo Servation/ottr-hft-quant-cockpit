@@ -1,9 +1,12 @@
 """
 Typed configuration: config.toml plus a few env overrides.
 
-What it does: parses config.toml into frozen dataclasses and validates ranges once at
-startup. Why: v1 read loose dict keys all over the code, so a typo silently fell back
-to a default. Here a bad or missing value fails at load time with a clear message.
+What it does: parses config.toml (the US-markets desk: account, universe, sizing, caps,
+fees, schedule, data and events feeds, plus the operational sections) into frozen
+dataclasses and validates ranges once at startup. Why: v1 read loose dict keys all over
+the code, so a typo silently fell back to a default. Here a bad or missing value fails at
+load time with a clear message. Secrets and IDs only ever come from the environment (or
+ottr/.env).
 """
 
 from __future__ import annotations
@@ -23,30 +26,6 @@ DEFAULT_CONFIG = ROOT / "config.toml"
 
 
 @dataclass(frozen=True)
-class Trading:
-    dry_run: bool = False
-    starting_cash: float = 10000.0
-    slippage_pct: float = 0.05
-    fee_pct: float = 0.40
-    min_trade_usd: float = 100.0
-    max_trade_usd: float = 2500.0
-    max_gross_pct: float = 90.0
-    cash_reserve_pct: float = 2.0
-    max_trades_per_meeting: int = 3
-    max_data_age_sec: float = 180.0
-    decision_ttl_sec: float = 900.0
-
-
-@dataclass(frozen=True)
-class Sizing:
-    target_risk_pct: float = 2.0
-    choppy_regime_factor: float = 0.25
-    max_position_pct: float = 50.0
-    missing_vol: float = 1.5
-    min_vol: float = 0.05
-
-
-@dataclass(frozen=True)
 class Risk:
     enabled: bool = True
     trailing_stop_pct: float = 10.0
@@ -61,21 +40,11 @@ class Risk:
 
 
 @dataclass(frozen=True)
-class Market:
-    vol_window_days: int = 30
-    regime_er_window: int = 20
-    regime_er_threshold: float = 0.30
-    spot_ttl_sec: float = 60.0
-    candles_ttl_sec: float = 3600.0
-
-
-@dataclass(frozen=True)
 class Council:
     analysts: List[str] = field(default_factory=lambda: ["claude", "gpt", "gemini"])
     chair: str = "claude"
     min_analysts: int = 2
     timeout_sec: float = 300.0
-    interval_hours: float = 4.0
     claude_model: str = "opus"
     gemini_model: str = "gemini-3.8-flash-high"
     reasoning_effort: str = "high"
@@ -83,6 +52,8 @@ class Council:
 
 @dataclass(frozen=True)
 class Engine:
+    market_interval_sec: float = 60.0  # market data upkeep (calendar, bars, quote health)
+    jobs_interval_sec: float = 60.0    # scheduled jobs: fees, sweep, events feeds, deferred orders
     risk_interval_sec: float = 60.0
     equity_interval_sec: float = 900.0
     watchdog_interval_sec: float = 60.0
@@ -126,51 +97,6 @@ class Chat:
     per_hour: int = 20                 # /ask model calls in any rolling hour
     history_turns: int = 6             # earlier /ask exchanges in the channel replayed into the prompt
     timeout_sec: float = 180.0         # Discord keeps a deferred reply open for 15 min
-
-
-@dataclass(frozen=True)
-class Screen:
-    enabled: bool = True               # daily scan of other Kraken USD pairs; advisory, never traded
-    interval_hours: float = 24.0       # daily candles change once a day
-    min_usd_volume: float = 1_000_000  # 30-day median daily volume, in USD
-    max_spread_pct: float = 0.30       # live bid/ask spread
-    min_history_days: int = 120        # seasoning: skips new listings and their launch pumps
-    max_pairs: int = 60                # most liquid pairs scored after the prefilter (Kraken's rate limit)
-    top_n: int = 5                     # candidates shown to the owner
-    post_to_discord: bool = True       # a short digest after each scan
-
-
-@dataclass(frozen=True)
-class Config:
-    universe: List[str]
-    trading: Trading
-    sizing: Sizing
-    caps: Dict[str, float]
-    risk: Risk
-    market: Market
-    council: Council
-    engine: Engine
-    data_dir: Path
-    alerts: Alerts = field(default_factory=Alerts)
-    api: Api = field(default_factory=Api)
-    chat: Chat = field(default_factory=Chat)
-    screen: Screen = field(default_factory=Screen)
-    pairs: Dict[str, str] = field(default_factory=dict)  # [pairs]: Kraken pair per extra universe asset
-    # Secrets stay out of repr() so a logged or printed Config can't leak them.
-    discord_webhook_url: Optional[str] = field(default=None, repr=False)
-    api_key: Optional[str] = field(default=None, repr=False)  # OTTR_API_KEY: guards the kill switch
-    discord_bot_token: Optional[str] = field(default=None, repr=False)  # DISCORD_BOT_TOKEN: `ottr chat`
-    chat_owner_id: Optional[int] = None          # CEO_DISCORD_ID: the one user chat obeys fully
-    chat_allowed_ids: Tuple[int, ...] = ()       # OTTR_CHAT_ALLOWED_IDS: may read, /ask and /kill
-    chat_guild_id: Optional[int] = None          # DISCORD_GUILD_ID: register commands in one server
-
-    def cap_pct(self, asset: str) -> float:
-        return self.caps.get(asset.upper(), self.caps.get("default", 35.0))
-
-    def kraken_pair(self, asset: str) -> Optional[str]:
-        """The Kraken pair for `asset`: [pairs] first, then the built-in table."""
-        from ottr.market.kraken import PAIRS
-        return self.pairs.get(asset) or PAIRS.get(asset)
 
 
 class ConfigError(ValueError):
@@ -248,58 +174,8 @@ def load_env_file(path: Path) -> List[str]:
     return set_keys
 
 
-def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config:
-    with open(path, "rb") as f:
-        raw = tomllib.load(f)
-
-    trading_raw = dict(raw.get("trading", {}))
-    dry = _env_bool("OTTR_DRY_RUN")
-    if dry is not None:
-        trading_raw["dry_run"] = dry
-    if os.getenv("MAX_TRADE_USD"):
-        trading_raw["max_trade_usd"] = float(os.environ["MAX_TRADE_USD"])
-
-    universe = [str(a).upper().strip() for a in raw.get("universe", [])]
-    if not universe or len(set(universe)) != len(universe):
-        raise ConfigError("universe must be a non-empty list without duplicates")
-
-    caps = {str(k).upper() if k != "default" else "default": float(v)
-            for k, v in raw.get("caps", {}).items()}
-    for k, v in caps.items():
-        if not 0 < v <= 100:
-            raise ConfigError(f"caps.{k} must be in (0, 100]")
-
-    cfg = Config(
-        universe=universe,
-        trading=_section(Trading, trading_raw, "trading"),
-        sizing=_section(Sizing, raw.get("sizing", {}), "sizing"),
-        caps=caps,
-        market=_section(Market, raw.get("market", {}), "market"),
-        screen=_section(Screen, raw.get("screen", {}), "screen"),
-        pairs={str(k).upper().strip(): str(v).strip() for k, v in raw.get("pairs", {}).items()},
-        **_shared_sections(raw),
-        **_runtime(data_dir),
-    )
-    _validate_shared(cfg)
-    sc = cfg.screen
-    if sc.interval_hours <= 0 or sc.min_usd_volume < 0 or not 0 < sc.max_spread_pct <= 5:
-        raise ConfigError("screen.interval_hours must be > 0, min_usd_volume >= 0, max_spread_pct in (0, 5]")
-    if sc.min_history_days < 91 or not 1 <= sc.top_n <= 20 or not 1 <= sc.max_pairs <= 200:
-        # 91: the 90-day trend and correlation need 90 daily returns.
-        raise ConfigError("screen.min_history_days must be >= 91, top_n in 1..20, max_pairs in 1..200")
-    for k, v in cfg.pairs.items():
-        if not k.isalnum() or not v.isalnum():
-            raise ConfigError(f"[pairs] {k} = {v!r}: expected a symbol and a Kraken pair name like NEARUSD")
-    unpriced = [a for a in cfg.universe if not cfg.kraken_pair(a)]
-    if unpriced:
-        # Without a pair an asset would never get a quote: say so here, not as a market alarm.
-        raise ConfigError(f"no Kraken pair for {unpriced}: add them under [pairs], e.g. "
-                          f'{unpriced[0]} = "{unpriced[0]}USD"')
-    return cfg
-
-
 def _shared_sections(raw: dict) -> dict:
-    """The sections both desks share, parsed the same way."""
+    """Operational sections: risk, council, engine, alerts, api, chat."""
     return dict(
         risk=_section(Risk, raw.get("risk", {}), "risk"),
         council=_section(Council, raw.get("council", {}), "council"),
@@ -324,7 +200,7 @@ def _runtime(data_dir: Optional[Path]) -> dict:
 
 
 def _validate_shared(cfg) -> None:
-    """Checks on the shared sections, for either desk's config."""
+    """Checks on the operational sections."""
     if cfg.api.host not in LOOPBACK:
         # The API has no TLS and its reads are unauthenticated: it must never face a network.
         raise ConfigError(f"api.host must be a loopback address {LOOPBACK}, got {cfg.api.host!r}")
@@ -332,7 +208,8 @@ def _validate_shared(cfg) -> None:
         raise ConfigError("api.port must be in 0..65535")
     if cfg.api_key is not None and len(cfg.api_key) < 16:
         raise ConfigError("OTTR_API_KEY must be at least 16 characters")
-    for name in ("risk_interval_sec", "equity_interval_sec", "watchdog_interval_sec"):
+    for name in ("market_interval_sec", "jobs_interval_sec", "risk_interval_sec", "equity_interval_sec",
+                 "watchdog_interval_sec"):
         if getattr(cfg.engine, name) <= 0:
             raise ConfigError(f"engine.{name} must be positive")
     if cfg.alerts.burst < 1 or cfg.alerts.per_hour <= 0:
@@ -358,14 +235,9 @@ def _validate_shared(cfg) -> None:
         raise ConfigError("council.min_analysts must be between 1 and the analyst count")
 
 
-# -- US-markets desk (config.us.toml) -------------------------------------------------------
-# Loaded by load_us(). At the cutover this becomes the only config and the crypto Config
-# above is retired; until then the two live side by side so the running engine is unaffected.
-
-US_CONFIG = ROOT / "config.us.toml"
 REQUIRED_FEES = ("sec", "taf", "cat")   # the pass-through fees every US equity fill can owe
 ACCOUNT_TYPES = ("margin_1x", "cash")
-US_CLASSES = ("equity_etf", "bond_etf", "cash_etf", "commodity_etf", "real_estate_etf", "stock")
+ASSET_CLASSES = ("equity_etf", "bond_etf", "cash_etf", "commodity_etf", "real_estate_etf", "stock")
 FEEDS = ("iex", "sip")
 # The screener needs 273 sessions of history, about 380 calendar days.
 MIN_HISTORY_DAYS = 380
@@ -378,7 +250,7 @@ class Account:
 
 
 @dataclass(frozen=True)
-class UsUniverse:
+class Universe:
     core: Dict[str, str]                 # symbol -> asset class
     reference: Tuple[str, ...] = ()      # data only, never traded
     sectors: Tuple[str, ...] = ()        # breadth: how many sit above their 50-day average
@@ -388,7 +260,7 @@ class UsUniverse:
 
 
 @dataclass(frozen=True)
-class UsTrading:
+class Trading:
     dry_run: bool = False
     min_trade_usd: float = 100.0
     max_trade_usd: float = 2500.0
@@ -401,7 +273,7 @@ class UsTrading:
 
 
 @dataclass(frozen=True)
-class UsSizing:
+class Sizing:
     target_risk_pct: float = 1.5
     choppy_regime_factor: float = 0.25
     max_position_pct: float = 25.0
@@ -410,7 +282,7 @@ class UsSizing:
 
 
 @dataclass(frozen=True)
-class UsCaps:
+class Caps:
     by_class: Dict[str, float]
     by_symbol: Dict[str, float] = field(default_factory=dict)
 
@@ -465,12 +337,12 @@ class EventFeeds:
 
 
 @dataclass(frozen=True)
-class UsConfig:
+class Config:
     account: Account
-    universe: UsUniverse
-    trading: UsTrading
-    sizing: UsSizing
-    caps: UsCaps
+    universe: Universe
+    trading: Trading
+    sizing: Sizing
+    caps: Caps
     risk: Risk
     schedule: Schedule
     data: Data
@@ -534,7 +406,7 @@ def _hhmm(raw: str, where: str) -> str:
     return str(raw)
 
 
-def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig:
+def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config:
     with open(path, "rb") as f:
         raw = tomllib.load(f)
 
@@ -543,7 +415,7 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
     core = {_symbol(k, "universe.core"): str(v) for k, v in core_raw.items()}
     reference = tuple(_symbol(s, "universe.reference") for s in uni_raw.pop("reference", []))
     sectors = tuple(_symbol(s, "universe.sectors") for s in uni_raw.pop("sectors", []))
-    universe = _section(UsUniverse, {**uni_raw, "core": core, "reference": reference, "sectors": sectors},
+    universe = _section(Universe, {**uni_raw, "core": core, "reference": reference, "sectors": sectors},
                         "universe")
 
     trading_raw = dict(raw.get("trading", {}))
@@ -574,12 +446,12 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
     events_raw = dict(raw.get("events", {}))
     events_raw["macro"] = {str(k): str(v) for k, v in events_raw.get("macro", {}).items()}
 
-    cfg = UsConfig(
+    cfg = Config(
         account=_section(Account, raw.get("account", {}), "account"),
         universe=universe,
-        trading=_section(UsTrading, trading_raw, "trading"),
-        sizing=_section(UsSizing, sizing_raw, "sizing"),
-        caps=UsCaps(by_class={str(k): float(v) for k, v in caps_raw.items()}, by_symbol=by_symbol),
+        trading=_section(Trading, trading_raw, "trading"),
+        sizing=_section(Sizing, sizing_raw, "sizing"),
+        caps=Caps(by_class={str(k): float(v) for k, v in caps_raw.items()}, by_symbol=by_symbol),
         schedule=_section(Schedule, sched_raw, "schedule"),
         data=_section(Data, raw.get("data", {}), "data"),
         fees=fees,
@@ -593,11 +465,11 @@ def load_us(path: Path = US_CONFIG, data_dir: Optional[Path] = None) -> UsConfig
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
-    _validate_us(cfg)
+    _validate(cfg)
     return cfg
 
 
-def _validate_us(cfg: UsConfig) -> None:
+def _validate(cfg: Config) -> None:
     a, u, t, s, c = cfg.account, cfg.universe, cfg.trading, cfg.sizing, cfg.caps
     if a.type not in ACCOUNT_TYPES:
         raise ConfigError(f"account.type must be one of {ACCOUNT_TYPES}, got {a.type!r}")
@@ -606,8 +478,8 @@ def _validate_us(cfg: UsConfig) -> None:
     if not u.core:
         raise ConfigError("universe.core can't be empty")
     for sym, cls in u.core.items():
-        if cls not in US_CLASSES:
-            raise ConfigError(f"universe.core.{sym}: class must be one of {US_CLASSES}, got {cls!r}")
+        if cls not in ASSET_CLASSES:
+            raise ConfigError(f"universe.core.{sym}: class must be one of {ASSET_CLASSES}, got {cls!r}")
     if u.core.get(u.cash_symbol) != "cash_etf":
         raise ConfigError(f"universe.cash_symbol {u.cash_symbol!r} must be in universe.core as cash_etf")
     if set(u.reference) & set(u.core):
@@ -627,14 +499,14 @@ def _validate_us(cfg: UsConfig) -> None:
         raise ConfigError("sizing: target_risk_pct > 0, missing_vol > 0, choppy_regime_factor in (0, 1]")
     if not 0 < s.max_position_pct <= 100:
         raise ConfigError("sizing.max_position_pct must be in (0, 100]")
-    missing = [k for k in US_CLASSES if s.vol_floor.get(k, 0) <= 0]
-    if missing or set(s.vol_floor) - set(US_CLASSES):
-        raise ConfigError(f"sizing.vol_floor needs a positive floor for each of {US_CLASSES} "
-                          f"(missing or bad: {missing}, unknown: {sorted(set(s.vol_floor) - set(US_CLASSES))})")
-    uncapped = [k for k in US_CLASSES if k != "cash_etf" and k not in c.by_class]
-    if uncapped or set(c.by_class) - set(US_CLASSES):
+    missing = [k for k in ASSET_CLASSES if s.vol_floor.get(k, 0) <= 0]
+    if missing or set(s.vol_floor) - set(ASSET_CLASSES):
+        raise ConfigError(f"sizing.vol_floor needs a positive floor for each of {ASSET_CLASSES} "
+                          f"(missing or bad: {missing}, unknown: {sorted(set(s.vol_floor) - set(ASSET_CLASSES))})")
+    uncapped = [k for k in ASSET_CLASSES if k != "cash_etf" and k not in c.by_class]
+    if uncapped or set(c.by_class) - set(ASSET_CLASSES):
         raise ConfigError(f"caps needs a cap for every class except cash_etf (missing: {uncapped}, "
-                          f"unknown: {sorted(set(c.by_class) - set(US_CLASSES))})")
+                          f"unknown: {sorted(set(c.by_class) - set(ASSET_CLASSES))})")
     for k, v in {**c.by_class, **c.by_symbol}.items():
         if not 0 < v <= 100:
             raise ConfigError(f"caps.{k} must be in (0, 100]")

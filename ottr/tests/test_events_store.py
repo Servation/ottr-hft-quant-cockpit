@@ -10,7 +10,7 @@ from datetime import date, datetime, timedelta
 
 import pytest
 
-from ottr.config import load_us
+from ottr.config import load
 from ottr.events import db
 from ottr.events.earnings import AlphaVantage
 from ottr.events.fred import Fred
@@ -40,7 +40,7 @@ TODAY = date(2026, 10, 21)
 
 @pytest.fixture
 def ucfg(tmp_path):
-    return load_us(data_dir=tmp_path)
+    return load(data_dir=tmp_path)
 
 
 def events(store, max_age_h=72):

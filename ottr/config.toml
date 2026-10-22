@@ -1,38 +1,130 @@
-# OTTR v2 configuration. Env overrides: OTTR_DRY_RUN, MAX_TRADE_USD, OTTR_DATA_DIR,
-# DISCORD_WEBHOOK_URL, OTTR_API_KEY, and for the chat bot DISCORD_BOT_TOKEN, CEO_DISCORD_ID,
-# OTTR_CHAT_ALLOWED_IDS, DISCORD_GUILD_ID (the CLI also reads them from a gitignored ottr/.env).
-# Values here mirror the v1 settings the backtests validated.
+# OTTR configuration: the US-markets paper desk (loaded by ottr.config.load). Env overrides:
+# OTTR_DRY_RUN, MAX_TRADE_USD, OTTR_DATA_DIR. Secrets and IDs come only from the environment
+# or ottr/.env: DISCORD_WEBHOOK_URL, OTTR_API_KEY, DISCORD_BOT_TOKEN, CEO_DISCORD_ID,
+# OTTR_CHAT_ALLOWED_IDS, DISCORD_GUILD_ID. The feed clients read their own: Alpaca
+# (APCA_API_KEY_ID / APCA_API_SECRET_KEY), ALPHAVANTAGE_API_KEY and SEC_USER_AGENT.
 
-universe = ["BTC", "ETH", "SOL", "XRP", "ADA", "DOGE", "LINK", "AVAX"]
+[account]
+# margin_1x: an Alpaca margin account set to max_margin_multiplier = 1 with shorting off.
+# No leverage, no shorting, sale proceeds usable at once, no day-trade limit; it is also
+# the account type Alpaca's level 3 option spreads need (phase 2). "cash" spends only
+# settled (T+1) funds, which makes a good-faith violation impossible.
+type = "margin_1x"
+starting_cash = 10000.0
+
+[universe]
+# The traded core: symbol -> asset class. Satellites (screener-picked stocks) live in the
+# database, not here.
+cash_symbol = "SGOV"        # where idle cash is swept; must be in the core as cash_etf
+satellites_max = 6
+sleeve_pct = 40.0           # satellites (including ones being sold off) at most this % of equity
+# Data only, never traded: equal-weight S&P and the sector SPDRs, for breadth. XLE, the
+# energy sector, is in the traded core below, so it isn't repeated here.
+reference = ["RSP", "XLB", "XLC", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
+# Breadth in the council packet: how many of these sit above their 50-day average.
+sectors = ["XLB", "XLC", "XLE", "XLF", "XLI", "XLK", "XLP", "XLRE", "XLU", "XLV", "XLY"]
+
+[universe.core]
+SPY = "equity_etf"
+QQQ = "equity_etf"
+IWM = "equity_etf"
+EFA = "equity_etf"
+EEM = "equity_etf"
+SGOV = "cash_etf"
+IEF = "bond_etf"
+TLT = "bond_etf"
+TIP = "bond_etf"
+LQD = "bond_etf"
+HYG = "bond_etf"
+GLD = "commodity_etf"
+SLV = "commodity_etf"
+PDBC = "commodity_etf"
+XLE = "equity_etf"
+VNQ = "real_estate_etf"
 
 [trading]
-dry_run = false            # true: record "would trade" verdicts, never fill
-starting_cash = 10000.0
-slippage_pct = 0.05        # on top of the bid/ask spread
-fee_pct = 0.40             # Kraken's lowest taker tier
+dry_run = false            # true: record "would fill" verdicts, never fill
 min_trade_usd = 100.0
 max_trade_usd = 2500.0     # ceiling per BUY (code sizes BUYs, so this clamps); 0 = none
-max_gross_pct = 90.0       # total invested never exceeds this % of equity
+max_gross_pct = 90.0       # invested (excluding the cash ETF) never above this % of equity
 cash_reserve_pct = 2.0     # never spend the last 2% of equity on a BUY
 max_trades_per_meeting = 3
-max_data_age_sec = 180     # refuse to fill on a quote older than this
 decision_ttl_sec = 900     # drop council decisions older than this
+slippage_pct = 0.0         # IEX spreads already sit at or outside the national best
+no_buy_last_min = 10       # no new BUYs in the session's last 10 minutes
 
 [sizing]
-target_risk_pct = 2.0      # risk budget per position, % of equity / annualized vol
+target_risk_pct = 1.5      # risk budget per position: % of equity / annualized vol
 choppy_regime_factor = 0.25
-max_position_pct = 50.0
-missing_vol = 1.5          # assumed annualized vol when unknown: shrinks size
-min_vol = 0.05
+max_position_pct = 25.0
+missing_vol = 0.80         # assumed annualized vol when unknown: sizes small, never large
 
-[caps]                     # max % of equity per asset; default for unlisted assets
-default = 35.0
-SOL = 20.0
-XRP = 15.0
-ADA = 15.0
-DOGE = 15.0
-LINK = 15.0
-AVAX = 15.0
+[sizing.vol_floor]         # vol never counted below this, per class (stops a calm ETF ballooning)
+equity_etf = 0.10
+bond_etf = 0.04
+cash_etf = 0.005
+commodity_etf = 0.12
+real_estate_etf = 0.12
+stock = 0.15
+
+[caps]                     # max % of equity per position, by class; the cash ETF is uncapped
+equity_etf = 25.0
+bond_etf = 25.0
+commodity_etf = 20.0
+real_estate_etf = 20.0
+stock = 8.0
+
+[caps.symbol]              # per-symbol overrides
+EEM = 15.0
+SLV = 10.0
+PDBC = 15.0
+
+# Pass-through regulatory fees (ottr/broker/fees.py). Each rate applies from its
+# `effective` TRADE date until the next rate for the same fee; a date before a fee's first
+# rate is an error, never a guess. Fills accrue these exactly; each trading day's total is
+# charged at the close, rounded up to the cent. Alpaca charges no commission on stocks/ETFs.
+[[fees.rate]]
+fee = "sec"
+effective = 2026-04-02
+basis = "notional"
+rate = 0.0000206          # $20.60 per $1M of sales
+sides = ["SELL"]
+source = "SEC FY2026 fee rate advisory; Nasdaq OTA2026-14: trades from 2026-04-02"
+
+[[fees.rate]]
+fee = "taf"
+effective = 2026-01-01
+basis = "share"
+rate = 0.000195
+max_per_trade = 9.79
+sides = ["SELL"]
+source = "FINRA By-Laws Sch. A s.1 (rate in force before the Q4 2026 pause; Jan 2026 per broker notices)"
+
+[[fees.rate]]
+fee = "taf"
+effective = 2026-10-01
+basis = "share"
+rate = 0.0
+max_per_trade = 0.0
+sides = ["SELL"]
+source = "FINRA SR-FINRA-2026-021: TAF paused for trades 2026-10-01 to 2026-12-31"
+
+[[fees.rate]]
+fee = "taf"
+effective = 2027-01-01
+basis = "share"
+rate = 0.000195
+max_per_trade = 9.79
+sides = ["SELL"]
+source = "FINRA SR-FINRA-2026-021: TAF resumes at its prior rate on 2027-01-01"
+
+[[fees.rate]]
+fee = "cat"
+effective = 2026-10-12
+basis = "share"           # per executed equivalent share; one NMS share = one
+rate = 0.000003
+sides = ["BUY", "SELL"]
+source = "Alpaca brokerage fee schedule (Oct 12 2026)"
 
 [risk]
 enabled = true
@@ -41,64 +133,89 @@ drawdown_halt_pct = 15.0
 drawdown_resume_pct = 10.0
 drawdown_derisk = true
 drawdown_derisk_pct = 25.0
-halt_max_hours = 72        # auto-resume (with re-baselined peak) after this long
+halt_max_hours = 72
 trim_band_pct = 5.0
 cooldown_sec = 900
-min_equity_points = 24     # equity snapshots needed before the breaker may trip
+min_equity_points = 24
 
-[market]
-vol_window_days = 30
-regime_er_window = 20
-regime_er_threshold = 0.30
-spot_ttl_sec = 60
-candles_ttl_sec = 3600
+[sweep]                    # idle cash into the cash ETF (universe.cash_symbol) once a day
+enabled = true
+at = "15:45"               # New York time; an early close moves it back the same distance (12:45)
+keep_cash_pct = 5.0        # buying power above 5% of equity is swept; a short BUY sells it back first
+
+[events]                   # ottr/events: earnings, corporate actions, macro, SEC lists
+# Keys come from ottr/.env: ALPHAVANTAGE_API_KEY (earnings) and SEC_USER_AGENT (the SEC
+# wants "Name email"). FRED needs no key; corporate actions use the Alpaca keys.
+earnings_horizon = "6month"          # 3month would drop a company that just reported (next one ~13 weeks out)
+earnings_every_hours = 24            # one Alpha Vantage call a day (the free key allows 25)
+corporate_actions_every_hours = 4
+macro_every_hours = 12
+sec_every_days = 7
+max_age_hours = 72                   # older earnings or corporate actions count as unknown: BUYs they guard are blocked
+corporate_actions_lookback_days = 60 # dividends are paid up to ~6 weeks after the ex-date (SPY: 42 days)
+corporate_actions_ahead_days = 120
+macro_history_days = 400
+macro_stale_days = 5                 # a series with no value for this many days is shown as stale
+
+[events.macro]             # FRED series id -> label shown to the council
+VIXCLS = "VIX (S&P 500 30-day implied vol)"
+DGS2 = "2-year Treasury yield (%)"
+DGS10 = "10-year Treasury yield (%)"
+T10Y2Y = "10y minus 2y Treasury spread (pp)"
+BAMLH0A0HYM2 = "US high-yield option-adjusted spread (%)"
+DFF = "Effective federal funds rate (%)"
+T10YIE = "10-year breakeven inflation (%)"
+
+[schedule]
+meeting_times = ["10:15", "15:15"]   # New York time, trading days only
+min_before_close_min = 45            # on early closes a later slot moves back to this
+
+[data]
+feed = "iex"               # live quotes: iex (free) or sip (paid)
+history_days = 400         # calendar days of daily bars loaded (>= 273 sessions)
+max_spread_pct = 1.0       # a wider IEX quote isn't a market: the order defers
+max_quote_age_sec = 120
+max_trade_gap_pct = 2.0
+max_close_gap_pct = 25.0
+quote_ttl_sec = 30         # snapshots are re-fetched after this (an order re-fetches after 10s)
+vol_sessions = 60          # realized vol for sizing, annualized by sqrt(252)
+er_sessions = 20           # efficiency ratio over this many sessions: >= er_threshold is TRENDING
+er_threshold = 0.30
 
 [council]
 analysts = ["claude", "gpt", "gemini"]
 chair = "claude"
 min_analysts = 2
 timeout_sec = 300
-interval_hours = 4
 claude_model = "opus"
 gemini_model = "gemini-3.8-flash-high"
 reasoning_effort = "high"
 
 [engine]
+market_interval_sec = 60      # calendar, daily bars and quote health
+jobs_interval_sec = 60        # fee charge, cash sweep, events feeds, deferred orders
 risk_interval_sec = 60
 equity_interval_sec = 900
-watchdog_interval_sec = 60 # health check cadence; a task is stale after 3x its interval
-alarm_clear_sec = 300      # an alarm must stay clear this long before it resolves
+watchdog_interval_sec = 60
+alarm_clear_sec = 300
 
-[alerts]                   # Discord rate limits, so a flapping feed can't spam
+[alerts]
 burst = 10
 per_hour = 30
-alarm_repeat_sec = 1800    # one alarm re-posts at most every 30 min while it flaps
-alarm_remind_sec = 21600   # reminder every 6h while an alarm stays active
-live_meeting = true        # watch a council meeting in one message edited as it runs
-live_edit_sec = 3          # at least 3s between edits of that message
+alarm_repeat_sec = 1800
+alarm_remind_sec = 21600
+live_meeting = true
+live_edit_sec = 3
 
-[api]                      # read-only JSON API for the dashboard + kill switch
+[api]
 enabled = true
-host = "127.0.0.1"         # loopback only (enforced)
+host = "127.0.0.1"
 port = 8765
 
-[screen]                   # daily scan of other Kraken USD pairs: advisory, never traded
+[chat]
 enabled = true
-interval_hours = 24        # daily candles change once a day
-min_usd_volume = 1000000   # 30-day median daily volume, in USD
-max_spread_pct = 0.30      # live bid/ask spread
-min_history_days = 120     # skips fresh listings and their launch pumps
-max_pairs = 60             # most liquid pairs scored (one Kraken request each, about 1/s)
-top_n = 5                  # candidates shown in /screen and the Discord digest
-post_to_discord = true     # a short digest after each scan
-
-# [pairs]                  # Kraken pair for a universe asset the built-in table lacks, e.g.
-# NEAR = "NEARUSD"         # (`ottr screen` prints the exact line for each candidate)
-
-[chat]                     # Discord slash-command bot (`ottr chat`); setup in README.md
-enabled = true             # `ottr supervise` runs it once DISCORD_BOT_TOKEN and CEO_DISCORD_ID are set
-model = "claude"           # which model answers /ask: claude | gpt | gemini
-effort = "low"             # reasoning effort for /ask (the council uses "high")
-per_hour = 20              # /ask model calls allowed in any rolling hour
-history_turns = 6          # earlier /ask exchanges in the channel replayed into the prompt
-timeout_sec = 180          # give up on a model call after this long
+model = "claude"
+effort = "low"
+per_hour = 20
+history_turns = 6
+timeout_sec = 180

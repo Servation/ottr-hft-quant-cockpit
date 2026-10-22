@@ -22,7 +22,7 @@ from ottr.chat.service import OWNER_ONLY, STRANGER, ChatService
 from ottr.config import ConfigError
 from ottr.council.models import ModelError
 from ottr.engine.engine import Engine
-from tests.fakes import CHAT_KEY, PRICES, FakeEngineApi, FakeMarket, RecordingModel, eth_buy_council
+from tests.fakes import CHAT_KEY, FakeEngineApi, RecordingModel, buy_council, market_rig, no_corporate_actions
 
 OWNER, FRIEND, STRANGER_ID = 111111111111111111, 222222222222222222, 333333333333333333
 ME = Asker(OWNER, "Jeff", 555)
@@ -107,13 +107,14 @@ async def test_no_owner_configured_means_nobody_is_obeyed(make, chat_cfg):
 async def test_status_positions_and_meeting_read_the_api(make, engine_api):
     svc = make()
     s = await svc.status(ME)
-    assert s.startswith("**OTTR OK**") and "$10,234.50" in s and "cooling down: ETH" in s
+    assert s.startswith("**OTTR OK**") and "$10,234.50" in s and "cooling down: TLT" in s
+    assert "Market: **open**, closes <t:" in s and "Benchmarks from day 0: SPY hold $10,100.00 | 60/40 $9,950.00" in s
     assert "Council: next meeting <t:" in s and "Alarms: none" in s
     p = await svc.positions(ME)
-    assert "```" in p and re.search(r"ETH\s+\$5,234\.50\s+51\.1%\s+\+0\.2%\s+8\.9%", p)
+    assert "```" in p and re.search(r"TLT\s+\$5,234\.50\s+51\.1%\s+\+0\.2%\s+8\.9%\s+live", p)
     m = await svc.meeting(ME)
-    assert "Buy ETH on a clean trend." in m and "BUY ETH (conviction 0.70): filled $5,222.20" in m
-    assert "dropped by code: SELL XRP" in m and "ETH reclaimed its 50-day EMA" in m
+    assert "Buy TLT as long yields roll over." in m and "BUY TLT (conviction 0.70): filled $5,222.20" in m
+    assert "dropped by code: SELL GLD" in m and "TLT reclaimed its 50-day EMA" in m
     assert engine_api.writes() == []
     assert [r["command"] for r in svc.log.recent(3)] == ["meeting", "positions", "status"]
 
@@ -135,7 +136,7 @@ async def test_status_survives_a_partial_failure(make, engine_api):
 # -- /ask ----------------------------------------------------------------------------------
 async def test_ask_defers_before_reading_and_answers(make, engine_api):
     deferred_at_call = []
-    model = RecordingModel(["ETH is 51% of the book \u2014 the only position."])
+    model = RecordingModel(["TLT is 51% of the book \u2014 the only position."])
     svc = make(model=model)
     defer = Deferral(engine_api)
     model.on_call = lambda: deferred_at_call.append(defer.calls)
@@ -146,7 +147,7 @@ async def test_ask_defers_before_reading_and_answers(make, engine_api):
         [p for _, p, _, _ in engine_api.requests[:defer.requests_before]] == ["/api/council"]
     assert not out.ephemeral
     assert out.text.startswith("> **Jeff:** what do we hold?")
-    assert "ETH is 51% of the book, the only position." in out.text and "\u2014" not in out.text
+    assert "TLT is 51% of the book, the only position." in out.text and "\u2014" not in out.text
     assert "-# claude, low effort | " in out.text and "1 of 20 asks this hour" in out.text
     row = svc.log.recent(1)[0]
     assert row["status"] == "ok" and row["model_call"] == 1 and "DESK DATA" in row["prompt"]
@@ -312,16 +313,21 @@ async def _ctx(engine_api) -> DeskContext:
 async def test_prompt_carries_the_desk_and_the_rules(engine_api):
     ctx = await _ctx(engine_api)
     now = engine_api.data["/api/health"]["ts"]
-    p = prompt.build(ctx, [Turn(now - 600, "Jeff", "old q", "old a")], "why ETH?", "Jeff", now)
-    for needle in ("You cannot place, change or cancel trades", "Never use em dashes",
+    p = prompt.build(ctx, [Turn(now - 600, "Jeff", "old q", "old a")], "why TLT?", "Jeff", now)
+    for needle in ("a US-markets PAPER-trading desk", "You cannot place, change or cancel trades",
+                   "Never use em dashes", "times in New York time (ET)",
                    "HEALTH: OK", "KILL SWITCH: off", "BOOK: equity $10,234.50",
-                   "ETH: qty 2.18 | value $5,234.50 (51.1% of book, cap 35.0%)",
-                   "COUNCIL: meets every 4.0h", "Chair summary: Buy ETH on a clean trend.",
-                   "ETH BUY conviction 0.80: ETH reclaimed its 50-day EMA Key risk: ETF outflows",
-                   "Dropped by code: SELL XRP: not held", "RECENT FILLS", "in cooldown (no new BUYs): ETH",
+                   "BENCHMARKS (same starting equity, dividends reinvested): SPY buy-and-hold $10,100.00 | "
+                   "60/40 SPY/IEF rebalanced monthly $9,950.00", "MARKET: open until ",
+                   "TLT (bond_etf): qty 58 | value $5,234.50 (51.1% of book, cap 25%) | price $90.25 live",
+                   "COUNCIL: meets at 10:15 and 15:15 ET on trading days",
+                   "Chair summary: Buy TLT as long yields roll over.",
+                   "TLT BUY conviction 0.80: TLT reclaimed its 50-day EMA Key risk: hot CPI",
+                   "Dropped by code: SELL GLD: not held", "RECENT FILLS", "in cooldown (no new BUYs): TLT",
                    "Jeff asked: old q", "You answered: old a"):
         assert needle in p, needle
-    assert p.rstrip().endswith("Question from Jeff (now): why ETH?")
+    assert p.rstrip().endswith("Question from Jeff (now): why TLT?")
+    assert "UTC" not in p and "Kraken" not in p and "crypto" not in p
     assert "\u2014" not in p
 
 
@@ -392,8 +398,8 @@ def test_rendered_views_have_no_em_dashes(engine_api):
              render.kill_result({"effective_dry_run": True}, False, "Jeff")]
     assert all("\u2014" not in t for t in texts)
     assert render.no_em_dash("a \u2014 b\u2014c") == "a, b, c"
-    m = dict(d["/api/meetings"]["meetings"][0], summary="Buy ETH \u2014 the trend holds.")  # model text
-    assert "Buy ETH, the trend holds." in render.meeting(m, now)
+    m = dict(d["/api/meetings"]["meetings"][0], summary="Buy TLT \u2014 the trend holds.")  # model text
+    assert "Buy TLT, the trend holds." in render.meeting(m, now)
 
 
 def test_status_shows_an_engaged_kill_switch_and_alarms(engine_api):
@@ -415,7 +421,7 @@ async def test_prompt_names_each_kill_switch_source(engine_api):
     engine_api.kill.update(effective_dry_run=True, operator_engaged=True, config_dry_run=True, by="discord",
                            since=1.0, reason="bed")
     p = prompt.build(await _ctx(engine_api), [], "q", "Jeff", 2.0)
-    assert ("KILL SWITCH: ON. operator switch engaged by discord at 1970-01-01 00:00 UTC (reason: bed); the "
+    assert ("KILL SWITCH: ON. operator switch engaged by discord at Wed 1969-12-31 19:00 ET (reason: bed); the "
             "owner can release it with /release; config or OTTR_DRY_RUN forces dry run on the host; chat "
             "can't change that.") in p
 
@@ -448,8 +454,8 @@ def test_bad_chat_config_fails_loudly(tmp_path, old, new, match):
 def test_chat_needs_the_api(tmp_path):
     text = cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8")
     p = tmp_path / "c.toml"
-    p.write_text(text.replace("[api]                      # read-only JSON API for the dashboard + kill switch\n"
-                              "enabled = true", "[api]\nenabled = false"), encoding="utf-8")
+    assert "[api]\nenabled = true" in text
+    p.write_text(text.replace("[api]\nenabled = true", "[api]\nenabled = false"), encoding="utf-8")
     with pytest.raises(ConfigError, match="chat.enabled needs api.enabled"):
         cfgmod.load(p, data_dir=tmp_path)
 
@@ -490,23 +496,25 @@ def test_unavailable_says_why(chat_cfg):
 
 # -- against a real engine API -------------------------------------------------------------
 async def test_end_to_end_against_a_real_engine_api(chat_cfg, store, ledger, tmp_path, clock):
-    market = FakeMarket(chat_cfg, PRICES)
-    eng = Engine(chat_cfg, store, market, council=eth_buy_council(chat_cfg))
+    no_corporate_actions(store, chat_cfg.core)
+    rig = await market_rig(chat_cfg, store).ready()
+    eng = Engine(chat_cfg, store, rig.market, council=buy_council(chat_cfg, "TLT"), clock=rig.clock)
     await eng.meeting(execute=True)
     await eng.executor.drain()
     server = ApiServer(eng, "127.0.0.1", 0)
     await server.start()
-    model = RecordingModel(["You hold ETH."])
+    model = RecordingModel(["You hold TLT."])
     svc = ChatService(chat_cfg, ApiClient(f"http://127.0.0.1:{server.port}/api", CHAT_KEY), model,
                       ChatLog(tmp_path / "chat.db"))
     try:
         assert "**OTTR" in await svc.status(ME)
-        assert "ETH" in await svc.positions(ME)
+        assert "TLT" in await svc.positions(ME)
         m = await svc.meeting(ME)
-        assert "buy eth" in m and "**claude**" in m and "ETH BUY 0.80" in m
+        assert "buy tlt" in m and "**claude**" in m and "TLT BUY 0.80" in m
         out = await svc.ask(ME, "what do we hold?", Deferral())
-        assert "You hold ETH." in out.text
-        assert "Chair summary: buy eth" in model.prompts[0] and "ETH BUY conviction 0.80" in model.prompts[0]
+        assert "You hold TLT." in out.text
+        assert "Chair summary: buy tlt" in model.prompts[0] and "TLT BUY conviction 0.80" in model.prompts[0]
+        assert "MARKET: open until Wed 2026-10-21 16:00 ET" in model.prompts[0]
         # While a meeting runs, the API says so and /ask stays quiet.
         eng.meeting_started = clock.t
         out = await svc.ask(ME, "and now?", Deferral())
@@ -520,41 +528,3 @@ async def test_end_to_end_against_a_real_engine_api(chat_cfg, store, ledger, tmp
         await svc.api.aclose()
         svc.log.close()
         await server.stop()
-
-
-# -- screener in chat ------------------------------------------------------------------------
-async def test_screen_shows_candidates_universe_ranks_and_how_to_promote(make, engine_api, chat_cfg):
-    from tests.fakes import sample_screen
-    svc = make()
-    assert (await svc.screen(ME)).startswith("No screen yet: the engine runs one a day")
-    engine_api.screen = sample_screen(chat_cfg)
-    text = await svc.screen(ME)
-    assert text.startswith("**Screener** <t:") and "Advisory: the desk never trades these." in text
-    assert "**Candidates**" in text and re.search(r"NEAR\s+86\s+\+3\.72\s+\+1\.03", text)
-    assert "Your universe ranks BTC #3, ETH #4 (of 4)." in text
-    assert 'To trade NEAR: add it to `universe`, `NEAR = 10.0` under [caps]' in text
-    assert all(len(c) <= 2000 for c in render.split_message(text)) and "\u2014" not in text
-    assert engine_api.writes() == []
-
-
-async def test_screen_when_nothing_qualifies_says_why(make, engine_api, chat_cfg):
-    from tests.fakes import sample_screen
-    engine_api.screen = sample_screen(chat_cfg, qualifying=False)
-    text = await make().screen(ME)
-    assert "**No candidate qualifies right now.**" in text and "NEAR: not up over 14d" in text
-    assert "To trade" not in text
-
-
-async def test_the_ask_prompt_knows_the_screener(engine_api, chat_cfg):
-    from tests.fakes import sample_screen
-    p = prompt.build(await _ctx(engine_api), [], "q", "Jeff", time.time())
-    assert "SCREENER: no run yet" in p
-    engine_api.screen = sample_screen(chat_cfg)
-    p = prompt.build(await _ctx(engine_api), [], "what else looks good?", "Jeff", time.time())
-    assert "SCREENER (code ranks liquid Kraken pairs OUTSIDE the universe" in p
-    assert "qualifying: NEAR: score 86" in p and "universe ranks: BTC #3, ETH #4 of 4" in p
-
-
-async def test_an_engine_older_than_the_screener_is_reported(make, engine_api):
-    engine_api.missing.add("/api/screen")
-    assert "older than the chat bot" in await make().screen(ME)

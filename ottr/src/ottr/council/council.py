@@ -38,23 +38,27 @@ def new_meeting_id() -> str:
 
 LENSES = {
     "claude": "Your lens: risk and regime. Weigh drawdown risk, trending vs choppy regimes, "
-              "concentration and correlation, and what could go wrong.",
-    "gpt": "Your lens: quant and technical. Weigh the indicators, momentum and volatility, "
-           "and whether the numbers actually support an entry or exit.",
-    "gemini": "Your lens: sentiment and contrarian. Weigh positioning, fear and greed, and "
-              "where the crowd may be wrong.",
+              "volatility, concentration and correlation across the book, and what could go wrong.",
+    "gpt": "Your lens: quant and technical. Weigh the returns, trend indicators, momentum and "
+           "volatility, and whether the numbers actually support an entry or exit.",
+    "gemini": "Your lens: cross-asset risk appetite. Weigh rates, the curve, credit spreads, "
+              "inflation expectations, the VIX and breadth, and what they say about whether to "
+              "own stocks, bonds, real assets or cash right now.",
 }
 
 
 def analyst_prompt(context: str, lens: str, universe: List[str]) -> str:
     return (
-        "You are one analyst on a crypto paper-trading desk. Other analysts work "
+        "You are one analyst on a US-markets paper-trading desk (ETFs across stocks, bonds, "
+        "commodities and real estate, plus a few single stocks). Other analysts work "
         f"independently; you will not see their views.\n{lens}\n\n"
         f"Give exactly one stance for each asset: {', '.join(universe)}. HOLD is a valid "
-        "answer; do not force trades. The desk is long-only spot: SELL means reduce or exit "
-        "a position it HOLDS; for an asset you would merely avoid, say HOLD. Position sizes "
-        "are set by the desk's risk model from your conviction, so state conviction honestly "
-        "(0.3 weak, 0.6 solid, 0.9 rare and strong).\n\n"
+        "answer; do not force trades. The desk is long-only with no leverage: SELL means "
+        "reduce or exit a position it HOLDS; for an asset you would merely avoid, say HOLD. "
+        "Idle cash is swept into the T-bill ETF by code, so cash is never idle. Position "
+        "sizes are set by the desk's risk model from your conviction, so state conviction "
+        "honestly (0.3 weak, 0.6 solid, 0.9 rare and strong). The desk holds for days to "
+        "weeks: judge the trend and the risk, not the next hour.\n\n"
         f"=== CONTEXT ===\n{context}\n=== END CONTEXT ===\n\n"
         f"Reply with ONLY a JSON object of this shape (no prose, no code fences):\n{ANALYST_SHAPE}"
     )
@@ -69,12 +73,13 @@ def chair_prompt(context: str, reports: Dict[str, Dict[str, Any]], tally: Dict[s
             lines.append(f"{a['asset']}: {a['stance']} ({a['conviction']:.2f}) {a['thesis']} "
                          f"Risk: {a['key_risk']}")
     return (
-        "You chair a crypto paper-trading desk. Decide what, if anything, to trade. You are "
+        "You chair a US-markets paper-trading desk. Decide what, if anything, to trade. You are "
         "not bound by the majority; if you overrule the analysts, say why in dissent_notes. "
         "An empty trades list is a good answer when the case is weak.\n"
         "Rules enforced by code (violations are dropped): at most "
         f"{max_trades} trades, one per asset; BUY only an asset at least one analyst rated "
-        "BUY; SELL only an asset in HOLDINGS. Do NOT give dollar amounts: BUY takes a "
+        "BUY and the CONTEXT doesn't mark as blocked (earnings, a corporate action, being "
+        "sold off); SELL only an asset in HOLDINGS. Do NOT give dollar amounts: BUY takes a "
         "conviction (the risk model sizes it and only tops up to its target), SELL takes "
         "fraction_of_position (1.0 = exit).\n\n"
         f"=== CONTEXT ===\n{context}\n=== END CONTEXT ===\n\n"
@@ -108,13 +113,20 @@ def format_tally(t: Dict[str, Any]) -> str:
 
 
 def enforce_rules(decision: Dict[str, Any], reports: Dict[str, Dict[str, Any]],
-                  held: Set[str]) -> tuple:
-    """Code-side checks on the chair's decision -> (kept trades, dropped [(trade, why)])."""
+                  held: Set[str], blocked: Optional[Dict[str, str]] = None) -> tuple:
+    """Code-side checks on the chair's decision -> (kept trades, dropped [(trade, why)]).
+
+    `blocked` names assets the gate would refuse to BUY right now and why (a member being
+    sold off, an earnings blackout, a pending corporate action): those BUYs are dropped here
+    with the reason, so the record says why instead of showing a rejection at the gate."""
     support = {a["asset"] for r in reports.values() for a in r["assets"] if a["stance"] == "BUY"}
+    blocked = blocked or {}
     kept, dropped = [], []
     for t in decision["trades"]:
         if t["action"] == "BUY" and t["asset"] not in support:
             dropped.append((t, "no analyst rated it BUY"))
+        elif t["action"] == "BUY" and t["asset"] in blocked:
+            dropped.append((t, blocked[t["asset"]]))
         elif t["action"] == "SELL" and t["asset"] not in held:
             dropped.append((t, "not held (desk is long-only)"))
         else:
@@ -129,11 +141,12 @@ class Council:
         self.universe, self.min_analysts = list(universe), min_analysts
         self.max_trades, self.timeout = max_trades, timeout
 
-    async def _analyst(self, name: str, adapter: ModelAdapter, context: str, observe: Optional[Observer]):
+    async def _analyst(self, name: str, adapter: ModelAdapter, context: str, observe: Optional[Observer],
+                       universe: List[str]):
         t0 = time.time()
         try:
-            rep = await ask_json(adapter, analyst_prompt(context, LENSES.get(name, ""), self.universe),
-                                 analyst_validator(self.universe), timeout=self.timeout)
+            rep = await ask_json(adapter, analyst_prompt(context, LENSES.get(name, ""), universe),
+                                 analyst_validator(universe), timeout=self.timeout)
         except ModelError as e:
             logger.warning("analyst %s dropped: %s", name, e)
             _emit(observe, "analyst_dropped", name=name, error=str(e), latency=time.time() - t0)
@@ -143,10 +156,15 @@ class Council:
         return name, rep, None, time.time() - t0
 
     async def run(self, context: str, held: Set[str], meeting_id: Optional[str] = None,
-                  observe: Optional[Observer] = None) -> Dict[str, Any]:
+                  observe: Optional[Observer] = None, universe: Optional[List[str]] = None,
+                  blocked: Optional[Dict[str, str]] = None) -> Dict[str, Any]:
+        """One meeting. `universe` (default: the constructor's) is what may be traded today,
+        and `blocked` the BUYs code will drop and why (see `enforce_rules`)."""
         mid = meeting_id or new_meeting_id()
+        universe = list(universe or self.universe)
         _emit(observe, "analysts_started", analysts=list(self.analysts))
-        results = await asyncio.gather(*(self._analyst(n, a, context, observe) for n, a in self.analysts.items()))
+        results = await asyncio.gather(*(self._analyst(n, a, context, observe, universe)
+                                         for n, a in self.analysts.items()))
         reports = {n: r for n, r, _, _ in results if r is not None}
         rec: Dict[str, Any] = {
             "id": mid, "started": time.time(), "analysts": reports,
@@ -158,21 +176,21 @@ class Council:
         if len(reports) < self.min_analysts:
             rec["status"] = f"abstain: {len(reports)} analyst(s) responded, need {self.min_analysts}"
             return rec
-        tally = compute_tally(reports, self.universe)
+        tally = compute_tally(reports, universe)
         labels = {n: chr(ord("A") + i) for i, n in enumerate(sorted(reports))}
         anon = {labels[n]: reports[n] for n in sorted(reports)}
         rec.update(tally=tally, labels=labels)
         _emit(observe, "chair_started", reports=len(reports))
         t0 = time.time()
         try:
-            decision = await ask_json(self.chair, chair_prompt(context, anon, tally, self.universe, self.max_trades),
-                                      chair_validator(self.universe, self.max_trades), timeout=self.timeout)
+            decision = await ask_json(self.chair, chair_prompt(context, anon, tally, universe, self.max_trades),
+                                      chair_validator(universe, self.max_trades), timeout=self.timeout)
         except ModelError as e:
             rec["status"] = f"abstain: chair failed ({e})"
             _emit(observe, "chair_failed", error=str(e), latency=time.time() - t0)
             return rec
         rec["latency"]["chair"] = round(time.time() - t0, 1)
-        kept, dropped = enforce_rules(decision, reports, held)
+        kept, dropped = enforce_rules(decision, reports, held, blocked)
         rec.update(decision=decision, trades=kept,
                    dropped=[{"trade": t, "why": why} for t, why in dropped])
         _emit(observe, "chair_done", decision=decision, trades=kept, dropped=rec["dropped"],

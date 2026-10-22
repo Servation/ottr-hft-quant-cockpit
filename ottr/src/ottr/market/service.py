@@ -1,246 +1,272 @@
 """
-MarketData service + MarketSnapshot: the one view of the market everything reads.
+MarketData: the US desk's one view of the market, from Alpaca (implements the desk's
+`Market`).
 
-What it does: caches quotes (Kraken, then Coinbase for any asset Kraken can't price
-freshly) and closed daily candles (Kraken, archived locally), and builds an immutable
-snapshot with indicators and explicit data-quality flags. Why: the council, the risk
-monitor and the broker must agree on the same numbers, and "unknown" must stay visibly
-unknown instead of becoming a 0 that downstream math trusts.
+What it does:
+- the trading calendar, refreshed from Alpaca once a day and kept in the book, so a
+  restart knows the session at once;
+- live IEX snapshots for every tracked symbol (core, reference, held, and any extra the
+  caller adds), cached for `data.quote_ttl_sec`; `quote()` returns only a quote that
+  passed `check_quote`, or why there is none;
+- daily bars once each session's close is final (raw closes for marks, adjusted closes
+  for indicators and benchmarks), kept in the book;
+- `marks()` for every holding, by the session rules in `ledger/marks.py`;
+- `vol_regime()` for sizing: 60-session realized vol (sqrt(252)) and the ER regime;
+- `snapshot()`: the council's view of every asset (`market/packet.py`).
+
+Why one service: the council, the gate, the risk monitor and the equity curve must agree
+on the same numbers, and an outage must leave each of them saying "unknown" rather than
+trading on a price that only looks current.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
-import time
-from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Awaitable, Callable, Dict, List, Optional, Protocol, Tuple
+from datetime import timedelta
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-import httpx
-
-from ottr.config import Config
-from ottr.market import coinbase, indicators as ind
-from ottr.market.kraken import Kraken, KrakenError
-from ottr.market.types import MarketDataError, Quote
+from ottr.clock import SYSTEM, Clock
+from ottr.events.view import MacroReading
+from ottr.ledger.book import Ledger, trade_day
+from ottr.ledger.marks import SIP_FINAL_AFTER_SEC, mark
+from ottr.ledger.store import Store
+from ottr.market import benchmarks as bm
+from ottr.market import history
+from ottr.market import indicators as ind
+from ottr.market.alpaca import Alpaca, AlpacaError, Asset, check_quote, completed_bars
+from ottr.market.calendar import CalendarError, Session, TradingCalendar
+from ottr.market.packet import UsSnapshot, build_snapshot
+from ottr.market.types import Bar, MarketDataError, Quote
 
 logger = logging.getLogger(__name__)
 
-DAY = 86400
-MIN_HISTORY = 60  # closes needed before EMA50/MACD/vol are trustworthy
-
-
-class CandleArchive(Protocol):
-    def load_candles(self, asset: str) -> List[Tuple[int, float]]: ...
-    def save_candles(self, asset: str, rows: List[Tuple[int, float]]) -> None: ...
-
-
-@dataclass(frozen=True)
-class AssetView:
-    asset: str
-    quote: Optional[Quote]
-    closes: Tuple[float, ...]
-    last_close_ts: Optional[int]
-    ema20: Optional[float] = None
-    ema50: Optional[float] = None
-    rsi14: Optional[float] = None
-    macd: Optional[float] = None
-    macd_signal: Optional[float] = None
-    er: Optional[float] = None
-    regime: str = "UNKNOWN"
-    vol: Optional[float] = None
-    chg_1d: Optional[float] = None
-    chg_7d: Optional[float] = None
-    chg_30d: Optional[float] = None
-    hi_90d: Optional[float] = None
-    lo_90d: Optional[float] = None
-    corr_btc: Optional[float] = None
-    flags: Tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class MarketSnapshot:
-    as_of: float
-    assets: Dict[str, AssetView]
-    fear_greed: Optional[Tuple[int, str]] = None
-    warnings: Tuple[str, ...] = ()
-
-    def quote(self, asset: str) -> Optional[Quote]:
-        v = self.assets.get(asset)
-        return v.quote if v else None
-
-    def packet(self) -> str:
-        """Deterministic text block for the models, anchored in time."""
-        ts = datetime.fromtimestamp(self.as_of, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        lines = [
-            f"AS OF: {ts}. Judge ONLY the numbers below. Anything you remember about crypto "
-            "prices from training is out of date and must not be used.",
-            "Indicators use CLOSED daily candles (Kraken). Price is the live mid. "
-            "vol = 30d annualized; ER = efficiency ratio (>=0.30 TRENDING, else CHOPPY); "
-            "corrBTC = 30d daily-return correlation with BTC. 'n/a' means unknown, not zero.",
-            "",
-        ]
-        for a, v in self.assets.items():
-            q = v.quote
-            px = f"${q.mid:,.6g}" if q else "n/a"
-            lines.append(
-                f"{a}: price {px} | 1d {_pct(v.chg_1d)} 7d {_pct(v.chg_7d)} 30d {_pct(v.chg_30d)} | "
-                f"90d range {_num(v.lo_90d)}-{_num(v.hi_90d)} | EMA20 {_num(v.ema20)} EMA50 {_num(v.ema50)} | "
-                f"RSI {_num(v.rsi14, 1)} | MACD {_num(v.macd)} vs signal {_num(v.macd_signal)} | "
-                f"ER {_num(v.er, 2)} {v.regime} | vol {_pct(v.vol, 0)} | corrBTC {_num(v.corr_btc, 2)}"
-                + (f" | FLAGS: {', '.join(v.flags)}" if v.flags else "")
-            )
-        if self.fear_greed:
-            lines.append(f"\nCrypto Fear & Greed index: {self.fear_greed[0]} ({self.fear_greed[1]})")
-        if self.warnings:
-            lines.append("DATA WARNINGS: " + "; ".join(self.warnings))
-        return "\n".join(lines)
-
-
-def _pct(x: Optional[float], digits: int = 1) -> str:
-    return "n/a" if x is None else f"{x * 100:+.{digits}f}%"
-
-
-def _num(x: Optional[float], digits: int = 4) -> str:
-    return "n/a" if x is None else f"{x:,.{digits}g}" if abs(x) < 1000 else f"{x:,.0f}"
-
-
-def build_view(asset: str, quote: Optional[Quote], rows: List[Tuple[int, float]],
-               btc_closes: Optional[List[float]], cfg: Config) -> AssetView:
-    closes = [c for _, c in rows]
-    flags: List[str] = []
-    if len(closes) < MIN_HISTORY:
-        flags.append("insufficient_history")
-    if any(b - a != DAY for (a, _), (b, _) in zip(rows[-91:], rows[-90:])):
-        flags.append("candle_gap")
-    if quote and quote.source != "kraken":
-        flags.append(f"quote_from_{quote.source}")
-    if quote is None:
-        flags.append("no_live_quote")
-    warm = len(closes) >= MIN_HISTORY
-    m = ind.macd(closes) if warm else None
-    er = ind.efficiency_ratio(closes, cfg.market.regime_er_window)
-    ref = quote.mid if quote else (closes[-1] if closes else None)
-
-    def chg(days: int) -> Optional[float]:
-        if ref is None or len(closes) < days:
-            return None
-        base = closes[-days]
-        return ref / base - 1 if base > 0 else None
-
-    window = closes[-90:]
-    return AssetView(
-        asset=asset, quote=quote, closes=tuple(closes),
-        last_close_ts=rows[-1][0] if rows else None,
-        ema20=ind.ema(closes, 20) if warm else None,
-        ema50=ind.ema(closes, 50) if warm else None,
-        rsi14=ind.rsi(closes, 14) if warm else None,
-        macd=m[0] if m else None, macd_signal=m[1] if m else None,
-        er=er, regime=ind.regime(er, cfg.market.regime_er_threshold),
-        vol=ind.annualized_vol(closes, cfg.market.vol_window_days),
-        chg_1d=chg(1), chg_7d=chg(7), chg_30d=chg(30),
-        hi_90d=max(window) if window else None, lo_90d=min(window) if window else None,
-        corr_btc=(None if asset == "BTC" or not btc_closes
-                  else ind.return_correlation(closes, btc_closes, cfg.market.vol_window_days)),
-        flags=tuple(flags),
-    )
+CALENDAR_AHEAD_DAYS = 30        # sessions known ahead: earnings blackouts and meeting slots
+REFRESH_IF_OLDER_SEC = 10.0     # an order's quote is re-fetched if the cached one is older
+MINUTE_TTL_SEC = 60.0           # delayed minute closes (a fallback mark) are re-read this often
+ASSETS_STATE = "assets"         # risk_state key: Alpaca's asset records, refreshed daily
 
 
 class MarketData:
-    def __init__(self, cfg: Config, kraken: Optional[Kraken] = None,
-                 fallback: Callable[..., Awaitable[Dict[str, Quote]]] = coinbase.quotes,
-                 archive: Optional[CandleArchive] = None,
-                 fear_greed: Optional[Callable[[], Awaitable[Optional[Tuple[int, str]]]]] = None) -> None:
-        self.cfg = cfg
-        self.kraken = kraken or Kraken()
-        self.fallback = fallback
-        self.archive = archive
-        self._fear_greed_fn = fear_greed or fetch_fear_greed
-        self._quotes: Dict[str, Quote] = {}
-        self._quotes_ts = 0.0
-        self._candles: Dict[str, List[Tuple[int, float]]] = {}
-        self._candles_ts = 0.0
-        self._fng: Optional[Tuple[int, str]] = None
-        self._fng_ts = 0.0
+    def __init__(self, cfg, alpaca: Alpaca, store: Store, clock: Clock = SYSTEM,
+                 extra_symbols: Callable[[], Iterable[str]] = lambda: ()) -> None:
+        self.cfg, self.alpaca, self.store, self.clock = cfg, alpaca, store, clock
+        self.extra_symbols = extra_symbols
+        self._cal: Optional[TradingCalendar] = history.load_calendar(store)
+        self._cal_day = None                       # ET date of the last calendar refresh
+        self._snaps: Dict[str, dict] = {}
+        self._snaps_ts = 0.0
+        self._minutes: Dict[str, Tuple[float, float]] = {}
+        self._minutes_ts = 0.0
+        self._bars_through = None                  # the last session whose final bars are stored
         self._lock = asyncio.Lock()
 
-    async def quotes(self, force: bool = False) -> Dict[str, Quote]:
-        """Freshest quote per asset. Kraken first; Coinbase fills in stale/missing assets."""
-        async with self._lock:
-            now = time.time()
-            if not force and self._quotes and now - self._quotes_ts < self.cfg.market.spot_ttl_sec:
-                return dict(self._quotes)
-            pairs = {a: p for a in self.cfg.universe if (p := self.cfg.kraken_pair(a))}
-            fresh: Dict[str, Quote] = {}
-            try:
-                fresh = await self.kraken.quotes(pairs)
-            except KrakenError as e:
-                logger.warning("Kraken quotes failed: %s", e)
-            missing = [a for a in self.cfg.universe if a not in fresh]
-            if missing:
-                try:
-                    fresh.update(await self.fallback(missing))
-                except Exception as e:  # fallback is best-effort by design
-                    logger.warning("Fallback quotes failed: %s", e)
-            for a, q in fresh.items():
-                self._quotes[a] = q
-            self._quotes_ts = now
-            if not self._quotes:
-                raise MarketDataError("no quotes from Kraken or Coinbase and no cache")
-            return dict(self._quotes)
+    # -- what we follow ----------------------------------------------------------------------
+    def tracked(self) -> List[str]:
+        u = self.cfg.universe
+        held = Ledger(self.store).positions()
+        return sorted(set(u.core) | set(u.reference) | set(held) | set(self.extra_symbols()))
 
-    async def candles(self, force: bool = False) -> Dict[str, List[Tuple[int, float]]]:
-        now = time.time()
-        if not force and self._candles and now - self._candles_ts < self.cfg.market.candles_ttl_sec:
-            return dict(self._candles)
-        for asset in self.cfg.universe:
-            pair = self.cfg.kraken_pair(asset)
-            if not pair:
-                continue
-            rows = self.archive.load_candles(asset) if self.archive and asset not in self._candles else self._candles.get(asset, [])
-            try:
-                new = await self.kraken.daily_closes(pair)
-                merged = dict(rows)
-                merged.update(dict(new))
-                rows = sorted(merged.items())
-                if self.archive:
-                    self.archive.save_candles(asset, new)
-            except KrakenError as e:
-                logger.warning("Candles for %s failed (%s); using %d archived rows", asset, e, len(rows))
-            self._candles[asset] = rows
-            await asyncio.sleep(0.4)  # Kraken public limit is ~1 req/s
-        self._candles_ts = now
-        return dict(self._candles)
+    # -- calendar ----------------------------------------------------------------------------
+    @property
+    def calendar(self) -> TradingCalendar:
+        if self._cal is None:
+            raise MarketDataError("no trading calendar yet (Alpaca has not been reached)")
+        return self._cal
 
-    async def fear_greed(self) -> Optional[Tuple[int, str]]:
-        if time.time() - self._fng_ts < 3600:
-            return self._fng
+    async def refresh_calendar(self, force: bool = False) -> TradingCalendar:
+        """Once per New York day (or when forced). A failure keeps the stored calendar."""
+        now = self.clock.time()
+        today = trade_day(now)
+        if not force and self._cal is not None and self._cal_day == today:
+            return self._cal
         try:
-            self._fng = await self._fear_greed_fn()
-        except Exception as e:
-            logger.info("Fear & Greed unavailable: %s", e)
-            self._fng = None
-        self._fng_ts = time.time()
-        return self._fng
+            cal = await self.alpaca.calendar(today - timedelta(days=self.cfg.data.history_days),
+                                             today + timedelta(days=CALENDAR_AHEAD_DAYS))
+        except AlpacaError as e:
+            if self._cal is None:
+                raise MarketDataError(f"no trading calendar: {e}") from e
+            logger.warning("calendar refresh failed (%s); keeping the stored one", e)
+            return self._cal
+        if self.store.writer:
+            history.save_calendar(self.store, cal)
+            cal = history.load_calendar(self.store) or cal
+        self._cal, self._cal_day = cal, today
+        return cal
 
-    async def snapshot(self) -> MarketSnapshot:
-        quotes = await self.quotes()
-        candles = await self.candles()
-        fng = await self.fear_greed()
-        btc = [c for _, c in candles.get("BTC", [])]
-        views = {a: build_view(a, quotes.get(a), candles.get(a, []), btc, self.cfg)
-                 for a in self.cfg.universe}
-        warnings = []
-        now = time.time()
-        for a, v in views.items():
-            if v.quote and v.quote.age(now) > self.cfg.trading.max_data_age_sec:
-                warnings.append(f"{a} quote is {v.quote.age(now):.0f}s old")
-        return MarketSnapshot(as_of=now, assets=views, fear_greed=fng, warnings=tuple(warnings))
+    # -- quotes ------------------------------------------------------------------------------
+    async def snapshots(self, force: bool = False) -> Dict[str, dict]:
+        """Raw snapshots for every tracked symbol, cached for `quote_ttl_sec`. On an outage
+        the cache is returned: each quote carries its own exchange timestamp, so
+        `check_quote` still judges it stale rather than trusting it."""
+        async with self._lock:
+            now = self.clock.time()
+            if not force and self._snaps and now - self._snaps_ts < self.cfg.data.quote_ttl_sec:
+                return dict(self._snaps)
+            try:
+                self._snaps = await self.alpaca.snapshots(self.tracked(), feed=self.cfg.data.feed)
+                self._snaps_ts = now
+            except AlpacaError as e:
+                if not self._snaps:
+                    raise MarketDataError(f"no quotes: {e}") from e
+                logger.warning("snapshots failed (%s); quotes judged from the last ones", e)
+            return dict(self._snaps)
 
+    async def quote(self, symbol: str) -> Tuple[Optional[Quote], str]:
+        """A fresh, sane quote for an order, or (None, why not)."""
+        if symbol not in set(self.tracked()):
+            try:
+                snaps = await self.alpaca.snapshots([symbol], feed=self.cfg.data.feed)
+            except AlpacaError as e:
+                return None, f"market_data_error ({e})"
+        else:
+            snaps = await self.snapshots(force=self.clock.time() - self._snaps_ts > REFRESH_IF_OLDER_SEC)
+        return check_quote(symbol, snaps.get(symbol), self.clock.time(), self.cfg.data.quote_limits())
 
-async def fetch_fear_greed() -> Optional[Tuple[int, str]]:
-    async with httpx.AsyncClient(timeout=5.0) as c:
-        r = await c.get("https://api.alternative.me/fng/")
-        r.raise_for_status()
-        d = (r.json().get("data") or [None])[0]
-        return (int(d["value"]), str(d["value_classification"])) if d else None
+    async def live_quotes(self) -> Dict[str, Quote]:
+        """Every tracked symbol that has a usable live quote right now."""
+        now = self.clock.time()
+        limits = self.cfg.data.quote_limits()
+        out = {}
+        for s, snap in (await self.snapshots()).items():
+            q, _ = check_quote(s, snap, now, limits)
+            if q is not None:
+                out[s] = q
+        return out
+
+    # -- asset records -----------------------------------------------------------------------
+    async def refresh_assets(self, symbols: Iterable[str], force: bool = False) -> Dict[str, Asset]:
+        """Alpaca's record (tradable, fractionable) for each symbol, fetched once a New York
+        day and kept in the book's state; a symbol whose lookup fails keeps its last record."""
+        today = trade_day(self.clock.time()).isoformat()
+        stored = dict(self.store.get_state(ASSETS_STATE) or {})
+        known = {s: Asset(**r) for s, r in (stored.get("assets") or {}).items()}
+        wanted = sorted(set(symbols))
+        if not force and stored.get("day") == today and all(s in known for s in wanted):
+            return {s: known[s] for s in wanted if s in known}
+        for s in wanted:
+            try:
+                known[s] = await self.alpaca.asset(s)
+            except AlpacaError as e:
+                logger.warning("asset record for %s failed (%s); keeping the last one", s, e)
+        if self.store.writer:
+            self.store.set_state(ASSETS_STATE, {"day": today, "assets": {s: a.__dict__ for s, a in known.items()}})
+        return {s: known[s] for s in wanted if s in known}
+
+    # -- daily bars --------------------------------------------------------------------------
+    def final_session(self, now: Optional[float] = None) -> Optional[Session]:
+        """The newest session whose daily bar is final (closed, plus the SIP delay)."""
+        return self._final_session(self.clock.time() if now is None else now)
+
+    def _final_session(self, now: float) -> Optional[Session]:
+        """The newest session whose daily bar is final (closed, plus the SIP delay)."""
+        try:
+            recent = self.calendar.completed_sessions(now, 2)
+        except CalendarError as e:
+            raise MarketDataError(str(e)) from e
+        done = [s for s in recent if now >= s.close_ts + SIP_FINAL_AFTER_SEC]
+        return done[-1] if done else None
+
+    async def refresh_bars(self, force: bool = False) -> int:
+        """Raw and adjusted daily bars for every tracked symbol, once per final session (or
+        when forced). Returns how many raw bars were stored; 0 when there was nothing new."""
+        now = self.clock.time()
+        final = self._final_session(now)
+        if final is None or (not force and self._bars_through == final.day):
+            return 0
+        start = trade_day(now) - timedelta(days=self.cfg.data.history_days)
+        syms = self.tracked()
+        try:
+            raw = await self.alpaca.daily_bars(syms, start, now=now, adjustment="raw")
+            adj = await self.alpaca.daily_bars(syms, start, now=now, adjustment="all")
+        except AlpacaError as e:
+            raise MarketDataError(f"daily bars: {e}") from e
+        cal = self.calendar
+        raw = {s: completed_bars(b, cal, now) for s, b in raw.items()}
+        adj = {s: completed_bars(b, cal, now) for s, b in adj.items()}
+        n = history.save_bars(self.store, raw) if self.store.writer else 0
+        if self.store.writer:
+            history.replace_adjusted(self.store, adj)
+        self._bars_through = final.day
+        missing = [s for s, b in raw.items() if not b or b[-1].day != final.day]
+        if missing:
+            logger.info("no %s bar yet for %s", final.day, ", ".join(missing))
+        return n
+
+    def raw_bars(self, symbol: str) -> List[Bar]:
+        return history.raw_bars(self.store, symbol)
+
+    def adjusted(self, symbol: str) -> List[Tuple]:
+        return history.adjusted_closes(self.store, symbol)
+
+    # -- marks -------------------------------------------------------------------------------
+    async def _minute_closes(self, symbols: List[str]) -> Dict[str, Tuple[float, float]]:
+        now = self.clock.time()
+        missing = [s for s in symbols if s not in self._minutes]
+        if missing or now - self._minutes_ts > MINUTE_TTL_SEC:
+            try:
+                self._minutes.update(await self.alpaca.latest_minute_closes(symbols, now=now))
+                self._minutes_ts = now
+            except AlpacaError as e:
+                logger.warning("delayed minute closes failed: %s", e)
+        return {s: self._minutes[s] for s in symbols if s in self._minutes}
+
+    async def prices(self, symbols: Iterable[str]) -> Dict[str, Quote]:
+        """The current price of each symbol that has one, by the session rules in
+        `ledger/marks.py` (live quote, delayed minute close, or last official close)."""
+        syms = sorted(set(symbols))
+        if not syms:
+            return {}
+        now = self.clock.time()
+        try:
+            mt = self.calendar.state_at(now)
+        except CalendarError as e:
+            raise MarketDataError(str(e)) from e
+        live = await self.live_quotes() if mt.is_open else {}
+        bars = {s: self.raw_bars(s) for s in syms}
+        need = [s for s in syms if (mt.is_open and s not in live) or
+                (not mt.is_open and (mt.last_close is None or not bars[s] or bars[s][-1].day != mt.last_close.day))]
+        delayed = await self._minute_closes(need) if need else {}
+        out = {}
+        for s in syms:
+            m = mark(s, mt, live.get(s), delayed.get(s), bars[s])
+            if m is not None:
+                out[s] = m
+        return out
+
+    async def marks(self) -> Dict[str, Quote]:
+        """A mark for each holding that has one (a missing one makes the book's value
+        unknown: the ledger refuses to value a book with an unpriced holding)."""
+        return await self.prices(Ledger(self.store).positions())
+
+    # -- signals -----------------------------------------------------------------------------
+    async def vol_regime(self, symbol: str) -> Tuple[Optional[float], str]:
+        closes = [c for _, c in self.adjusted(symbol)]
+        d = self.cfg.data
+        vol = ind.annualized_vol(closes, d.vol_sessions, ind.TRADING_DAYS) if len(closes) > d.vol_sessions else None
+        return vol, ind.regime(ind.efficiency_ratio(closes, d.er_sessions), d.er_threshold)
+
+    def history(self) -> Mapping[str, List[Tuple]]:
+        """Adjusted closes for every tracked symbol (for the packet and benchmarks)."""
+        return {s: self.adjusted(s) for s in self.tracked()}
+
+    async def snapshot(self, members: Mapping[str, str], events=None,
+                       macro: Sequence[MacroReading] = ()) -> UsSnapshot:
+        """The council's view: every traded member (symbol -> class) priced and measured,
+        with breadth from the sector ETFs, the macro block and each asset's events."""
+        now = self.clock.time()
+        try:
+            mt = self.calendar.state_at(now)
+        except CalendarError as e:
+            raise MarketDataError(str(e)) from e
+        prices = await self.prices(members)
+        return build_snapshot(self.cfg, now, mt, prices, self.history(), members, macro, events)
+
+    async def benchmarks(self, base: Optional[Mapping]) -> Dict[str, Optional[float]]:
+        """SPY and 60/40 equity from the day-0 baseline, carried to now by today's moves."""
+        syms = (bm.SPY, bm.BONDS)
+        closes = {s: self.adjusted(s) for s in syms}
+        prices = await self.prices(syms)
+        # A close-basis price on the last adjusted close's own day is that close: a 0 move.
+        moves = {s: (prices[s].mid / closes[s][-1][1] - 1 if s in prices and closes[s] else None) for s in syms}
+        return bm.benchmark_values(base, closes, moves)

@@ -24,7 +24,7 @@ PRIORITY = {"stop": 0, "derisk": 1, "trim": 1, "operator": 2, "council_sell": 3,
 
 @dataclass(frozen=True)
 class Intent:
-    origin: str                 # council | stop | trim | derisk | operator
+    origin: str                 # council | stop | trim | derisk | operator | sweep
     asset: str
     side: str                   # BUY | SELL
     idem_key: str
@@ -47,6 +47,11 @@ class Intent:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "Intent":
+        """The intent an order row stored (to retry a deferred order unchanged)."""
+        return cls(**{k: d[k] for k in cls.__dataclass_fields__ if k in d})
 
 
 @dataclass(frozen=True)

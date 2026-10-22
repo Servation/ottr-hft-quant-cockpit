@@ -241,3 +241,18 @@ def next_meeting_at(cal: TradingCalendar, ts: float, times: Sequence[str] = DEFA
             if slot.timestamp() > ts:
                 return slot.timestamp()
     raise CalendarError(f"no council slot after {datetime.fromtimestamp(ts, tz=ET)} within the calendar")
+
+
+def last_meeting_at(cal: TradingCalendar, ts: float, times: Sequence[str] = DEFAULT_MEETING_TIMES,
+                    min_before_close_min: int = 45, lookback_days: int = 10) -> Optional[float]:
+    """Epoch time of the newest council slot at or before `ts`, or None if there is none in
+    the `lookback_days` the calendar covers (health uses it to judge whether a meeting that
+    should have happened did)."""
+    day = datetime.fromtimestamp(ts, tz=ET).date()
+    start = max(cal.first_day, day - timedelta(days=lookback_days))
+    best = None
+    for s in cal.sessions_between(start, day):
+        for slot in meeting_slots(s, times, min_before_close_min):
+            if slot.timestamp() <= ts:
+                best = slot.timestamp()
+    return best

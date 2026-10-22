@@ -1,7 +1,7 @@
 """
-Engine operations tests: the market heartbeat, persisted risk-blind state, watchdog
-alarms reaching Discord and the audit log, sleep/suspend detection, crash-only exit
-codes, the stop-request file, and the API's lifecycle inside `Engine.run`.
+Engine operations tests: the market heartbeat across the session, persisted risk-blind
+state, watchdog alarms reaching Discord and the audit log, sleep/suspend detection,
+crash-only exit codes, the stop-request file, and the API's lifecycle inside `Engine.run`.
 """
 
 import asyncio
@@ -17,7 +17,7 @@ from ottr.control import request_stop, stop_path
 from ottr.engine.engine import Engine
 from ottr.market.types import MarketDataError
 from ottr.notify import Alerts
-from tests.fakes import PRICES, FakeMarket, eth_buy_council
+from tests.fakes import OPEN, buy_council, et, market_rig, no_corporate_actions
 
 
 class Recorder:
@@ -30,18 +30,20 @@ class Recorder:
 
 
 @pytest.fixture
-def market(cfg):
-    return FakeMarket(cfg, PRICES)
-
-
-@pytest.fixture
 def rec():
     return Recorder()
 
 
 @pytest.fixture
-def eng(cfg, store, ledger, market, rec):
-    return Engine(cfg, store, market, council=eth_buy_council(cfg), alerts=Alerts(rec, Limits()))
+async def rig(cfg, store):
+    no_corporate_actions(store, cfg.core)
+    return await market_rig(cfg, store).ready()
+
+
+@pytest.fixture
+def eng(cfg, store, ledger, rig, rec):
+    return Engine(cfg, store, rig.market, council=buy_council(cfg, "TLT"), alerts=Alerts(rec, Limits()),
+                  clock=rig.clock)
 
 
 def drain(alerts):
@@ -52,46 +54,63 @@ def drain(alerts):
     return out
 
 
-async def test_market_tick_passes_on_fresh_data(eng):
-    await eng.market_tick()
+# -- the market heartbeat ------------------------------------------------------------------------
+async def test_market_tick_in_session_and_after_hours(cfg, store, ledger, rec):
+    from datetime import date
+    rig = await market_rig(cfg, store, through=date(2026, 10, 24)).ready()   # Alpaca gets Wed-Fri bars
+    eng = Engine(cfg, store, rig.market, alerts=Alerts(rec, Limits()), clock=rig.clock)
+    assert (await eng.market_tick()).startswith("open, 27 live quotes")
+    rig.at(et(2026, 10, 24, 12))                                       # Saturday: Friday's bars arrive
+    assert await eng.market_tick() == "closed; next open Mon 10-26 09:30 ET"
 
 
-async def test_market_tick_fails_on_stale_quotes_or_candles(eng, market):
-    market.age = 600
-    with pytest.raises(MarketDataError, match="BTC quote 10m old"):
+async def test_market_tick_fails_when_no_quote_is_usable(eng, rig):
+    rig.requote(age=600)                                               # every quote 10 minutes old
+    rig.market._snaps_ts = 0
+    with pytest.raises(MarketDataError, match="no usable live quote for any member"):
         await eng.market_tick()
-    market.age = 0
-    market.candle_rows["SOL"] = market.candle_rows["SOL"][:-5]  # closes stopped 5 days ago
-    with pytest.raises(MarketDataError, match="SOL last daily close"):
+
+
+async def test_market_tick_fails_when_daily_bars_stop_updating(eng, rig):
+    rig.at(et(2026, 10, 22, 18))                                       # Thursday evening, Alpaca has no new bars
+    with pytest.raises(MarketDataError, match="daily bars stop at 2026-10-20, but 2026-10-22 closed"):
         await eng.market_tick()
 
 
-async def _hold_eth(eng):
+# -- the risk monitor's sight --------------------------------------------------------------------
+async def _hold_tlt(eng):
     await eng.meeting(execute=True)
     await eng.executor.drain()
-    assert "ETH" in eng.ledger.positions()
+    assert "TLT" in eng.ledger.positions()
 
 
-async def test_risk_blind_is_persisted_and_cleared(eng, market, store):
-    await _hold_eth(eng)
-    market.age = 600
+async def test_risk_blind_is_persisted_and_cleared(eng, rig, store):
+    await _hold_tlt(eng)
+    p = rig.price("TLT")
+    rig.fake.add_quote("TLT", p * 0.97, p * 1.03, age=2)               # too wide to be a market
+    rig.market._snaps_ts = 0
     await eng.risk_tick()
-    since = store.get_state("risk_blind")["ETH"]
+    since = store.get_state("risk_blind")["TLT"]
+    rig.at(OPEN + 60, requote=False)
+    rig.market._snaps_ts = 0
     await eng.risk_tick()
-    assert store.get_state("risk_blind")["ETH"] == since  # "blind since" doesn't move
-    market.age = 0
+    assert store.get_state("risk_blind")["TLT"] == since               # "blind since" doesn't move
+    rig.requote()
+    rig.market._snaps_ts = 0
     await eng.risk_tick()
     assert store.get_state("risk_blind") == {}
 
 
-async def test_total_outage_marks_every_holding_blind(eng, market, store):
-    await _hold_eth(eng)
-    market.fail = True
+async def test_an_outage_with_nothing_cached_marks_every_holding_blind(eng, rig, store):
+    await _hold_tlt(eng)
+    rig.market._snaps = {}
+    rig.fake.fail_429["/v2/stocks/snapshots"] = 99
     with pytest.raises(MarketDataError):
         await eng.risk_tick()
-    assert set(store.get_state("risk_blind")) == {"ETH"}
+    assert set(store.get_state("risk_blind")) == {"TLT"}
 
 
+# -- the watchdog --------------------------------------------------------------------------------
 def beat_at(store, task, ts, ok=True, detail=""):
     """A heartbeat stamped at simulated time `ts` (store.heartbeat uses the real clock)."""
     store.conn.execute("INSERT INTO heartbeats(task,ts,ok,detail,ok_ts) VALUES(?,?,?,?,?) "
@@ -100,10 +119,13 @@ def beat_at(store, task, ts, ok=True, detail=""):
                        (task, ts, int(ok), detail, ts if ok else None))
 
 
+HEALTHY = ("market", "jobs", "equity", "council")
+
+
 async def test_watchdog_alarm_reaches_audit_and_discord_then_resolves(eng, store):
     now = time.time()
     eng.epoch, eng._last_watch = now - 3600, now - 60
-    for t in ("market", "equity", "council"):
+    for t in HEALTHY:
         beat_at(store, t, now)
     beat_at(store, "risk", now, ok=False, detail="MarketDataError: no quotes")  # never succeeded this run
     eng.watchdog_tick(now)
@@ -114,7 +136,7 @@ async def test_watchdog_alarm_reaches_audit_and_discord_then_resolves(eng, store
 
     for step in range(1, 7):  # the feed recovers; one tick a minute
         t = now + 60 * step
-        for task in ("market", "risk"):
+        for task in ("market", "jobs", "risk"):
             beat_at(store, task, t)
         eng.watchdog_tick(t)
         if step < 5:  # clean, but inside the 300s hysteresis
@@ -128,7 +150,7 @@ async def test_watchdog_alarm_reaches_audit_and_discord_then_resolves(eng, store
 async def test_system_sleep_does_not_raise_a_storm_of_alarms(eng, store):
     now = time.time()
     eng.epoch = eng._last_watch = now - 60
-    for t in ("market", "risk", "equity", "council"):
+    for t in ("risk", *HEALTHY):
         store.heartbeat(t, True)
     eng.watchdog_tick(now)
     # The laptop slept for two hours; every heartbeat is now 2h old by the wall clock.
@@ -143,6 +165,7 @@ async def test_system_sleep_does_not_raise_a_storm_of_alarms(eng, store):
     assert any(a.key == "task:risk" for a in eng.watchdog_tick(later + 190).alarms)
 
 
+# -- the run loop --------------------------------------------------------------------------------
 async def _run_briefly(eng, seconds=0.5, **kw):
     stop = asyncio.Event()
     asyncio.get_running_loop().call_later(seconds, stop.set)
@@ -151,7 +174,7 @@ async def _run_briefly(eng, seconds=0.5, **kw):
 
 async def test_run_reports_an_unclean_previous_exit(eng, store, rec):
     store.set_state("engine", {"running": True, "pid": 1})  # last run died without stopping
-    store.set_state("next_meeting_at", time.time() + 3600)
+    store.set_state("next_meeting_at", OPEN + 3600)
     assert await _run_briefly(eng) == 0
     start = store.audits("engine_start")[0]
     assert start["unclean_previous_exit"] is True
@@ -173,7 +196,7 @@ async def test_a_dead_core_task_exits_1_for_the_supervisor(eng, store):
 
 
 async def test_stop_file_stops_the_engine_but_a_stale_one_does_not(eng, cfg, store):
-    store.set_state("next_meeting_at", time.time() + 3600)
+    store.set_state("next_meeting_at", OPEN + 3600)
     request_stop(cfg.data_dir)
     import os
     old = time.time() - 600
@@ -191,7 +214,7 @@ async def test_stop_file_stops_the_engine_but_a_stale_one_does_not(eng, cfg, sto
 
 
 async def test_api_runs_inside_the_engine(eng, store):
-    store.set_state("next_meeting_at", time.time() + 3600)
+    store.set_state("next_meeting_at", OPEN + 3600)
     eng.cfg = dataclasses.replace(eng.cfg, api=dataclasses.replace(eng.cfg.api, port=0))
     stop = asyncio.Event()
     seen = {}
@@ -215,7 +238,7 @@ async def test_api_runs_inside_the_engine(eng, store):
 
 
 async def test_taken_api_port_is_an_alarm_not_a_crash(eng, store):
-    store.set_state("next_meeting_at", time.time() + 3600)
+    store.set_state("next_meeting_at", OPEN + 3600)
     blocker = socket.socket()
     blocker.bind(("127.0.0.1", 0))
     blocker.listen()
@@ -238,11 +261,11 @@ async def test_restart_names_the_alarms_it_lost_track_of(eng, store, rec):
     now = time.time()
     eng.epoch, eng._last_watch = now - 3600, now - 60
     beat_at(store, "risk", now, ok=False, detail="down")
-    for t in ("market", "equity", "council"):
+    for t in HEALTHY:
         beat_at(store, t, now)
     eng.watchdog_tick(now)
     assert set(store.get_state("alarms")) == {"task:risk"}
-    store.set_state("next_meeting_at", time.time() + 3600)
+    store.set_state("next_meeting_at", OPEN + 3600)
     assert await _run_briefly(eng) == 0
     start = next(p for p in rec.posts if p.startswith("**Engine started**"))
     assert "re-checked from scratch and re-raised if they persist: task:risk" in start

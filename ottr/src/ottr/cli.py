@@ -1,14 +1,13 @@
 """
 `ottr` command line.
 
-  ottr init [--fresh | --import-v1 PATH]   open the book (once)
+  ottr init                                open the book (once) with config.toml's starting cash
   ottr run                                 start the engine (the single writer)
   ottr supervise                           run the engine (and the chat bot) and restart them if they exit
   ottr service install|uninstall|status|start|stop|restart
                                            the Windows scheduled task that runs `supervise`
   ottr chat [--check]                      the Discord slash-command bot (reads the API; can't trade)
-  ottr screen [--json]                     rank other Kraken coins now (advisory; stores nothing)
-  ottr data --check [--symbols A,B]        is the Alpaca feed usable? (US desk; reads only)
+  ottr data --check [--symbols A,B]        are the Alpaca, events and macro feeds usable? (reads only)
   ottr meeting [--execute]                 one council meeting now (propose-only by default)
   ottr status [--json]                     read-only health + book; exit code says what's wrong
   ottr check                               replay the fill log and verify the books balance
@@ -31,23 +30,29 @@ import os
 import sys
 import tempfile
 import time
-from decimal import Decimal
+from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Dict, Optional, Tuple
 
 from ottr import config as cfgmod
 from ottr import health
 from ottr.engine.engine import Engine
 from ottr.engine.killswitch import KillSwitch
+from ottr.events.refresh import Sources
 from ottr.ledger.book import Ledger
+from ottr.ledger.marks import mark
 from ottr.ledger.store import LockError, SchemaError, Store
+from ottr.market.calendar import ET, MarketTime, SessionState
+from ottr.market.history import load_calendar, raw_bars
 from ottr.market.service import MarketData
-from ottr.market.types import MarketDataError
+from ottr.market.types import MarketDataError, Quote
 from ottr.notify import make_alerts
 from ottr.risk.monitor import RiskState
 
 logger = logging.getLogger("ottr")
 LOG_MAX_BYTES, LOG_BACKUPS = 5 * 1024 * 1024, 5
+NO_KEYS = ("No Alpaca keys: set APCA_API_KEY_ID and APCA_API_SECRET_KEY in ottr/.env "
+           "(Alpaca dashboard > Paper Trading > API Keys).")
 
 
 def _db(cfg) -> Path:
@@ -62,6 +67,35 @@ def _writer(cfg) -> Store:
                  "or use a read-only command (status, check, meeting without --execute).")
 
 
+def _alpaca(required: bool):
+    """The Alpaca data client from the keys in the environment, or None (or exit) without them."""
+    from ottr.market.alpaca import Alpaca, Credentials
+    creds = Credentials.from_env()
+    if creds is None:
+        if required:
+            sys.exit(NO_KEYS)
+        return None
+    return Alpaca(creds)
+
+
+def _sources(alpaca) -> Sources:
+    from ottr.events.earnings import AlphaVantage
+    from ottr.events.fred import Fred
+    from ottr.events.sec import Sec
+    return Sources(fred=Fred(), alpha_vantage=AlphaVantage.from_env(), sec=Sec.from_env(), alpaca=alpaca)
+
+
+def _et(ts: float, fmt: str = "%a %Y-%m-%d %H:%M") -> str:
+    return datetime.fromtimestamp(ts, tz=ET).strftime(fmt) + " ET"
+
+
+def _market_line(mt: MarketTime) -> str:
+    if mt.state is SessionState.OPEN:
+        return f"market OPEN until {_et(mt.session.close_ts, '%H:%M')}"
+    nxt = mt.next_open
+    return f"market closed; next open {_et(nxt.open_ts) if nxt else 'beyond the stored calendar'}"
+
+
 async def cmd_init(cfg, args) -> int:
     store = _writer(cfg)
     try:
@@ -69,42 +103,56 @@ async def cmd_init(cfg, args) -> int:
         if lg.initialized():
             print("already initialized; nothing changed")
             return 1
-        market = MarketData(cfg, archive=store)
-        if args.import_v1:
-            v1 = json.loads(Path(args.import_v1).read_text(encoding="utf-8"))  # read only
-            quotes = await market.quotes(force=True)
-            holdings = {}
-            for a, h in v1.get("holdings", {}).items():
-                q = Decimal(str(h.get("quantity", 0)))
-                if q > 0:
-                    if a not in quotes:
-                        sys.exit(f"no quote for v1 holding {a}; cannot mark it")
-                    holdings[a] = (q, quotes[a].mid)
-            lg.initialize(Decimal(str(v1["cash"])), note=f"import from {args.import_v1}",
-                          holdings=holdings)
-        else:
-            lg.initialize(cfg.trading.starting_cash)
-        await Engine(cfg, store, market).equity_tick()  # sets the day-0 benchmark baseline
-        _print_book(store, await market.quotes())
+        lg.initialize(cfg.account.starting_cash)
+        print(f"Book opened: ${cfg.account.starting_cash:,.2f} in a {cfg.account.type} account. The benchmarks "
+              "(SPY and 60/40) start from the first close the engine records. Next: `ottr run` (or "
+              "`ottr service start`).")
         return 0
     finally:
         store.close()
 
 
-def _print_book(store: Store, quotes) -> None:
+async def _marks(cfg, store: Store) -> Tuple[Dict[str, Quote], Optional[str]]:
+    """Prices for the holdings, and why there are none when there aren't. With Alpaca keys:
+    the engine's own rules (live in session). Without: the stored official closes only."""
+    held = Ledger(store).positions()
+    if not held:
+        return {}, None
+    alpaca = _alpaca(required=False)
+    if alpaca is not None:
+        try:
+            return await MarketData(cfg, alpaca, store).marks(), None
+        except MarketDataError as e:
+            return {}, str(e)
+    cal = load_calendar(store)
+    if cal is None:
+        return {}, "no stored calendar yet"
+    try:
+        mt = cal.state_at(time.time())
+    except Exception as e:
+        return {}, str(e)
+    out = {s: m for s in held if (m := mark(s, mt, None, None, raw_bars(store, s))) is not None}
+    return out, None if len(out) == len(held) else "live prices need the Alpaca keys"
+
+
+def _print_book(store: Store, marks: Dict[str, Quote]) -> None:
     lg = Ledger(store)
-    v = lg.value(quotes)
+    v = lg.value(marks)
     acct = lg.account()
     if v:
         print(f"equity ${v.equity:,.2f}  cash ${v.cash:,.2f}  invested ${v.invested:,.2f}  "
               f"realized ${float(acct['realized_pnl']):+,.2f}  fees ${float(acct['fees']):,.2f}")
     else:
-        print(f"equity unknown (a holding has no quote)  cash ${float(acct['cash']):,.2f}  "
+        print(f"equity unknown (a holding has no price)  cash ${float(acct['cash']):,.2f}  "
               f"realized ${float(acct['realized_pnl']):+,.2f}  fees ${float(acct['fees']):,.2f}")
     for a, p in lg.positions().items():
-        q = quotes.get(a)
-        mark = f"bid {q.bid:,.6g}  {(v.weights.get(a, 0) * 100 if v else 0):5.1f}%" if q else "no quote"
-        print(f"  {a:5} qty {p.qty:.6f}  avg {float(p.avg_cost):,.6g}  high {p.high_water:,.6g}  {mark}")
+        q = marks.get(a)
+        px = f"${q.bid:,.2f} {q.basis}  {(v.weights.get(a, 0) * 100 if v else 0):5.1f}%" if q else "no price"
+        print(f"  {a:6} qty {p.qty:.4f}  avg ${float(p.avg_cost):,.2f}  {px}")
+
+
+def _usd(x: Optional[float], unknown: str = "n/a") -> str:
+    return unknown if x is None else f"${x:,.2f}"
 
 
 async def cmd_status(cfg, args) -> int:
@@ -133,28 +181,28 @@ async def cmd_status(cfg, args) -> int:
         if not Ledger(store).initialized():
             print("ledger not initialized (run `ottr init`)")
             return report.exit_code
-        try:
-            quotes = await MarketData(cfg).quotes()
-        except MarketDataError as e:
-            print(f"(live quotes unavailable here: {e})")
-            quotes = {}
-        _print_book(store, quotes)
+        cal = load_calendar(store)
+        if cal is not None and cal.covers_day(datetime.now(ET).date()):
+            print(_market_line(cal.state_at(time.time())))
+        marks, why = await _marks(cfg, store)
+        if why:
+            print(f"(prices unavailable here: {why})")
+        _print_book(store, marks)
         st = RiskState.from_dict(store.get_state("risk"))
-        print(f"risk: {'HALTED since ' + time.ctime(st.halted_since) if st.halted else 'normal'}  "
-              f"peak {'$' + format(st.peak_equity, ',.2f') if st.peak_equity else 'n/a (no risk tick yet)'}  "
-              f"cooldowns {list(st.cooldowns) or 'none'}")
-        eq = store.conn.execute("SELECT ts,equity,bench_btc,bench_ew FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
+        print(f"risk: {'HALTED since ' + _et(st.halted_since) if st.halted else 'normal'}  "
+              f"peak {_usd(st.peak_equity, 'n/a (set by the first in-session risk check)')}  cooldowns {list(st.cooldowns) or 'none'}")
+        eq = store.conn.execute("SELECT ts,equity,bench_spy,bench_60_40 FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
         if eq:
-            print(f"last equity point {time.ctime(eq[0])}: ${eq[1]:,.2f}  vs BTC-hold ${eq[2] or 0:,.2f}  "
-                  f"vs equal-weight-hold ${eq[3] or 0:,.2f}")
+            later = "n/a until the first close"
+            print(f"last equity point {_et(eq[0])}: ${eq[1]:,.2f}  vs SPY hold {_usd(eq[2], later)}  "
+                  f"vs 60/40 {_usd(eq[3], later)}")
         for t in report.tasks:
             age = f"{health.fmt_age(report.ts - t.last_ts):>6} ago" if t.last_ts else "   never"
             state = "BAD" if not t.healthy else "ok" if t.last_ts else "wait"  # wait: still in its grace period
-            print(f"  task {t.task:8} {state:4} {age}  (stale after {health.fmt_age(t.interval * health.STALE_FACTOR)})"
-                  f"  {t.detail}")
+            print(f"  task {t.task:8} {state:4} {age}  ({t.expect})  {t.detail}")
         nxt = store.get_state("next_meeting_at")
         if nxt:
-            print(f"next council meeting: {time.ctime(nxt)}")
+            print(f"next council meeting: {_et(nxt)}")
         return report.exit_code
     finally:
         store.close()
@@ -185,6 +233,7 @@ def _scratch_copy(cfg) -> Store:
 
 
 async def cmd_meeting(cfg, args) -> int:
+    alpaca = _alpaca(required=True)
     if args.execute:
         store, alerts = _writer(cfg), make_alerts(cfg.discord_webhook_url, cfg.alerts)
     else:
@@ -192,7 +241,17 @@ async def cmd_meeting(cfg, args) -> int:
         cfg = dataclasses.replace(cfg, trading=dataclasses.replace(cfg.trading, dry_run=True))
     try:
         async with alerts.running():
-            engine = Engine(cfg, store, MarketData(cfg, archive=store), alerts=alerts)
+            market = MarketData(cfg, alpaca, store)
+            engine = Engine(cfg, store, market, alerts=alerts)
+            try:
+                await market.refresh_calendar()
+                await market.refresh_bars()
+                await engine.refresh_members()
+            except MarketDataError as e:
+                print(f"market data unavailable: {e}")
+                return 2
+            if not market.calendar.state_at(time.time()).is_open:
+                print("(the market is closed: any trade the council decides is deferred, then expires)")
             rec = await engine.meeting(execute=True)
             await engine.executor.drain()
         _print_meeting(rec, store)
@@ -219,7 +278,7 @@ def _print_meeting(rec, store: Store) -> None:
                               (f"council:{rec['id']}:%",)).fetchall()
     for key, status, verdict in rows:
         v = json.loads(verdict or "{}")
-        print(f"  {key.split(':')[-1]:5} {v.get('side', ''):4} {status:8} {v.get('reason', '')} "
+        print(f"  {key.split(':')[-1]:6} {v.get('side', ''):4} {status:8} {v.get('reason', '')} "
               f"${v.get('notional', 0):,.2f}  {'; '.join(v.get('notes', []))}")
     if not rec["trades"]:
         print("  no trades")
@@ -228,27 +287,32 @@ def _print_meeting(rec, store: Store) -> None:
 async def cmd_resume(cfg, args) -> int:
     store = _writer(cfg)
     try:
-        market = MarketData(cfg)
-        v = Ledger(store).value(await market.quotes())
+        marks, why = await _marks(cfg, store)
+        v = Ledger(store).value(marks)
         st = RiskState.from_dict(store.get_state("risk"))
         st.halted, st.halted_since = False, None
         if v:
             st.peak_equity = v.equity
         store.set_state("risk", st.to_dict())
         store.audit("risk_resume", why="operator", new_peak=st.peak_equity)
-        print(f"halt cleared; peak re-baselined to ${st.peak_equity or 0:,.2f}")
+        if v:
+            print(f"halt cleared; peak re-baselined to ${st.peak_equity:,.2f}")
+        else:
+            print(f"halt cleared; peak unchanged (no price for the book: {why})")
         return 0
     finally:
         store.close()
 
 
 async def cmd_run(cfg, args) -> int:
+    alpaca = _alpaca(required=True)
     store = _writer(cfg)
     try:
         if not Ledger(store).initialized():
             sys.exit("ledger not initialized: run `ottr init` first")
-        market = MarketData(cfg, archive=store)
-        engine = Engine(cfg, store, market, alerts=make_alerts(cfg.discord_webhook_url, cfg.alerts))
+        market = MarketData(cfg, alpaca, store)
+        engine = Engine(cfg, store, market, alerts=make_alerts(cfg.discord_webhook_url, cfg.alerts),
+                        sources=_sources(alpaca))
         return await engine.run()
     except Exception:
         logger.exception("engine crashed")  # into the log file; the supervisor restarts us
@@ -308,74 +372,26 @@ async def cmd_supervise(cfg, args) -> int:
     return await sup.run()
 
 
-async def cmd_screen(cfg, args) -> int:
-    from ottr.market import screen
-    from ottr.market.kraken import Kraken
-    if not args.json:  # one candle request per pair at Kraken's public rate: say why it's slow
-        print(f"Scanning Kraken USD pairs (up to {cfg.screen.max_pairs}, about 1-2 minutes)...", flush=True)
-    try:
-        d = (await screen.run(Kraken(), cfg)).to_dict()
-    except MarketDataError as e:
-        print(f"screen failed: {e}")
-        return 1
-    if args.json:
-        print(json.dumps(d, default=str))
-        return 0
-    rows = d["rows"]
-    print(f"OTTR screener, live (not stored: the engine keeps its own daily runs). {d['listed']} Kraken USD "
-          f"pairs listed, {len(rows)} ranked. * = in your universe. Advisory: nothing here is traded.")
-    for r in rows:
-        mark = "*" if r["in_universe"] else " "
-        status = "QUALIFIES" if r["qualifies"] else screen.why_not(r)
-        print(f" {mark}#{r['rank']:<3} {screen.line(r)} | {status}")
-    top = screen.candidates(d, cfg.screen.top_n)
-    print("\ncandidates: " + (", ".join(r["symbol"] for r in top) or "none qualifies right now"))
-    if top:
-        print(screen.promote_hint(top[0]))
-    print("dropped before scoring: " + ", ".join(f"{k} {v}" for k, v in sorted(d["excluded"].items())))
-    reasons: dict = {}
-    for r in d["rejected"]:
-        key = r["reason"].split(" (")[0]
-        reasons[key] = reasons.get(key, 0) + 1
-    if reasons:
-        print("measured but ineligible: " + ", ".join(f"{k} {v}" for k, v in sorted(reasons.items())))
-    for e in d["errors"]:
-        print(f"  ! {e}")
-    return 0
 
 
 async def cmd_data(cfg, args) -> int:
-    import time as _time
-
     from ottr.events import check as eventcheck
-    from ottr.events.earnings import AlphaVantage
-    from ottr.events.fred import Fred
-    from ottr.events.refresh import Sources
-    from ottr.events.sec import Sec
     from ottr.market import datacheck
-    from ottr.market.alpaca import Alpaca, Credentials
     from ottr.market.symbols import normalize
-    creds = Credentials.from_env()
-    if creds is None:
-        print("No Alpaca keys: set APCA_API_KEY_ID and APCA_API_SECRET_KEY in ottr/.env "
-              "(Alpaca dashboard > Paper Trading > API Keys).")
+    alpaca = _alpaca(required=False)
+    if alpaca is None:
+        print(NO_KEYS)
         return 3
     try:
-        us = cfgmod.load_us(data_dir=cfg.data_dir)
-    except cfgmod.ConfigError as e:
-        print(f"config.us.toml: {e}")
-        return 2
-    try:
-        symbols = [normalize(s) for s in args.symbols.split(",")] if args.symbols else list(us.core)
+        symbols = [normalize(s) for s in args.symbols.split(",")] if args.symbols else list(cfg.core)
     except ValueError as e:
         print(e)
         return 2
     print(f"Checking Alpaca for {len(symbols)} symbols (about 30 seconds)...", flush=True)
-    code = await datacheck.run(Alpaca(creds), symbols, _time.time())
+    code = await datacheck.run(alpaca, symbols, time.time())
     print()
     print("Checking the events and macro feeds (FRED, Alpha Vantage, SEC, corporate actions)...", flush=True)
-    sources = Sources(fred=Fred(), alpha_vantage=AlphaVantage.from_env(), sec=Sec.from_env(), alpaca=Alpaca(creds))
-    return max(code, await eventcheck.run(sources, us.events, symbols, _time.time()))
+    return max(code, await eventcheck.run(_sources(alpaca), cfg.events, symbols, time.time()))
 
 
 async def cmd_chat(cfg, args) -> int:
@@ -439,10 +455,7 @@ def main(argv=None) -> int:
     ap.add_argument("--log-file", type=Path, help="log to this rotating file instead of stderr")
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("init")
-    g = p.add_mutually_exclusive_group()
-    g.add_argument("--fresh", action="store_true")
-    g.add_argument("--import-v1", metavar="PATH")
+    sub.add_parser("init", help="open the book (once) with the starting cash in config.toml")
     sub.add_parser("run")
     sub.add_parser("supervise", help="run the engine (and the chat bot) and restart them whenever they exit")
     p = sub.add_parser("chat", help="the Discord slash-command bot (reads the engine API, can't trade)")
@@ -457,11 +470,9 @@ def main(argv=None) -> int:
     p.add_argument("--execute", action="store_true", help="act on the decision (else propose-only)")
     p = sub.add_parser("status")
     p.add_argument("--json", action="store_true", help="machine-readable health report")
-    p = sub.add_parser("screen", help="rank other Kraken coins now (advisory; prints, stores nothing)")
-    p.add_argument("--json", action="store_true", help="the full result as JSON")
     p = sub.add_parser("data", help="US desk: check the Alpaca, events and macro feeds (reads only)")
     p.add_argument("--check", action="store_true", required=True, help="run the feed check")
-    p.add_argument("--symbols", help="comma-separated symbols (default: the core universe in config.us.toml)")
+    p.add_argument("--symbols", help="comma-separated symbols (default: the core universe in config.toml)")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)
@@ -476,7 +487,7 @@ def main(argv=None) -> int:
     _setup_logging(args.verbose, log_file, console=log_file is None or args.cmd == "supervise",
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
-          "chat": cmd_chat, "screen": cmd_screen, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
+          "chat": cmd_chat, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
           "resume": cmd_resume}[args.cmd]
     try:
         return asyncio.run(fn(cfg, args))

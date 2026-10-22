@@ -2,7 +2,7 @@
 Pure indicator math on daily closes (oldest -> newest). No I/O, no pandas.
 
 What it does: EMA, Wilder RSI, MACD, Kaufman efficiency ratio + regime label, annualized
-volatility and return correlation. Why pure Python: v1 depended on pandas-ta, which
+volatility and date-aligned return correlation. Why pure Python: v1 depended on pandas-ta, which
 pinned the interpreter to 3.12; these are a few lines each and trivially testable.
 Every function returns None (never 0.0) when the input is too short, so callers can't
 mistake "unknown" for "zero".
@@ -82,15 +82,14 @@ def log_returns(closes: Sequence[float]) -> List[float]:
     return [math.log(b / a) for a, b in zip(closes, closes[1:]) if a > 0 and b > 0]
 
 
-# Periods per year for annualizing daily volatility: crypto trades every calendar day,
-# US markets about 252 sessions a year. Using 365 on stock bars would overstate vol by
-# sqrt(365/252), about 20%, and shrink every position by the same factor.
-CRYPTO_DAYS = 365.0
+# Sessions per year for annualizing daily volatility. US markets trade about 252 sessions
+# a year; annualizing by 365 (calendar days) would overstate vol by sqrt(365/252), about
+# 20%, and shrink every position by the same factor.
 TRADING_DAYS = 252.0
 
 
-def annualized_vol(closes: Sequence[float], window: int = 30,
-                   periods_per_year: float = CRYPTO_DAYS) -> Optional[float]:
+def annualized_vol(closes: Sequence[float], window: int = 60,
+                   periods_per_year: float = TRADING_DAYS) -> Optional[float]:
     """Sample stdev of daily log returns over `window` bars, * sqrt(periods_per_year)."""
     rets = log_returns(list(closes)[-(window + 1):])
     if len(rets) < 2:
@@ -99,15 +98,6 @@ def annualized_vol(closes: Sequence[float], window: int = 30,
     var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
     vol = math.sqrt(var) * math.sqrt(periods_per_year)
     return vol if vol > 0 else None
-
-
-def return_correlation(a: Sequence[float], b: Sequence[float],
-                       window: int = 30) -> Optional[float]:
-    """Pearson correlation of daily log RETURNS (price levels give spurious ~1s)."""
-    ra = log_returns(list(a)[-(window + 1):])
-    rb = log_returns(list(b)[-(window + 1):])
-    n = min(len(ra), len(rb))
-    return _pearson(ra[-n:], rb[-n:]) if n else None
 
 
 def _pearson(x: Sequence[float], y: Sequence[float]) -> Optional[float]:
@@ -127,8 +117,7 @@ def aligned_return_correlation(a: Sequence[Tuple[Hashable, float]], b: Sequence[
                                window: int = 30) -> Optional[float]:
     """Pearson correlation of log returns over the last `window` dates BOTH series have.
 
-    `a` and `b` are (date, close) rows. Matching by position (as `return_correlation`
-    does) is only right when both series cover the same days. Stocks halt, list late and
+    `a` and `b` are (date, close) rows. Matching by position is only right when both series cover the same days. Stocks halt, list late and
     trade different holiday calendars (EFA vs SPY), so one missing day would pair Monday's
     move with Tuesday's. Here each return spans the same two dates in both series.
     """

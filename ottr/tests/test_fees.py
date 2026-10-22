@@ -10,7 +10,7 @@ import pytest
 
 from ottr import config as cfgmod
 from ottr.broker.fees import FeeRate, FeeSchedule, FeeScheduleError, charge_for_day, from_rows
-from ottr.config import ConfigError, load_us
+from ottr.config import ConfigError, load
 from ottr.ledger.book import LedgerError
 from ottr.market.calendar import ET
 
@@ -23,7 +23,7 @@ def at(y, m, d, h=12):
 
 @pytest.fixture(scope="module")
 def shipped():
-    return load_us().fees
+    return load().fees
 
 
 # -- schedule -----------------------------------------------------------------------------
@@ -181,18 +181,18 @@ def test_check_catches_fee_tampering(ledger, sql, needle):
 # -- config ---------------------------------------------------------------------------------
 
 def test_a_required_fee_missing_from_config_is_rejected(tmp_path):
-    text = cfgmod.US_CONFIG.read_text(encoding="utf-8")
+    text = cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8")
     start = text.index('[[fees.rate]]\nfee = "cat"')
     end = text.index("[risk]")
     p = tmp_path / "c.toml"
     p.write_text(text[:start] + text[end:], encoding="utf-8")
     with pytest.raises(ConfigError, match=r"no \[\[fees.rate\]\] for \['cat'\]"):
-        load_us(p, data_dir=tmp_path)
+        load(p, data_dir=tmp_path)
 
 
 def test_a_bad_fee_row_is_a_config_error(tmp_path):
-    text = cfgmod.US_CONFIG.read_text(encoding="utf-8").replace('basis = "notional"', 'basis = "weight"', 1)
+    text = cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8").replace('basis = "notional"', 'basis = "weight"', 1)
     p = tmp_path / "c.toml"
     p.write_text(text, encoding="utf-8")
     with pytest.raises(ConfigError, match="fees: .*basis"):
-        load_us(p, data_dir=tmp_path)
+        load(p, data_dir=tmp_path)

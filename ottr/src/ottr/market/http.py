@@ -8,9 +8,9 @@ into (result, error, retryable); `classify_text` serves the CSV feeds (FRED, Alp
 Vantage). `RateLimiter` is an async token bucket that keeps a client under a provider's
 budget (Alpaca's free tier allows 200 requests a minute, the SEC 10 a second).
 
-Why shared: OTTR talks to several data providers (Kraken now; Alpaca, FRED, Alpha Vantage
-and the SEC next). One retry policy means every feed fails the same way, loudly and
-bounded, instead of each client growing its own almost-identical loop.
+Why shared: OTTR talks to several data providers (Alpaca, FRED, Alpha Vantage and the
+SEC). One retry policy means every feed fails the same way, loudly and bounded, instead
+of each client growing its own almost-identical loop.
 """
 
 from __future__ import annotations

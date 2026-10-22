@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 RELEASE_TIMEOUT = 60.0
 STANDBY_POLL = 5.0    # how often a standing-by bot retries the single-instance lock
-COMMANDS = ("status", "positions", "meeting", "screen", "ask", "kill", "release")
+COMMANDS = ("status", "positions", "meeting", "ask", "kill", "release")
 
 
 class ChatConfigError(RuntimeError):
@@ -89,9 +89,6 @@ class Handlers:
 
     async def meeting(self, interaction: Any) -> None:
         await self._read(interaction, self.service.meeting)
-
-    async def screen(self, interaction: Any) -> None:
-        await self._read(interaction, self.service.screen)
 
     async def ask(self, interaction: Any, question: str) -> None:
         async def defer() -> None:
@@ -202,14 +199,9 @@ def build_tree(client: discord.Client, handlers: Handlers, guild_id: Optional[in
     async def meeting(interaction: discord.Interaction) -> None:
         await handlers.meeting(interaction)
 
-    @tree.command(name="screen", description="Other Kraken coins ranked by trend, strength vs BTC and liquidity",
-                  **where)
-    async def screen(interaction: discord.Interaction) -> None:
-        await handlers.screen(interaction)
-
     @tree.command(name="ask", description="Ask about the book, positions or the last meeting (can't trade)",
                   **where)
-    @app_commands.describe(question="Your question, e.g. why did the council buy ETH?")
+    @app_commands.describe(question="Your question, e.g. why did the council buy TLT?")
     async def ask(interaction: discord.Interaction, question: app_commands.Range[str, 1, 1500]) -> None:
         await handlers.ask(interaction, question)
 

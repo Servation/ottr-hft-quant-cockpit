@@ -27,9 +27,7 @@ class Quote:
     ask: float
     last: float
     ts: float                      # when we fetched it (epoch seconds)
-    source: str                    # "kraken" | "coinbase" | "alpaca"
-    high_24h: Optional[float] = None
-    low_24h: Optional[float] = None
+    source: str                    # "alpaca" (tests use others)
     basis: str = BASIS_LIVE
 
     @property
@@ -56,7 +54,6 @@ class AssetClass(str, Enum):
     COMMODITY_ETF = "commodity_etf"  # GLD, SLV, PDBC
     REAL_ESTATE_ETF = "real_estate_etf"  # VNQ
     STOCK = "stock"                  # screener-picked single names
-    CRYPTO = "crypto"                # the current desk, until the cutover
 
 
 @dataclass(frozen=True)

@@ -11,8 +11,8 @@ log (deposits + fills, in order) and reports any difference.
 Conventions, chosen to match how a US broker reports a taxable account:
 - Cash, cost, proceeds and fees are in cents. Quantities go to 1e-9 shares, the
   precision Alpaca uses for fractional shares.
-- Fees charged at the fill (a commission, the crypto exchange fee): BUY fees are added
-  to the lot's cost basis; SELL fees reduce the proceeds.
+- Fees charged at the fill (a commission): BUY fees are added to the lot's cost basis;
+  SELL fees reduce the proceeds.
 - Regulatory fees (SEC, TAF, CAT) are accrued per fill, exactly, and charged once per
   trading day, rounded up to the cent, as a 'fee' cash event: Alpaca's end-of-day charge.
   They are account costs, not part of any lot, so they reduce cash and equity but not a

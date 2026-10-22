@@ -2,7 +2,7 @@
 SQLite store: the only persistence layer, with an enforced single writer.
 
 What it does: owns the schema, transactions, and small helpers (audit, heartbeats,
-key/value risk state, candles, equity, meetings). The writer holds an OS-level lock file
+key/value risk state, heartbeats, equity, meetings). The writer holds an OS-level lock file
 for its whole life; any other process can only open the DB read-only. Why: v1 kept state
 in JSON files that any importer could rewrite (and did), and a corrupt file was silently
 replaced by a fresh book. SQLite transactions make a fill + lots + position + cash + order
@@ -87,20 +87,18 @@ CREATE TABLE IF NOT EXISTS stances (
     meeting_id TEXT NOT NULL, analyst TEXT NOT NULL, asset TEXT NOT NULL,
     stance TEXT NOT NULL, conviction REAL NOT NULL, price REAL, ts REAL NOT NULL,
     PRIMARY KEY (meeting_id, analyst, asset));
+-- One point per equity tick: the book marked to market, and what the same starting equity
+-- would be worth in SPY alone and in 60/40 SPY/IEF (None until the first close after init).
+-- `detail` holds each holding's weight and mark basis (live, delayed or close).
 CREATE TABLE IF NOT EXISTS equity (
     ts REAL PRIMARY KEY, equity REAL NOT NULL, cash REAL NOT NULL, invested REAL NOT NULL,
-    bench_btc REAL, bench_ew REAL, detail TEXT);
+    bench_spy REAL, bench_60_40 REAL, detail TEXT);
 CREATE TABLE IF NOT EXISTS risk_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit (
     id INTEGER PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, data TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS audit_kind_ts ON audit (kind, ts);
-CREATE TABLE IF NOT EXISTS candles (
-    asset TEXT NOT NULL, ts INTEGER NOT NULL, close REAL NOT NULL, PRIMARY KEY (asset, ts));
 CREATE TABLE IF NOT EXISTS heartbeats (
     task TEXT PRIMARY KEY, ts REAL NOT NULL, ok INTEGER NOT NULL, detail TEXT, ok_ts REAL);
-CREATE TABLE IF NOT EXISTS screens (
-    id TEXT PRIMARY KEY, ts REAL NOT NULL, result TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS screens_ts ON screens (ts);
 -- The exchange calendar as Alpaca listed it (sessions, early closes, settlement dates).
 -- meta 'calendar_range' says which days the rows speak for: a day in range with no row
 -- is a holiday. A restart, or a read-only `ottr status`, knows the session without Alpaca.
@@ -383,36 +381,13 @@ class Store:
         return {r[0]: {"ts": r[1], "ok": bool(r[2]), "detail": r[3], "ok_ts": r[4]}
                 for r in self.conn.execute("SELECT task,ts,ok,detail,ok_ts FROM heartbeats")}
 
-    # -- candles (CandleArchive) ----------------------------------------------------------
-    def load_candles(self, asset: str) -> List[Tuple[int, float]]:
-        return [(r[0], r[1]) for r in self.conn.execute(
-            "SELECT ts,close FROM candles WHERE asset=? ORDER BY ts", (asset,))]
-
-    def save_candles(self, asset: str, rows: List[Tuple[int, float]]) -> None:
-        if not self.writer:
-            return
-        with self.tx() as c:
-            c.executemany("INSERT INTO candles(asset,ts,close) VALUES(?,?,?) "
-                          "ON CONFLICT(asset,ts) DO UPDATE SET close=excluded.close",
-                          [(asset, ts, close) for ts, close in rows])
-
     # -- equity ---------------------------------------------------------------------------
     def add_equity(self, ts: float, equity: float, cash: float, invested: float,
-                   bench_btc: Optional[float], bench_ew: Optional[float], detail: Dict[str, Any]) -> None:
+                   bench_spy: Optional[float], bench_60_40: Optional[float], detail: Dict[str, Any]) -> None:
         with self.tx() as c:
-            c.execute("INSERT OR REPLACE INTO equity(ts,equity,cash,invested,bench_btc,bench_ew,detail) "
-                      "VALUES(?,?,?,?,?,?,?)", (ts, equity, cash, invested, bench_btc, bench_ew, dumps(detail)))
+            c.execute("INSERT OR REPLACE INTO equity(ts,equity,cash,invested,bench_spy,bench_60_40,detail) "
+                      "VALUES(?,?,?,?,?,?,?)", (ts, equity, cash, invested, bench_spy, bench_60_40, dumps(detail)))
 
     def equity_series(self, limit: int = 5000) -> List[Tuple[float, float]]:
         rows = self.conn.execute("SELECT ts,equity FROM equity ORDER BY ts DESC LIMIT ?", (limit,)).fetchall()
         return [(r[0], r[1]) for r in reversed(rows)]
-
-    # -- screener (advisory; kept for history so P3 can grade the picks) -----------------
-    def save_screen(self, result: Dict[str, Any]) -> None:
-        with self.tx() as c:
-            c.execute("INSERT OR REPLACE INTO screens(id,ts,result) VALUES(?,?,?)",
-                      (result["id"], result["ts"], dumps(result)))
-
-    def latest_screen(self) -> Optional[Dict[str, Any]]:
-        r = self.conn.execute("SELECT result FROM screens ORDER BY ts DESC LIMIT 1").fetchone()
-        return json.loads(r[0]) if r else None

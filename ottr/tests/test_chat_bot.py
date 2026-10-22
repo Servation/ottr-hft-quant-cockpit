@@ -139,7 +139,7 @@ async def test_callbacks_are_wired_to_the_handlers(rig, client):
     tree = build_tree(client, rig.h)
     it = FakeInteraction()
     await tree.get_command("ask").callback(it, question="what do we hold?")
-    assert it.kinds() == ["defer", "followup"] and "ETH is your only position." in it.events[1][1]
+    assert it.kinds() == ["defer", "followup"] and "TLT is your only position." in it.events[1][1]
 
 
 # -- reads and /ask ------------------------------------------------------------------------
@@ -155,7 +155,7 @@ async def test_ask_defers_before_the_model_runs(rig):
     it = FakeInteraction()
     seen = []
     rig.model.on_call = lambda: seen.append(it.response.is_done())
-    await rig.h.ask(it, "why ETH?")
+    await rig.h.ask(it, "why TLT?")
     assert seen == [True] and it.events[0] == ("defer", True)
 
 
