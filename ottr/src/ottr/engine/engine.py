@@ -14,7 +14,11 @@ and branch on the session, because nights, weekends and holidays are normal stat
   including the exit from a holding ahead of a corporate action the book can't model.
 - equity (15m): a point in session, and one at each close, with the SPY and 60/40
   benchmarks measured from the first close after the book opened.
-- council: meetings at the configured New York times on trading days.
+- council: meetings at the configured New York times on trading days, and meetings the
+  watcher calls in between.
+- watch (60s, in session): the desk watcher's conditions checked on live quotes, and its
+  review of the market every `watch.check_every_min` and after every meeting
+  (`engine/watcher.py`).
 - screen: the weekly stock screener (`ottr/universe`), which promotes and demotes the
   satellites; a run missed while the engine was down happens as soon as it is back.
 - watchdog (60s): turns stale heartbeats, a blind risk monitor, stale events feeds and
@@ -43,11 +47,12 @@ from ottr.config import Config
 from ottr.control import (STOP_FILE, clear_stale_stop, install_stop_signals, restore_signals,
                           stop_requested)
 from ottr.council.council import Council, new_meeting_id
-from ottr.council.models import make_adapter
+from ottr.council.models import ModelAdapter, ModelError, ask_json, make_adapter
 from ottr.engine.desks import Desk
 from ottr.engine.executor import Executor
 from ottr.engine.jobs import close_of_day, sweep_intent
 from ottr.engine.killswitch import KillSwitch
+from ottr.engine import watcher
 from ottr.engine.progress import MeetingProgress
 from ottr.events.refresh import Sources, refresh_due
 from ottr.events.view import FEED_CORPORATE, StoredEvents, macro_readings
@@ -76,6 +81,7 @@ NEXT_MEETING = "next_meeting_at"
 DEFERRED_RETRY_SEC = 60.0       # a deferred order is tried again at most this often
 BARS_GRACE_SEC = 3600.0         # a final session's bars should be stored within this long
 MEETING_GRACE_SEC = 1800.0      # a slot missed by more than this (engine down) is skipped
+WATCH_STATE = "watch"           # risk_state key: the watcher's conditions, reviews and calls
 SCREEN_RETRY_SEC = 1800.0       # a failed weekly screen is tried again after this
 WEEK_SEC = 7 * 86400.0
 EARNINGS_BLACKOUT = gate.EARNINGS_BLACKOUT_SESSIONS
@@ -111,11 +117,15 @@ def _et(ts: float, fmt: str = "%a %m-%d %H:%M") -> str:
 class Engine:
     def __init__(self, cfg: Config, store: Store, market: MarketData,
                  council: Optional[Council] = None, alerts: Optional[Alerts] = None,
-                 sources: Optional[Sources] = None, clock: Clock = SYSTEM) -> None:
+                 sources: Optional[Sources] = None, clock: Clock = SYSTEM,
+                 watcher_model: Optional[ModelAdapter] = None) -> None:
         self.cfg, self.store, self.market, self.clock = cfg, store, market, clock
         self.sources = sources or Sources()
         self.ledger = Ledger(store)
         self.council = council or build_council(cfg)
+        self.watcher_model = watcher_model or make_adapter(cfg.watch.model, cfg.council, cfg.watch.effort or None)
+        self._call = asyncio.Event()                     # set when a meeting call is pending
+        self._review_task: Optional[asyncio.Task] = None
         self.alerts = alerts or Alerts(None, cfg.alerts)
         self.kill = KillSwitch(cfg, store)
         stored = (store.get_state("assets") or {}).get("assets") or {}
@@ -442,6 +452,160 @@ class Engine:
         self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail, after_tax)
         return f"equity ${v.equity:,.2f}" + (f" (after tax, est. ${after_tax:,.2f})" if after_tax is not None else "")
 
+    # -- the watcher -------------------------------------------------------------------------
+    def watch_state(self) -> watcher.WatchState:
+        return watcher.WatchState.from_dict(self.store.get_state(WATCH_STATE))
+
+    def _save_watch(self, st: watcher.WatchState) -> None:
+        self.store.set_state(WATCH_STATE, st.to_dict())
+
+    def _last_meeting(self) -> Optional[tuple]:
+        return self.store.conn.execute("SELECT id, ts, status, record FROM meetings ORDER BY ts DESC LIMIT 1").fetchone()
+
+    def since_last_meeting(self, snap: UsSnapshot) -> str:
+        """What the watcher reads first: the last meeting's decision and orders, every price
+        move since, the risk events since, and the calls made today."""
+        row = self._last_meeting()
+        if row is None:
+            return "No meeting has run yet."
+        mid, ts, status, raw = row
+        rec, now = json.loads(raw), snap.as_of
+        d = rec.get("decision") or {}
+        called = (rec.get("called") or {}).get("why")
+        lines = [f"Last meeting {mid} at {_et(ts)} ET ({(now - ts) / 60:.0f} minutes ago), {status}"
+                 + (f"; it was called: {called}" if called else "") + "."]
+        if d.get("summary"):
+            lines.append(f"Chair: {d['summary']}")
+        for key, st, verdict in self.store.conn.execute(
+                "SELECT idem_key, status, verdict FROM orders WHERE idem_key LIKE ? ORDER BY ts", (f"council:{mid}:%",)):
+            v = json.loads(verdict or "{}")
+            lines.append(f"Order {key.rsplit(':', 1)[-1]} {v.get('side', '')}: {st} ({v.get('reason', '')})")
+        then = {a: p for a, p in self.store.conn.execute(
+            "SELECT asset, AVG(price) FROM stances WHERE meeting_id=? AND price IS NOT NULL GROUP BY asset", (mid,))}
+        moves = []
+        for s, view in snap.assets.items():
+            if view.price is not None and then.get(s):
+                moves.append((view.price.mid / then[s] - 1, s, then[s], view.price.mid))
+        if moves:
+            lines.append("Moves since (price at the meeting -> now), largest first: " + "; ".join(
+                f"{s} {a:,.2f} -> {b:,.2f} ({m * 100:+.2f}%)" for m, s, a, b in sorted(moves, key=lambda x: -abs(x[0]))))
+        events = [f"{e['kind']} {e.get('asset', '')}".strip() for e in self.store.audits(since=ts, limit=50)
+                  if e["kind"].startswith("risk_")]
+        lines.append("Risk events since: " + (", ".join(reversed(events)) if events else "none"))
+        return "\n".join(lines)
+
+    async def review(self, why: str, apply: bool = True) -> Dict[str, Any]:
+        """One watcher review: the model's decision, the conditions accepted and why any
+        were dropped. With `apply`, the conditions replace the watched ones and a call to
+        meet is requested (code still decides whether it may run)."""
+        now = self.clock.time()
+        classes = self.classes()
+        macro = macro_readings(self.store, self.cfg.events.macro, trade_day(now), self.cfg.events.macro_stale_days)
+        snap = await self.market.snapshot(classes, self.events, macro)
+        st = self.watch_state()
+        text = watcher.prompt(snap.packet() + "\n\n" + self.book_context(snap), self.since_last_meeting(snap),
+                              st, self.cfg, now)
+        try:
+            reply = await ask_json(self.watcher_model, text, watcher.validate_reply, timeout=self.cfg.watch.timeout_sec)
+        except ModelError as e:
+            if apply:
+                st.last_error = f"{_et(now)} ET: {e}"[:300]
+                self._save_watch(st)
+            raise
+        prices = {s: v.price.mid for s, v in snap.assets.items() if v.price is not None}
+        triggers, problems = watcher.accept_triggers(reply["watch_for"], prices, self.cfg.watch.max_triggers)
+        out = {**reply, "triggers": triggers, "problems": problems, "reason": why}
+        if not apply:
+            return out
+        changed = [t.describe() for t in triggers] != [t.describe() for t in st.triggers] or reply["note"] != st.note
+        st.triggers, st.note, st.set_ts = triggers, reply["note"], now
+        st.last_review_ts, st.last_error = now, ""
+        st.last_review = f"{_et(now)} ET ({why}): {'call a meeting' if reply['call_meeting'] else 'no meeting'}: {reply['why']}"[:400]
+        self._save_watch(st)
+        self.store.audit("watch_review", reason=why, call_meeting=reply["call_meeting"], why=reply["why"],
+                         note=reply["note"], triggers=[t.describe() for t in triggers], dropped=problems)
+        logger.info("watcher (%s): %s; watching %s", why, "call a meeting" if reply["call_meeting"] else "no meeting",
+                    ", ".join(t.describe() for t in triggers) or "nothing")
+        for p in problems:
+            logger.info("watcher condition dropped: %s", p)
+        if changed:
+            self.alerts.event("watch_set", {"reason": why, "note": reply["note"],
+                                            "triggers": [[t.describe(), t.why] for t in triggers]})
+        if reply["call_meeting"]:
+            self.request_meeting("watcher", reply["why"])
+        return out
+
+    def request_meeting(self, by: str, why: str) -> bool:
+        """Ask the council loop for a meeting now. Refused (and said so) when code's limits
+        don't allow one; True when it was queued."""
+        now = self.clock.time()
+        st = self.watch_state()
+        blocked = self._call_blocked(st, now)
+        if blocked:
+            logger.info("meeting call by the %s refused: %s (%s)", by, blocked, why)
+            self.store.audit("meeting_call_refused", by=by, why=why, blocked=blocked)
+            self.alerts.event("meeting_call_refused", {"by": by, "why": why, "blocked": blocked})
+            return False
+        st.pending = {"ts": now, "by": by, "why": why}
+        self._save_watch(st)
+        self.store.audit("meeting_called", by=by, why=why)
+        self.alerts.event("meeting_called", {"by": by, "why": why})
+        self._call.set()
+        return True
+
+    def _call_blocked(self, st: watcher.WatchState, now: float) -> Optional[str]:
+        try:
+            mt = self.market.calendar.state_at(now)
+        except (MarketDataError, CalendarError) as e:
+            return f"the session is unknown ({e})"
+        last = self._last_meeting()
+        return watcher.call_blocked(self.cfg, mt, now, st, last[1] if last else None,
+                                    self.store.get_state(NEXT_MEETING), self.meeting_started is not None)
+
+    def _start_review(self, why: str) -> None:
+        """Run a review in the background (one at a time): the watch loop keeps checking
+        conditions every minute while a model call takes its minute or two."""
+        if self._review_task is not None and not self._review_task.done():
+            return
+
+        async def run() -> None:
+            try:
+                await self.review(why)
+            except (ModelError, MarketDataError) as e:
+                logger.warning("watcher review (%s) failed: %s", why, e)
+            except Exception:
+                logger.exception("watcher review (%s) failed", why)
+        self._review_task = asyncio.create_task(run(), name="watch-review")
+
+    async def watch_tick(self) -> str:
+        """In session: check the watched conditions on live quotes (one that is met calls a
+        meeting), and start a review when one is due."""
+        w = self.cfg.watch
+        now = self.clock.time()
+        if not self.market.calendar.state_at(now).is_open:
+            return "market closed: watching resumes at the open"
+        st = self.watch_state()
+        notes = []
+        if st.triggers:
+            quotes = await self.market.live_quotes()
+            hits = watcher.fired(st.triggers, {s: q.mid for s, q in quotes.items()})
+            if hits:
+                st.triggers = [t for t in st.triggers if t not in {h[0] for h in hits}]
+                self._save_watch(st)
+                for t, px in hits:
+                    self.store.audit("watch_hit", condition=t.describe(), price=px, why=t.why)
+                    notes.append(f"{t.describe()} met")
+                why = "; ".join(f"{t.describe()} (now ${px:,.2f}), watched because {t.why}" for t, px in hits)
+                self.request_meeting("condition", why)
+        busy = self._review_task is not None and not self._review_task.done()
+        if busy:
+            notes.append("reviewing")
+        elif self.meeting_started is None and (st.last_review_ts is None or now - st.last_review_ts >= w.check_every_min * 60):
+            self._start_review("routine check")
+            notes.append("review started")
+        watching = f"watching {len(st.triggers)} condition(s)" if st.triggers else "no conditions set"
+        return "; ".join([watching, *notes])
+
     # -- council -----------------------------------------------------------------------------
     def book_context(self, snap: UsSnapshot) -> str:
         now = snap.as_of
@@ -496,18 +660,20 @@ class Engine:
             lines.append(f"  LAST MEETING SUMMARY: {d.get('summary', '')}")
         return "\n".join(lines)
 
-    async def meeting(self, execute: bool = True) -> Dict[str, Any]:
+    async def meeting(self, execute: bool = True, called: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """One council meeting. While it runs, `meeting_started` and `progress` say so (GET
-        /api/council) and the live Discord message follows it."""
+        /api/council) and the live Discord message follows it. `called`: {"by", "why"} for
+        a meeting the watcher called outside the schedule."""
         for stale in list(self._awaiting_orders.values()):
             stale.close("the next meeting started first")
             self._publish(stale)
         self._awaiting_orders.clear()
         prog = MeetingProgress(new_meeting_id(), list(self.council.analysts), self.council.chair.name)
+        prog.called = (called or {}).get("why")
         self.meeting_started, self.progress = prog.started, prog
         self._publish(prog)
         try:
-            return await self._meeting(execute, prog)
+            return await self._meeting(execute, prog, called)
         except asyncio.CancelledError:
             prog.abort("cancelled, the engine is stopping")
             self._publish(prog)
@@ -558,7 +724,8 @@ class Engine:
             self._publish(prog)
         self._awaiting_orders.clear()
 
-    async def _meeting(self, execute: bool, prog: MeetingProgress) -> Dict[str, Any]:
+    async def _meeting(self, execute: bool, prog: MeetingProgress,
+                       called: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         now = self.clock.time()
         traded = self.classes()
         macro = macro_readings(self.store, self.cfg.events.macro, trade_day(now), self.cfg.events.macro_stale_days)
@@ -566,11 +733,17 @@ class Engine:
         if all(v.price is None for v in snap.assets.values()):
             raise MarketDataError("no price for any asset")
         context = snap.packet() + "\n\n" + self.book_context(snap)
+        if called:
+            context = (f"WHY THIS MEETING: called at {_et(snap.as_of, '%H:%M')} ET, outside the schedule, by the "
+                       f"desk watcher: {called['why']} Weigh whether that changes anything; doing nothing is "
+                       "a fine answer.\n\n" + context)
         held = set(self.ledger.positions())
         rec = await self.council.run(context, held, meeting_id=prog.id,
                                      observe=lambda kind, d: self._on_council(prog, kind, d),
                                      universe=sorted(traded), blocked=self.buy_blocks(snap.as_of))
         rec["context"] = context
+        if called:
+            rec["called"] = {"by": called.get("by"), "why": called.get("why")}
         with self.store.tx() as c:
             c.execute("INSERT INTO meetings(id,ts,status,packet,record) VALUES(?,?,?,?,?)",
                       (rec["id"], snap.as_of, rec["status"], context, dumps(rec)))
@@ -595,7 +768,8 @@ class Engine:
                     created_ts=snap.as_of))
         self.alerts.event("meeting", {"id": rec["id"], "status": rec["status"],
                                       "summary": (rec["decision"] or {}).get("summary", ""),
-                                      "trades": rec["trades"], "dropped": rec["dropped"]})
+                                      "trades": rec["trades"], "dropped": rec["dropped"],
+                                      "called": (called or {}).get("why")})
         return rec
 
     def next_meeting(self, after: float) -> float:
@@ -615,7 +789,12 @@ class Engine:
                 await asyncio.sleep(60)
                 continue
             if now < due:
-                await asyncio.sleep(min(due - now, 60))
+                try:
+                    await asyncio.wait_for(self._call.wait(), timeout=min(due - now, 60))
+                except asyncio.TimeoutError:
+                    continue
+                self._call.clear()
+                await self._called_meeting()
                 continue
             try:
                 self.store.set_state(NEXT_MEETING, self.next_meeting(max(now, due)))
@@ -636,6 +815,42 @@ class Engine:
             except Exception as e:
                 logger.exception("meeting failed")
                 self._beat("council", False, f"{type(e).__name__}: {e}")
+            self._after_meeting()
+
+    async def _called_meeting(self) -> None:
+        """Run the pending call, if code's limits still allow it (time has passed since it
+        was asked for), and record it so the daily limit counts it."""
+        st = self.watch_state()
+        call, st.pending = st.pending, None
+        self._save_watch(st)
+        if not call:
+            return
+        now = self.clock.time()
+        blocked = self._call_blocked(st, now)
+        if blocked:
+            logger.info("called meeting dropped: %s", blocked)
+            self.store.audit("meeting_call_refused", by=call.get("by"), why=call.get("why"), blocked=blocked)
+            return
+        st.record_call({**call, "ran": True, "ts": now})
+        self._save_watch(st)
+        try:
+            rec = await self.meeting(execute=True, called=call)
+            self._beat("council", rec["status"] == "ok", f"called: {rec['status']}")
+        except Exception as e:
+            logger.exception("called meeting failed")
+            self._beat("council", False, f"called: {type(e).__name__}: {e}")
+        self._after_meeting()
+
+    def _after_meeting(self) -> None:
+        """A review right after each meeting, in session: what to watch now depends on what
+        the council just decided."""
+        w = self.cfg.watch
+        try:
+            open_now = self.market.calendar.state_at(self.clock.time()).is_open
+        except (MarketDataError, CalendarError):
+            open_now = False
+        if w.enabled and open_now:
+            self._start_review("after the meeting")
 
     # -- health ------------------------------------------------------------------------------
     def _beat(self, task: str, ok: bool, detail: str = "") -> None:
@@ -797,6 +1012,8 @@ class Engine:
                                         name="equity"),
                     asyncio.create_task(self._council_loop(), name="council"),
                     asyncio.create_task(self._screen_loop(), name="screen"),
+                    *([asyncio.create_task(self._every("watch", 60.0, self.watch_tick, 30), name="watch")]
+                      if self.cfg.watch.enabled else []),
                     asyncio.create_task(self._watchdog_loop(), name="watchdog"),
                 ]
                 aux = [asyncio.create_task(self._watch_stop_file(stop), name="stopfile")]
@@ -815,6 +1032,8 @@ class Engine:
                         await asyncio.wait_for(self.executor.queue.join(), timeout=30)
                     except asyncio.TimeoutError:
                         logger.warning("executor queue did not drain in 30s")
+                if self._review_task is not None:
+                    aux.append(self._review_task)
                 for t in (*core, *aux, stopper):
                     t.cancel()
                 await asyncio.gather(*core, *aux, stopper, return_exceptions=True)

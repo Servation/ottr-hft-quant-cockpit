@@ -36,6 +36,8 @@ from ottr import health
 from ottr.config import Config
 from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
 from ottr.engine.killswitch import KillSwitch
+from ottr.engine.engine import WATCH_STATE
+from ottr.engine.watcher import WatchState
 from ottr.ledger import tax
 from ottr.ledger.book import Ledger, trade_day
 from ottr.universe import db as udb
@@ -62,7 +64,7 @@ ENDPOINTS = [
     "GET  /api/meetings         council meetings with analyst stances (?limit=&before=<ts>)",
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
-    "GET  /api/council          whether a meeting is running now and how far it has got, the next and the last meeting",
+    "GET  /api/council          a running meeting's progress, the next and the last meeting, what the watcher watches",
     "GET  /api/universe         the members the desk trades: class, cap, buyable, fractional; the satellites",
     "GET  /api/screen           the latest stock screen (counts, changes, the top of the ranking), recent changes",
     "GET  /api/kill-switch      kill switch state",
@@ -445,11 +447,18 @@ async def get_council(request: web.Request) -> web.Response:
     with ctx.reader.snapshot():
         nxt = ctx.reader.get_state(NEXT_MEETING)
         last = ctx.reader.conn.execute("SELECT id, ts, status FROM meetings ORDER BY ts DESC LIMIT 1").fetchone()
+        st = WatchState.from_dict(ctx.reader.get_state(WATCH_STATE))
+    w = ctx.cfg.watch
+    watch = {"enabled": w.enabled, "note": st.note, "set_at": st.set_ts,
+             "conditions": [{"condition": t.describe(), "why": t.why, **asdict(t)} for t in st.triggers],
+             "last_review_at": st.last_review_ts, "last_review": st.last_review, "last_error": st.last_error,
+             "called_today": len(st.called_on(now)), "max_called_per_day": w.max_called_per_day,
+             "check_every_min": w.check_every_min, "called": st.called[-5:], "pending": st.pending}
     return ok({"as_of": now, "running": started is not None, "started_at": started,
                "running_sec": round(now - started, 1) if started is not None else None,
                "progress": progress,
                "meeting_times_et": list(ctx.cfg.schedule.meeting_times), "timeout_sec": ctx.cfg.council.timeout_sec,
-               "next_meeting_at": nxt,
+               "next_meeting_at": nxt, "watch": watch,
                "last_meeting": dict(zip(("id", "ts", "status"), last)) if last else None})
 
 

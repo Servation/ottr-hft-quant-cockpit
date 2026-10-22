@@ -231,6 +231,19 @@ claude_model = "opus"
 gemini_model = "gemini-3.8-flash-high"
 reasoning_effort = "high"
 
+[watch]
+# The desk watcher (ottr/engine/watcher.py): between meetings, Claude reviews what changed and
+# sets conditions for code to check every minute; it may call a meeting outside the schedule.
+# It can't trade: a called meeting runs the same council and risk checks. Limits are code.
+enabled = true
+model = "claude"                 # claude (runs council.claude_model, Opus) | gpt | gemini
+effort = ""                      # "" = the council's reasoning effort
+check_every_min = 30             # a review this often in session, and after every meeting
+max_triggers = 8                 # conditions it may set (a level broken, or a % move)
+max_called_per_day = 4
+min_gap_min = 45                 # between any two meetings, and before a scheduled one
+timeout_sec = 300
+
 [engine]
 market_interval_sec = 60      # calendar, daily bars and quote health
 jobs_interval_sec = 60        # fee charge, cash sweep, events feeds, deferred orders
