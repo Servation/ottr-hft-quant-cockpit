@@ -58,7 +58,7 @@ async def run(sources: Sources, events_cfg, symbols: Sequence[str], now: float,
             last = obs[-1]
             age = (today - last.day).days
             (r.ok if age <= events_cfg.macro_stale_days else r.warn)(
-                f"macro {sid} = {last.value:g} on {last.day} ({label})")
+                f"macro {label}: {last.value:g} on {last.day} ({sid})")
 
     # Earnings (Alpha Vantage): no calendar means no BUY of a single stock.
     av = sources.alpha_vantage
@@ -105,7 +105,7 @@ async def run(sources: Sources, events_cfg, symbols: Sequence[str], now: float,
                     r.warn(f"SEC {sym}: {e}")
                     continue
                 ok, why = operating_company(sym, listing, funds, co)
-                (r.ok if ok == expected else r.warn)(f"SEC {sym}: {'an operating company' if ok else 'not a pick'}: {why}")
+                (r.ok if ok == expected else r.warn)(f"SEC {sym}: {why}" if ok else f"SEC {sym}: not a pick: {why}")
 
     # Corporate actions (Alpaca): unknown blocks every BUY.
     if sources.alpaca is None:

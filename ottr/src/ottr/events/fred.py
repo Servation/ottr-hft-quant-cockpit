@@ -2,16 +2,16 @@
 FRED macro series through the keyless CSV download (fredgraph.csv). GET only, no key.
 
 What it does: `Fred.series(id, start)` returns the daily observations of one FRED series
-from `start` on, as (day, value). Missing days (FRED writes "." or an empty cell for a
-holiday or a not-yet-published value) are left out, never filled in.
+from `start` on, as (day, value). Days with no value are left out, never filled in.
 
 Why keyless CSV: it is the same data as FRED's JSON API without a key to manage. One
 request per series, so one renamed or retired series fails alone.
 
-Format facts (checked 2026-10-21): FRED answers a site-wide maintenance window with an
-HTML page and HTTP 200, so a web page is treated as an outage and retried, never parsed.
-The date column is headed `observation_date` (older files used `DATE`); the value column
-is headed with the series id.
+Format facts (checked live 2026-10-21): the header is `observation_date,<SERIES ID>`; a
+day with no value is an empty cell (DGS10 on Columbus Day, 2026-10-12, when the bond
+market is shut); and a site-wide maintenance window is answered with an HTML page and
+HTTP 200, which is treated as an outage and retried, never parsed. Older downloads used a
+`DATE` header and "." for no value, so both are still read.
 """
 
 from __future__ import annotations

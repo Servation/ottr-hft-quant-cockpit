@@ -61,11 +61,11 @@ async def test_every_feed_answers(tmp_path, monkeypatch):
     monkeypatch.setattr(check, "MIN_SEC_LISTINGS", 5)
     monkeypatch.setattr(check, "MIN_SEC_FUNDS", 3)
     code, text = await run(*rig(tmp_path))
-    assert "ok    macro VIXCLS = 17.5 on 2026-10-20 (VIX)" in text
-    assert "WARN  macro DGS10 = 4.1 on 2026-10-09" in text            # stale, so degraded
+    assert "ok    macro VIX: 17.5 on 2026-10-20 (VIXCLS)" in text
+    assert "WARN  macro 10y: 4.1 on 2026-10-09 (DGS10)" in text       # stale, so degraded
     assert "ok    earnings: 602 report dates, 2026-11-02 to 2027-01-15 (6month)" in text
     assert "next reports: AAPL 2026-11-02 post-market, NVDA 2026-11-18 time n/a" in text
-    assert "ok    SEC AAPL: an operating company" in text
+    assert "ok    SEC AAPL: operating company (Electronic Computers)" in text
     assert "ok    SEC SPY: not a pick: SEC entity type other" in text
     assert "ok    SEC GLD: not a pick: commodity trust" in text
     assert "ok    SEC QQQ: not a pick: a fund series" in text
