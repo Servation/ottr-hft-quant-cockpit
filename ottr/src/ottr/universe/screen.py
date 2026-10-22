@@ -84,6 +84,7 @@ class Row:
     rsi: Optional[float] = None
     regime: str = "UNKNOWN"
     earnings_sessions: Optional[int] = None
+    quote_usable: Optional[float] = None      # share of sampled minutes the IEX quote was usable
     flags: Tuple[str, ...] = ()
     gate: str = ""                            # the first hard gate failed ("" = passed)
     score: Optional[float] = None

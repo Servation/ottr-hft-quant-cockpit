@@ -194,6 +194,12 @@ max_changes = 2                  # rank-outs and swaps a week (hard-gate failure
 challenger_margin = 15.0         # score points a challenger must beat the weakest satellite by
 max_correlation = 0.75           # with any member (120 sessions): passed over
 cooldown_days = 28               # a demoted stock waits this long before it can return
+# The free feed is IEX's own book: a stock whose IEX quote is rarely inside data.max_spread_pct
+# can't be traded or protected here. Sampled every minute for members and every 15 minutes
+# for the latest screen's top 40; a candidate needs this, and a satellite below it is demoted.
+min_quote_usable_pct = 75.0      # usable at least this share of the sampled minutes...
+quote_sessions = 5               # ...over the last 5 sessions
+min_quote_samples = 20           # fewer samples is "not measured yet": a candidate waits a week
 
 [tax]
 # Rates for the tax ESTIMATES (ottr/ledger/tax.py): `ottr tax`, and the after-tax equity

@@ -166,7 +166,7 @@ def test_a_non_ottr_database_is_refused(tmp_path):
 def test_a_fresh_book_is_created_at_the_current_version(tmp_path):
     s = Store(tmp_path / "ottr.db", writer=True)
     try:
-        assert s.meta("schema_version") == str(SCHEMA_VERSION) == "3"
+        assert s.meta("schema_version") == str(SCHEMA_VERSION) == "4"
         Ledger(s).initialize(10000)
     finally:
         s.close()
@@ -188,3 +188,24 @@ def test_newer_schema_is_refused_not_downgraded(tmp_path):
     c.commit()
     c.close()
     Store(db, writer=True).close()
+
+
+def test_a_v3_book_is_migrated_in_place(tmp_path):
+    """The live book was created at v3: opening it with this code adds the quote_quality
+    table, keeps every row, and says so in the audit log."""
+    db = tmp_path / "ottr.db"
+    s = Store(db, writer=True)
+    Ledger(s).initialize(10000)
+    s.conn.execute("DROP TABLE quote_quality")
+    s.conn.execute("UPDATE meta SET value='3' WHERE key='schema_version'")
+    s.close()
+    ro = Store(db, writer=False)                                        # readers can still open it
+    ro.close()
+    s = Store(db, writer=True)
+    try:
+        assert s.meta("schema_version") == "4" and Ledger(s).cash() == 10000 and Ledger(s).check() == []
+        assert s.conn.execute("SELECT COUNT(*) FROM quote_quality").fetchone()[0] == 0
+        (m,) = s.audits("schema_migrated")
+        assert (m["from_version"], m["to_version"]) == (3, 4)
+    finally:
+        s.close()

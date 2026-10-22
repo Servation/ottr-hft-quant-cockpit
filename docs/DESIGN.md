@@ -220,7 +220,11 @@ Hysteresis keeps a stock near the cut line from being bought and sold every week
 - a 15-point margin for a challenger;
 - a 28-day cooldown after a demotion.
 
-A correlation filter (0.75 with any member) keeps the sleeve diversified.
+A correlation filter (0.75 with any member) keeps the sleeve diversified, and a quote
+filter keeps it tradable. The free feed is IEX's own book, so a stock whose IEX quote was
+usable less than 75% of the sampled minutes over the last week is skipped, or demoted if
+it is a satellite. Members are sampled every minute and the latest screen's top 40 every
+15 minutes (the `quote_quality` table, schema v4).
 
 ## Tax
 

@@ -340,6 +340,9 @@ class Screen:
     challenger_margin: float = 15.0   # score points a challenger must beat the weakest by
     max_correlation: float = 0.75     # with any member: the candidate is passed over
     cooldown_days: int = 28           # a demoted stock waits this long to return
+    min_quote_usable_pct: float = 75.0   # IEX quote usable at least this share of the sampled minutes
+    quote_sessions: int = 5              # ...over the last this many sessions
+    min_quote_samples: int = 20          # fewer samples than this is "not measured yet"
 
 
 @dataclass(frozen=True)
@@ -642,6 +645,8 @@ def _validate_screen(s: Screen) -> None:
         raise ConfigError("screen: 0 < vol_min_pct < vol_max_pct <= 300")
     if s.keep_rank < 1 or s.min_tenure_days < 0 or s.max_changes < 0 or s.cooldown_days < 0:
         raise ConfigError("screen: keep_rank >= 1; min_tenure_days, max_changes and cooldown_days >= 0")
+    if not 0 <= s.min_quote_usable_pct <= 100 or not 1 <= s.quote_sessions <= 20 or s.min_quote_samples < 1:
+        raise ConfigError("screen: min_quote_usable_pct in 0..100, quote_sessions in 1..20, min_quote_samples >= 1")
     if not 0 <= s.challenger_margin <= 100 or not 0 < s.max_correlation <= 1:
         raise ConfigError("screen: challenger_margin in 0..100 and max_correlation in (0, 1]")
 

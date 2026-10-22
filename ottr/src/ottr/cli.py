@@ -477,14 +477,15 @@ def screen_report(res, top: int) -> str:
     if not (d.promote or d.demote):
         lines.append("No membership changes.")
     lines.append(f"\n{'#':>4} {'symbol':6} {'score':>5} {'12-1':>6} {'resid':>6} {'vol':>4} {'high':>5} "
-                 f"{'ER':>5} {'corr':>5} {'earn':>4}  flags")
+                 f"{'ER':>5} {'corr':>5} {'earn':>4} {'iex':>4}  flags")
     for r in res.ranked[:top]:
         def f(x, spec):
             return format(x, spec) if x is not None else "n/a"
         lines.append(f"{r.rank:>4} {r.symbol:6} {r.score:>5.1f} {f(r.momentum_return and r.momentum_return * 100, '+5.0f')}% "
                      f"{f(r.residual, '6.2f')} {f(r.vol and r.vol * 100, '3.0f')}% "
                      f"{f(r.near_high and r.near_high * 100, '4.0f')}% {f(r.efficiency, '5.2f')} "
-                     f"{f(r.corr_spy, '5.2f')} {f(r.earnings_sessions, '>4')}  {', '.join(r.flags)}")
+                     f"{f(r.corr_spy, '5.2f')} {f(r.earnings_sessions, '>4')} "
+                     f"{f(r.quote_usable and r.quote_usable * 100, '3.0f')}%  {', '.join(r.flags)}")
     if res.errors:
         lines.append("Errors: " + "; ".join(res.errors))
     return "\n".join(lines)

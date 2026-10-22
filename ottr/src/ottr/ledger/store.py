@@ -30,7 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 FIRST_SUPPORTED_VERSION = 3   # v1/v2 were the crypto book: archived, never converted
 
 SCHEMA = """
@@ -179,6 +179,11 @@ CREATE TABLE IF NOT EXISTS universe_events (
 CREATE TABLE IF NOT EXISTS screens (
     id TEXT PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, applied INTEGER NOT NULL,
     summary TEXT NOT NULL, result TEXT NOT NULL);
+-- How often each symbol's live IEX quote passed the sanity check, per trade day (v4): the
+-- screener skips stocks the desk couldn't trade on this feed most of the time.
+CREATE TABLE IF NOT EXISTS quote_quality (
+    symbol TEXT NOT NULL, day TEXT NOT NULL, samples INTEGER NOT NULL, usable INTEGER NOT NULL,
+    PRIMARY KEY (symbol, day));
 -- The SEC's lists (replaced whole at each refresh) and company profiles (cached by CIK).
 CREATE TABLE IF NOT EXISTS sec_listings (
     symbol TEXT PRIMARY KEY, cik INTEGER NOT NULL, name TEXT NOT NULL, exchange TEXT);
@@ -192,7 +197,11 @@ CREATE TABLE IF NOT EXISTS sec_companies (
 # version -> statements that upgrade a database from version-1. SCHEMA above is always the
 # latest shape, so a fresh database is created current and skips these. Empty until the
 # first post-cutover change (see the module docstring).
-MIGRATIONS: Dict[int, Tuple[str, ...]] = {}
+MIGRATIONS: Dict[int, Tuple[str, ...]] = {
+    4: ("""CREATE TABLE IF NOT EXISTS quote_quality (
+    symbol TEXT NOT NULL, day TEXT NOT NULL, samples INTEGER NOT NULL, usable INTEGER NOT NULL,
+    PRIMARY KEY (symbol, day))""",),   # IEX quote usability per symbol and day (market/quality.py)
+}
 
 
 class LockError(RuntimeError):

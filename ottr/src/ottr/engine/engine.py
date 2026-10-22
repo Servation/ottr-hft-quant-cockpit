@@ -61,6 +61,7 @@ from ottr.ledger.book import Ledger, trade_day
 from ottr.ledger.marks import SIP_FINAL_AFTER_SEC
 from ottr.ledger.store import Store, dumps
 from ottr.market.alpaca import Asset
+from ottr.market import quality
 from ottr.market.calendar import ET, CalendarError, next_meeting_at
 from ottr.market.packet import UsSnapshot
 from ottr.market.service import MarketData
@@ -82,6 +83,8 @@ DEFERRED_RETRY_SEC = 60.0       # a deferred order is tried again at most this o
 BARS_GRACE_SEC = 3600.0         # a final session's bars should be stored within this long
 MEETING_GRACE_SEC = 1800.0      # a slot missed by more than this (engine down) is skipped
 WATCH_STATE = "watch"           # risk_state key: the watcher's conditions, reviews and calls
+CANDIDATE_SAMPLE_SEC = 900.0    # the screen's candidates' IEX quotes are checked this often in session
+QUALITY_KEEP_DAYS = 60          # days of quote-usability counts kept
 SCREEN_RETRY_SEC = 1800.0       # a failed weekly screen is tried again after this
 WEEK_SEC = 7 * 86400.0
 EARNINGS_BLACKOUT = gate.EARNINGS_BLACKOUT_SESSIONS
@@ -125,6 +128,7 @@ class Engine:
         self.council = council or build_council(cfg)
         self.watcher_model = watcher_model or make_adapter(cfg.watch.model, cfg.council, cfg.watch.effort or None)
         self._call = asyncio.Event()                     # set when a meeting call is pending
+        self._candidates_sampled = 0.0                   # when the screen's candidates' quotes were last checked
         self._review_task: Optional[asyncio.Task] = None
         self.alerts = alerts or Alerts(None, cfg.alerts)
         self.kill = KillSwitch(cfg, store)
@@ -210,7 +214,10 @@ class Engine:
         if final and (not bars or bars[-1].day < final.day) and now > final.close_ts + SIP_FINAL_AFTER_SEC + BARS_GRACE_SEC:
             problems.append(f"daily bars stop at {bars[-1].day if bars else 'nothing'}, but {final.day} closed")
         if mt.is_open:
-            live = await self.market.live_quotes()
+            checks = await self.market.quote_checks()
+            quality.record(self.store, {s: q is not None for s, (q, _) in checks.items()}, mt.session.day)
+            await self._sample_candidates(now, mt.session.day)
+            live = {s: q for s, (q, _) in checks.items() if q is not None}
             missing = sorted(s for s, m in self.members.items() if m.buyable and s not in live)
             if not live:
                 problems.append("no usable live quote for any member")
@@ -253,6 +260,7 @@ class Engine:
                                     self.market.calendar, now, kind)
         if apply:
             urun.apply(self.store, res, set(self.ledger.positions()), now)
+            quality.prune(self.store, trade_day(now) - timedelta(days=QUALITY_KEEP_DAYS))
         udb.save_screen(self.store, res.id, kind, apply, res.summary(), res.to_dict(), now)
         self.store.audit("screen", id=res.id, screen_kind=kind, applied=apply, summary=res.summary())
         if apply:
@@ -286,6 +294,26 @@ class Engine:
             await asyncio.sleep(max(1.0, min(last_slot(sc, now) + WEEK_SEC - now, 600.0)))
         while True:  # switched off in config: nothing to do, but a core task never returns
             await asyncio.sleep(3600)
+
+    async def _sample_candidates(self, now: float, day) -> None:
+        """Every 15 minutes in session, check the IEX quotes of the latest screen's best
+        ranked stocks that aren't tracked: the next screen needs a week of them to know
+        which ones the desk could actually trade on this feed."""
+        if now - self._candidates_sampled < CANDIDATE_SAMPLE_SEC:
+            return
+        self._candidates_sampled = now
+        last = udb.last_screen(self.store)
+        tracked = set(self.market.tracked())
+        syms = [r["symbol"] for r in ((last or {}).get("result") or {}).get("top") or []
+                if r["symbol"] not in tracked][:urun.SHOWN]
+        if not syms:
+            return
+        try:
+            checks = await self.market.quote_checks(syms)
+        except MarketDataError as e:
+            logger.warning("candidate quote sample failed: %s", e)
+            return
+        quality.record(self.store, {s: q is not None for s, (q, _) in checks.items()}, day)
 
     # -- jobs --------------------------------------------------------------------------------
     async def jobs_tick(self) -> str:
