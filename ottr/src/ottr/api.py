@@ -37,6 +37,7 @@ from ottr.config import Config
 from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
+from ottr.universe import db as udb
 from ottr.ledger.store import Store
 from ottr.market.types import Quote
 from ottr.risk.monitor import RiskState, cap_for
@@ -61,7 +62,8 @@ ENDPOINTS = [
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
     "GET  /api/council          whether a meeting is running now and how far it has got, the next and the last meeting",
-    "GET  /api/universe         the members the desk trades: class, cap, buyable, fractional",
+    "GET  /api/universe         the members the desk trades: class, cap, buyable, fractional; the satellites",
+    "GET  /api/screen           the latest stock screen (counts, changes, the top of the ranking), recent changes",
     "GET  /api/kill-switch      kill switch state",
     "POST /api/kill-switch      {\"engaged\": true|false, \"reason\": \"...\", \"by\": \"...\"}; empty body engages. Bearer auth.",
 ]
@@ -449,11 +451,31 @@ async def get_council(request: web.Request) -> web.Response:
                "last_meeting": dict(zip(("id", "ts", "status"), last)) if last else None})
 
 
+def _satellite(s) -> dict:
+    return {"symbol": s.symbol, "state": s.state, "promoted_day": s.promoted_day.isoformat(),
+            "demoted_day": s.demoted_day.isoformat() if s.demoted_day else None, "score": s.score, "why": s.why}
+
+
 async def get_universe(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
     u = ctx.cfg.universe
+    with ctx.reader.snapshot():
+        sats = udb.satellites(ctx.reader)
     return ok({"members": ctx.members(), "cash_symbol": u.cash_symbol, "reference": list(u.reference),
-               "satellites_max": u.satellites_max, "sleeve_pct": u.sleeve_pct})
+               "satellites_max": u.satellites_max, "sleeve_pct": u.sleeve_pct,
+               "satellites": [_satellite(s) for s in sats.values()]})
+
+
+async def get_screen(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    with ctx.reader.snapshot():
+        last = udb.last_screen(ctx.reader)
+        sats = udb.satellites(ctx.reader)
+        changes = udb.events(ctx.reader, 20)
+    sc = ctx.cfg.screen
+    return ok({"screen": last, "satellites": [_satellite(s) for s in sats.values()], "changes": changes,
+               "schedule": f"{sc.weekday} {sc.at} ET weekly" if sc.enabled else "off",
+               "satellites_max": ctx.cfg.universe.satellites_max})
 
 
 async def get_kill(request: web.Request) -> web.Response:
@@ -509,6 +531,7 @@ def create_app(ctx: ApiContext) -> web.Application:
     app.router.add_get("/api/audit", get_audit)
     app.router.add_get("/api/council", get_council)
     app.router.add_get("/api/universe", get_universe)
+    app.router.add_get("/api/screen", get_screen)
     app.router.add_get("/api/kill-switch", get_kill)
     app.router.add_post("/api/kill-switch", post_kill)
     return app

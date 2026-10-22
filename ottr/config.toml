@@ -174,6 +174,27 @@ BAMLH0A0HYM2 = "US high-yield option-adjusted spread (%)"
 DFF = "Effective federal funds rate (%)"
 T10YIE = "10-year breakeven inflation (%)"
 
+[screen]
+# The weekly stock screener (ottr/universe): ranks NYSE and Nasdaq operating companies and
+# keeps up to universe.satellites_max of them as satellites. Deterministic code; no model
+# can add a symbol. See ottr/universe/screen.py for the measures and select.py for the rules.
+enabled = true
+weekday = "Sat"
+at = "08:00"                     # New York time
+min_price = 10.0
+min_dollar_volume = 50000000     # 20-session median, dollars a day
+pool_max = 1200                  # the most liquid kept for the full measurement
+history_days = 430               # calendar days of daily bars per stock (>= min_sessions)
+min_sessions = 273               # 12-1 month momentum: 252 sessions plus a month
+vol_min_pct = 8.0                # 60-session volatility band
+vol_max_pct = 70.0
+keep_rank = 12                   # a satellite keeps its place while it ranks this high...
+min_tenure_days = 14             # ...and can't be ranked out in its first two weeks
+max_changes = 2                  # rank-outs and swaps a week (hard-gate failures and empty slots don't count)
+challenger_margin = 15.0         # score points a challenger must beat the weakest satellite by
+max_correlation = 0.75           # with any member (120 sessions): passed over
+cooldown_days = 28               # a demoted stock waits this long before it can return
+
 [schedule]
 meeting_times = ["10:15", "15:15"]   # New York time, trading days only
 min_before_close_min = 45            # on early closes a later slot moves back to this

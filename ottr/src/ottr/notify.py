@@ -168,6 +168,19 @@ def format_event(kind: str, d: dict) -> str:
                 f"{float(d['stop']):,.2f} (last close {float(d['close']):,.2f}). Selling at the bid.")
     if kind == "risk_resume":
         return f"**Breaker resumed** ({d['why']})."
+    if kind == "screen":
+        k = d.get("counts") or {}
+        title = "Weekly stock screen" if d.get("applied", True) else "Stock screen (dry run, nothing changed)"
+        out = [f"**{title}** {d.get('day')}: {k.get('ranked', 0):,} of {k.get('measured', 0):,} measured stocks "
+               f"passed the gates as operating companies ({k.get('liquid', 0):,} liquid)."]
+        for label, key in (("Promoted", "promote"), ("Demoted", "demote"), ("Kept", "keep"), ("Passed over", "passed")):
+            for sym, why in d.get(key) or []:
+                out.append(f"- {label} {sym}: {why}")
+        if not (d.get("promote") or d.get("demote")):
+            out.append("No membership changes.")
+        if d.get("errors"):
+            out.append(f"({d['errors']} data error(s); see `ottr status` and the log)")
+        return no_em_dash("\n".join(out))
     if kind == "corporate_action":
         return f"**{d['symbol']}** corporate action: {no_em_dash(d['note'])}"
     if kind == "alarm":

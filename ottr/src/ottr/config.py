@@ -306,6 +306,28 @@ class Schedule:
 
 
 @dataclass(frozen=True)
+class Screen:
+    """The weekly stock screener (ottr/universe): which stocks may fill the satellite
+    sleeve. Deterministic code ranks them; no model can add a symbol."""
+    enabled: bool = True
+    weekday: str = "Sat"              # when it runs, New York time
+    at: str = "08:00"
+    min_price: float = 10.0
+    min_dollar_volume: float = 50_000_000.0   # 20-session median, dollars a day
+    pool_max: int = 1200              # the most liquid stocks kept for the full measurement
+    history_days: int = 430           # calendar days of daily bars per stock (>= min_sessions)
+    min_sessions: int = 273           # 12-1 month momentum needs 252 sessions plus a month
+    vol_min_pct: float = 8.0
+    vol_max_pct: float = 70.0
+    keep_rank: int = 12               # a satellite keeps its place while it ranks this high
+    min_tenure_days: int = 14         # and can't be ranked out before this
+    max_changes: int = 2              # rank-outs and swaps a week
+    challenger_margin: float = 15.0   # score points a challenger must beat the weakest by
+    max_correlation: float = 0.75     # with any member: the candidate is passed over
+    cooldown_days: int = 28           # a demoted stock waits this long to return
+
+
+@dataclass(frozen=True)
 class Sweep:
     enabled: bool = True
     at: str = "15:45"             # New York time; an early close moves it back the same distance
@@ -367,6 +389,7 @@ class Config:
     alerts: Alerts = field(default_factory=Alerts)
     api: Api = field(default_factory=Api)
     chat: Chat = field(default_factory=Chat)
+    screen: Screen = field(default_factory=Screen)
     discord_webhook_url: Optional[str] = field(default=None, repr=False)
     api_key: Optional[str] = field(default=None, repr=False)
     discord_bot_token: Optional[str] = field(default=None, repr=False)
@@ -469,11 +492,12 @@ def load(path: Path = DEFAULT_CONFIG, data_dir: Optional[Path] = None) -> Config
         fees=fees,
         sweep=_section(Sweep, sweep_raw, "sweep"),
         events=_section(EventFeeds, events_raw, "events"),
+        screen=_section(Screen, raw.get("screen", {}), "screen"),
         **_shared_sections(raw),
         **_runtime(data_dir),
     )
     unknown = set(raw) - {"account", "universe", "trading", "sizing", "caps", "risk", "schedule", "data",
-                          "fees", "sweep", "events", "council", "engine", "alerts", "api", "chat"}
+                          "fees", "sweep", "events", "screen", "council", "engine", "alerts", "api", "chat"}
     if unknown:
         raise ConfigError(f"unknown sections {sorted(unknown)}")
     _validate_shared(cfg)
@@ -546,6 +570,32 @@ def _validate(cfg: Config) -> None:
     if not 10 <= d.vol_sessions <= 252 or not 5 <= d.er_sessions <= 120 or not 0 < d.er_threshold < 1:
         raise ConfigError("data: vol_sessions in 10..252, er_sessions in 5..120, er_threshold in (0, 1)")
     _validate_events(cfg.events)
+    _validate_screen(cfg.screen)
+
+
+def _validate_screen(s: Screen) -> None:
+    from ottr.universe import WEEKDAYS
+    if s.weekday not in WEEKDAYS:
+        raise ConfigError(f"screen.weekday must be one of {WEEKDAYS}, got {s.weekday!r}")
+    try:
+        h, m = (int(x) for x in s.at.split(":"))
+    except ValueError:
+        raise ConfigError(f"screen.at: {s.at!r} is not HH:MM")
+    if not (0 <= h < 24 and 0 <= m < 60) or len(s.at) != 5:
+        raise ConfigError(f"screen.at: {s.at!r} is not HH:MM")
+    if s.min_price <= 0 or s.min_dollar_volume <= 0 or s.pool_max < 10:
+        raise ConfigError("screen: min_price > 0, min_dollar_volume > 0, pool_max >= 10")
+    if s.min_sessions < 273:
+        raise ConfigError("screen.min_sessions must be >= 273 (12-1 month momentum needs 252 + 21)")
+    if s.history_days * 250 / 365 < s.min_sessions + 5:
+        # About 250 sessions a year: fewer calendar days could never reach min_sessions.
+        raise ConfigError(f"screen.history_days {s.history_days} is too short for {s.min_sessions} sessions")
+    if not 0 < s.vol_min_pct < s.vol_max_pct <= 300:
+        raise ConfigError("screen: 0 < vol_min_pct < vol_max_pct <= 300")
+    if s.keep_rank < 1 or s.min_tenure_days < 0 or s.max_changes < 0 or s.cooldown_days < 0:
+        raise ConfigError("screen: keep_rank >= 1; min_tenure_days, max_changes and cooldown_days >= 0")
+    if not 0 <= s.challenger_margin <= 100 or not 0 < s.max_correlation <= 1:
+        raise ConfigError("screen: challenger_margin in 0..100 and max_correlation in (0, 1]")
 
 
 def _validate_events(e: EventFeeds) -> None:

@@ -188,6 +188,27 @@ def _fills(ctx: DeskContext) -> List[str]:
     return lines
 
 
+def _screen(ctx: DeskContext) -> List[str]:
+    d = ctx.screen
+    if not d:
+        return [f"SATELLITES: unavailable ({ctx.errors.get('screen', 'no answer')})"]
+    sats = d.get("satellites") or []
+    lines = [f"SATELLITES (stocks the weekly screener picked, at most {d.get('satellites_max')}; screened "
+             f"{d.get('schedule')}): " + ("; ".join(
+                 f"{s['symbol']} since {s.get('promoted_day')}" if s.get("state") == "active"
+                 else f"{s['symbol']} being sold off (demoted {s.get('demoted_day')}: {clip(s.get('why'), 120)})"
+                 for s in sats) or "none")]
+    last = d.get("screen")
+    if last:
+        dec = (last.get("result") or {}).get("decision") or {}
+        kind = "applied" if last.get("applied") else "a dry run that changed nothing"
+        parts = [f"{label} {sym} ({clip(why, 140)})" for label, key in
+                 (("promoted", "promote"), ("demoted", "demote"), ("passed over", "passed"))
+                 for sym, why in (dec.get(key) or [])[:5]]
+        lines.append(f"LATEST SCREEN ({et(last.get('ts'))}, {kind}): " + ("; ".join(parts) or "no changes"))
+    return lines
+
+
 def desk_data(ctx: DeskContext, now: float) -> str:
     lines: List[str] = []
     lines += _health(ctx, now)
@@ -197,6 +218,7 @@ def desk_data(ctx: DeskContext, now: float) -> str:
     lines.append(_council(ctx, now))
     lines += _meeting(ctx, now)
     lines += _fills(ctx)
+    lines += _screen(ctx)
     return "\n".join(lines)
 
 

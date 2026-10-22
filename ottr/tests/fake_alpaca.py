@@ -46,8 +46,9 @@ class FakeAlpaca:
         self.actions: Dict[str, List[dict]] = {}   # corporate actions: Alpaca array name -> rows
 
     # -- scripting helpers ---------------------------------------------------------------
-    def add_asset(self, symbol: str, fractionable: bool = True, tradable: bool = True, name: str = "") -> None:
-        self.assets[symbol] = {"symbol": symbol, "name": name or f"{symbol} Fund", "exchange": "ARCA",
+    def add_asset(self, symbol: str, fractionable: bool = True, tradable: bool = True, name: str = "",
+                  exchange: str = "ARCA") -> None:
+        self.assets[symbol] = {"symbol": symbol, "name": name or f"{symbol} Fund", "exchange": exchange,
                                "class": "us_equity", "status": "active", "tradable": tradable,
                                "fractionable": fractionable}
 
@@ -61,7 +62,7 @@ class FakeAlpaca:
                               "prevDailyBar": {"t": "2026-01-01T05:00:00Z", "o": pc, "h": pc, "l": pc, "c": pc, "v": 1}}
 
     def add_daily_bars(self, symbol: str, closes: Dict[date, float],
-                       adjusted: Optional[Dict[date, float]] = None) -> None:
+                       adjusted: Optional[Dict[date, float]] = None, volume: float = 1000) -> None:
         """Raw daily bars, and optionally different adjusted ones (adjustment=all); without
         them the adjusted series equals the raw one (no dividends or splits)."""
         def rows(cs):
@@ -69,7 +70,7 @@ class FakeAlpaca:
             for d, c in sorted(cs.items()):
                 midnight = datetime(d.year, d.month, d.day, tzinfo=ET).astimezone(timezone.utc)
                 out.append({"t": midnight.strftime("%Y-%m-%dT%H:%M:%SZ"), "o": c, "h": c * 1.01, "l": c * 0.99,
-                            "c": c, "v": 1000, "n": 10, "vw": c})
+                            "c": c, "v": volume, "n": 10, "vw": c})
             return out
         self.bars[symbol] = rows(closes)
         self.adj_bars[symbol] = rows(adjusted if adjusted is not None else closes)

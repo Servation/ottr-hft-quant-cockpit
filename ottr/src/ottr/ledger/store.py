@@ -163,6 +163,21 @@ CREATE INDEX IF NOT EXISTS corporate_actions_symbol ON corporate_actions (symbol
 -- When each symbol's corporate actions were last fetched. Never, or not lately, means its
 -- actions are unknown.
 CREATE TABLE IF NOT EXISTS corporate_action_checks (symbol TEXT PRIMARY KEY, ts REAL NOT NULL);
+-- Satellites: the stocks the weekly screener picked (ottr/universe). active: buyable;
+-- sunset: demoted but still held (SELL or HOLD until flat); removed: gone, kept for its
+-- re-promotion cooldown and history. Core ETFs live in config.toml, not here.
+CREATE TABLE IF NOT EXISTS satellites (
+    symbol TEXT PRIMARY KEY, state TEXT NOT NULL CHECK (state IN ('active','sunset','removed')),
+    promoted_ts REAL NOT NULL, promoted_day TEXT NOT NULL, demoted_ts REAL, demoted_day TEXT,
+    score REAL, why TEXT NOT NULL);
+-- Every membership change (promoted, demoted, removed), with the screen that made it.
+CREATE TABLE IF NOT EXISTS universe_events (
+    id INTEGER PRIMARY KEY, ts REAL NOT NULL, day TEXT NOT NULL, symbol TEXT NOT NULL,
+    change TEXT NOT NULL, why TEXT NOT NULL, screen_id TEXT);
+-- Each screen's ranking and decisions (JSON), whether it was applied or only a dry run.
+CREATE TABLE IF NOT EXISTS screens (
+    id TEXT PRIMARY KEY, ts REAL NOT NULL, kind TEXT NOT NULL, applied INTEGER NOT NULL,
+    summary TEXT NOT NULL, result TEXT NOT NULL);
 -- The SEC's lists (replaced whole at each refresh) and company profiles (cached by CIK).
 CREATE TABLE IF NOT EXISTS sec_listings (
     symbol TEXT PRIMARY KEY, cik INTEGER NOT NULL, name TEXT NOT NULL, exchange TEXT);

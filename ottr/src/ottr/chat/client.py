@@ -45,6 +45,7 @@ class DeskContext:
     meeting: Optional[dict] = None     # the latest council meeting, if any
     fills: Optional[dict] = None
     council: Optional[dict] = None
+    screen: Optional[dict] = None      # the satellites and the latest stock screen
     errors: Dict[str, str] = field(default_factory=dict)
 
 
@@ -101,6 +102,9 @@ class ApiClient:
         meetings = (await self.get("/meetings", {"limit": 1})).get("meetings") or []
         return meetings[0] if meetings else None
 
+    async def screen(self) -> dict:
+        return await self.get("/screen")
+
     async def fills(self, limit: int = 10) -> dict:
         return await self.get("/fills", {"limit": limit})
 
@@ -110,9 +114,9 @@ class ApiClient:
     async def desk_context(self) -> DeskContext:
         """All /ask sections, read concurrently. Partial failures are kept as `errors`;
         only an engine that answers nothing at all raises (ApiUnreachable)."""
-        names = ("health", "book", "positions", "meeting", "fills", "council")
+        names = ("health", "book", "positions", "meeting", "fills", "council", "screen")
         results = await asyncio.gather(self.health(), self.book(), self.positions(), self.latest_meeting(),
-                                       self.fills(10), self.council(), return_exceptions=True)
+                                       self.fills(10), self.council(), self.screen(), return_exceptions=True)
         ctx = DeskContext()
         for name, res in zip(names, results):
             if isinstance(res, ApiError):
