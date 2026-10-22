@@ -105,11 +105,6 @@ class ChatService:
             return render.meeting(await self.api.latest_meeting(), self.clock())
         return await self._read(asker, "meeting", view)
 
-    async def screen(self, asker: Asker) -> str:
-        async def view() -> str:
-            return render.screen(await self.api.screen(), self.clock())
-        return await self._read(asker, "screen", view)
-
     # -- kill switch (the one write, through the API's authenticated endpoint) -------------
     async def _kill(self, asker: Asker, command: str, engaged: bool, reason: str) -> str:
         # by="discord" says where it came from; the reason says who (the ID can't be spoofed).
@@ -172,7 +167,7 @@ class ChatService:
         question = question.strip()
         if not question:
             return self._refuse(asker, question, "empty", "Ask me something about the desk, for example "
-                                "`/ask why did the council buy ETH?`")
+                                "`/ask why did the council buy TLT?`")
         now = self.clock()
         if self._busy_since is not None:
             return self._refuse(asker, question, "busy", (

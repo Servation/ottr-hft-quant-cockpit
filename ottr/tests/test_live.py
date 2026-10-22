@@ -29,7 +29,7 @@ from ottr.engine.progress import MeetingProgress
 from ottr.health import Alarm
 from ottr.market.types import MarketDataError
 from ottr.notify import LIMIT, Alerts, DiscordWebhook, format_event
-from tests.fakes import PRICES, FakeMarket, LiveRecorder, ScriptedModel, analyst_reply, eth_buy_council
+from tests.fakes import OPEN, LiveRecorder, ScriptedModel, analyst_reply, buy_council, market_rig, no_corporate_actions
 
 FAST = Limits(live_edit_sec=0.05)
 EM_DASH = chr(0x2014)
@@ -43,41 +43,44 @@ async def until(cond, timeout: float = 5.0) -> None:
         await asyncio.sleep(0.005)
 
 
-def make_engine(cfg, store, council=None, limits=FAST):
+async def make_engine(cfg, store, council=None, limits=FAST):
+    """An engine on the market rig (mid-session Wednesday) whose council buys TLT."""
     hook = LiveRecorder()
     cfg = dataclasses.replace(cfg, alerts=limits)
-    eng = Engine(cfg, store, FakeMarket(cfg, PRICES), council=council or eth_buy_council(cfg),
-                 alerts=Alerts(hook, limits, live=hook))
+    no_corporate_actions(store, cfg.core)
+    rig = await market_rig(cfg, store).ready()
+    eng = Engine(cfg, store, rig.market, council=council or buy_council(cfg, "TLT"),
+                 alerts=Alerts(hook, limits, live=hook), clock=rig.clock)
     return eng, hook
 
 
 def held_council(cfg, who="gemini"):
-    """eth_buy_council with one analyst held mid-call until the returned event is set."""
+    """buy_council with one analyst held mid-call until the returned event is set."""
     gate = asyncio.Event()
-    council = eth_buy_council(cfg)
+    council = buy_council(cfg, "TLT")
     council.analysts[who].gate = gate
     return council, gate
 
 
 # -- council events ------------------------------------------------------------------------
 async def test_council_reports_each_analyst_as_it_finishes(cfg):
-    u = cfg.universe
+    u = list(cfg.core)
     events = []
-    analysts = {"claude": ScriptedModel("claude", [analyst_reply(u, {"ETH": ("BUY", 0.8)})], delay=0.1),
+    analysts = {"claude": ScriptedModel("claude", [analyst_reply(u, {"TLT": ("BUY", 0.8)})], delay=0.1),
                 "gpt": ScriptedModel("gpt", [analyst_reply(u)]),
                 "gemini": ScriptedModel("gemini", ["not json", "still not json"], delay=0.15)}
     chair = ScriptedModel("claude", [{"summary": "s", "trades": [
-        {"action": "BUY", "asset": "ETH", "conviction": 0.6, "reasoning": "r"}]}])
+        {"action": "BUY", "asset": "TLT", "conviction": 0.6, "reasoning": "r"}]}])
     rec = await Council(analysts, chair, u).run("ctx", held=set(), meeting_id="m-1",
                                                 observe=lambda k, d: events.append((k, d.get("name"))))
     # Finish order, not config order: gpt answers first, gemini fails last.
     assert events == [("analysts_started", None), ("analyst_done", "gpt"), ("analyst_done", "claude"),
                       ("analyst_dropped", "gemini"), ("chair_started", None), ("chair_done", None)]
-    assert rec["id"] == "m-1" and rec["status"] == "ok" and rec["trades"][0]["asset"] == "ETH"
+    assert rec["id"] == "m-1" and rec["status"] == "ok" and rec["trades"][0]["asset"] == "TLT"
 
 
 async def test_too_few_analysts_never_convene_the_chair(cfg):
-    u = cfg.universe
+    u = list(cfg.core)
     events = []
     analysts = {"claude": ScriptedModel("claude", [analyst_reply(u)]),
                 "gpt": ScriptedModel("gpt", [ModelError("signed out")]),
@@ -92,8 +95,8 @@ async def test_a_broken_observer_cannot_fail_a_meeting(cfg, caplog):
     def boom(kind, d):
         raise RuntimeError("watcher bug")
 
-    rec = await eth_buy_council(cfg).run("ctx", held=set(), observe=boom)
-    assert rec["status"] == "ok" and rec["trades"][0]["asset"] == "ETH"
+    rec = await buy_council(cfg, "TLT").run("ctx", held=set(), observe=boom)
+    assert rec["status"] == "ok" and rec["trades"][0]["asset"] == "TLT"
     assert "council observer failed" in caplog.text
 
 
@@ -103,26 +106,26 @@ def test_progress_folds_events_into_one_state():
     assert p.phase == "market" and {a["status"] for a in p.to_dict(100.0)["analysts"]} == {"waiting"}
     p.apply("analysts_started", {"analysts": ["claude", "gpt", "gemini"]})
     p.apply("analyst_done", {"name": "gpt", "latency": 30.04,
-                             "report": analyst_reply(["BTC", "ETH"], {"ETH": ("BUY", 0.6)})})
+                             "report": analyst_reply(["SPY", "TLT"], {"TLT": ("BUY", 0.6)})})
     p.apply("analyst_dropped", {"name": "gemini", "latency": 300.0, "error": "timed out after 300s: agy"})
     d = p.to_dict(now=130.0)
     by = {a["name"]: a for a in d["analysts"]}
     assert d["phase"] == "analysts" and d["elapsed_sec"] == 30.0
     assert by["claude"]["status"] == "thinking"
     assert by["gpt"]["status"] == "done" and by["gpt"]["latency_sec"] == 30.0
-    assert by["gpt"]["stances"] == [{"asset": "ETH", "stance": "BUY", "conviction": 0.6}]  # HOLDs left out
+    assert by["gpt"]["stances"] == [{"asset": "TLT", "stance": "BUY", "conviction": 0.6}]  # HOLDs left out
     assert by["gemini"]["status"] == "dropped" and "timed out" in by["gemini"]["error"]
     p.apply("chair_started", {"reports": 2})
     assert p.phase == "chair" and p.chair["status"] == "thinking" and p.chair["reports"] == 2
-    trade = {"action": "BUY", "asset": "ETH", "conviction": 0.7, "reasoning": "r"}
+    trade = {"action": "BUY", "asset": "TLT", "conviction": 0.7, "reasoning": "r"}
     p.apply("chair_done", {"latency": 20.0, "trades": [trade], "dropped": [], "decision": {}})
     p.adjourn({"status": "ok", "trades": [trade],
-               "dropped": [{"trade": {"action": "SELL", "asset": "XRP"}, "why": "not held"}]},
+               "dropped": [{"trade": {"action": "SELL", "asset": "SLV"}, "why": "not held"}]},
               executing=True, now=160.0)
     assert p.phase == "orders" and not p.final
-    assert p.dropped == [{"action": "SELL", "asset": "XRP", "why": "not held"}]
-    assert not p.order("SOL", "filled")  # not a trade of this meeting
-    assert p.order("ETH", "filled", "approved", 1234.5, 2401.0)
+    assert p.dropped == [{"action": "SELL", "asset": "SLV", "why": "not held"}]
+    assert not p.order("GLD", "filled")  # not a trade of this meeting
+    assert p.order("TLT", "filled", "approved", 1234.5, 2401.0)
     assert p.final and p.to_dict()["trades"][0]["outcome"]["status"] == "filled"
     p.abort("too late")  # a recorded meeting can't be unmade
     assert p.phase == "done" and p.note is None
@@ -131,7 +134,7 @@ def test_progress_folds_events_into_one_state():
 def test_abort_marks_who_was_still_working():
     p = MeetingProgress("m-1", ["claude", "gpt"], "claude")
     p.apply("analysts_started", {})
-    p.apply("analyst_done", {"name": "claude", "latency": 1.0, "report": analyst_reply(["BTC"])})
+    p.apply("analyst_done", {"name": "claude", "latency": 1.0, "report": analyst_reply(["SPY"])})
     p.abort("cancelled, the engine is stopping")
     d = p.to_dict()
     assert p.final and d["phase"] == "aborted" and d["note"].startswith("cancelled")
@@ -143,12 +146,12 @@ def test_without_trades_or_execution_a_meeting_is_done_when_recorded():
     p.adjourn({"status": "abstain: 0 analyst(s) responded, need 1", "trades": [], "dropped": []}, executing=True)
     assert p.final and p.chair["status"] == "skipped"
     q = MeetingProgress("m-2", ["claude"], "claude")
-    q.adjourn({"status": "ok", "trades": [{"action": "BUY", "asset": "ETH", "conviction": 0.5}]}, executing=False)
+    q.adjourn({"status": "ok", "trades": [{"action": "BUY", "asset": "TLT", "conviction": 0.5}]}, executing=False)
     assert q.final and not q.executing
 
 
 def test_live_text_reads_like_a_meeting_and_fits_one_message(cfg):
-    u = cfg.universe
+    u = ["SPY", "TLT"]
     p = MeetingProgress("m-1", ["claude", "gpt", "gemini"], "claude", now=1000.0)
     texts = [format_event("meeting_live", p.to_dict(1000.0))]
     assert texts[0].startswith("**Council in session** (`m-1`, started <t:1000:R>)")
@@ -158,7 +161,7 @@ def test_live_text_reads_like_a_meeting_and_fits_one_message(cfg):
     rep["overall_view"] = f"Risk-on {EM_DASH} but careful. " * 40  # long, with the dash models love
     p.apply("analyst_done", {"name": "claude", "latency": 25.0, "report": rep})
     texts.append(format_event("meeting_live", p.to_dict(1025.0)))
-    assert "- claude: done in 25s: BUY BTC 0.90, BUY ETH 0.90" in texts[-1]
+    assert "- claude: done in 25s: BUY SPY 0.90, BUY TLT 0.90" in texts[-1]
     assert "- gpt: thinking" in texts[-1] and "- chair (claude): waits for the analysts" in texts[-1]
     p.apply("analyst_done", {"name": "gpt", "latency": 30.0, "report": analyst_reply(u)})
     p.apply("analyst_dropped", {"name": "gemini", "latency": 300.0, "error": "agy: timed out after 300s"})
@@ -167,22 +170,22 @@ def test_live_text_reads_like_a_meeting_and_fits_one_message(cfg):
     assert "- gpt: done in 30s: HOLD on every asset" in texts[-1]
     assert "- gemini: dropped out after 5m 00s (agy: timed out after 300s)" in texts[-1]
     assert "- chair (claude): deliberating on 2 reports" in texts[-1]
-    buy = {"action": "BUY", "asset": "ETH", "conviction": 0.7}
-    sell = {"action": "SELL", "asset": "SOL", "fraction_of_position": 0.5}
+    buy = {"action": "BUY", "asset": "TLT", "conviction": 0.7}
+    sell = {"action": "SELL", "asset": "GLD", "fraction_of_position": 0.5}
     p.apply("chair_done", {"latency": 20.0, "trades": [buy, sell], "dropped": []})
     p.adjourn({"status": "ok", "trades": [buy, sell], "dropped": [
-        {"trade": {"action": "BUY", "asset": "DOGE"}, "why": "no analyst rated it BUY"}]},
+        {"trade": {"action": "BUY", "asset": "QQQ"}, "why": "no analyst rated it BUY"}]},
         executing=True, now=1325.0)
     texts.append(format_event("meeting_live", p.to_dict()))
     assert texts[-1].startswith("**Council adjourned** after 5m 25s (`m-1`): ok")
-    assert "- chair (claude): decided in 20s: BUY ETH (conviction 0.70), SELL SOL (50% of the position)" in texts[-1]
-    assert "- code dropped BUY DOGE: no analyst rated it BUY" in texts[-1]
-    assert "- BUY ETH (conviction 0.70): at the risk gate" in texts[-1]
-    p.order("ETH", "filled", "approved", 1234.5, 2401.25)
-    p.order("SOL", "rejected", "below_min_trade", notes=["$40.00"])
+    assert "- chair (claude): decided in 20s: BUY TLT (conviction 0.70), SELL GLD (50% of the position)" in texts[-1]
+    assert "- code dropped BUY QQQ: no analyst rated it BUY" in texts[-1]
+    assert "- BUY TLT (conviction 0.70): at the risk gate" in texts[-1]
+    p.order("TLT", "filled", "approved", 1234.5, 2401.25)
+    p.order("GLD", "rejected", "below_min_trade", notes=["$40.00"])
     texts.append(format_event("meeting_live", p.to_dict()))
-    assert "- BUY ETH (conviction 0.70): filled $1,234.50 @ 2,401.25" in texts[-1]
-    assert "- SELL SOL (50% of the position): rejected: below min trade ($40.00)" in texts[-1]
+    assert "- BUY TLT (conviction 0.70): filled $1,234.50 @ 2,401.25" in texts[-1]
+    assert "- SELL GLD (50% of the position): rejected: below min trade ($40.00)" in texts[-1]
     for t in texts:
         assert EM_DASH not in t and len(t) <= LIMIT, t
 
@@ -193,10 +196,10 @@ def test_aborted_and_undecided_meetings_say_why():
     assert format_event("meeting_live", p.to_dict()).startswith(
         "**Council meeting aborted** after 2s (`m-1`): no quotes for any asset")
     q = MeetingProgress("m-2", ["claude"], "claude", now=0.0)
-    q.adjourn({"status": "ok", "trades": [{"action": "BUY", "asset": "ETH", "conviction": 0.5}]}, executing=True)
+    q.adjourn({"status": "ok", "trades": [{"action": "BUY", "asset": "TLT", "conviction": 0.5}]}, executing=True)
     q.close("the engine stopped before the risk gate decided")
     t = format_event("meeting_live", q.to_dict())
-    assert "- BUY ETH (conviction 0.50): undecided (the engine stopped before the risk gate decided)" in t
+    assert "- BUY TLT (conviction 0.50): undecided (the engine stopped before the risk gate decided)" in t
 
 
 # -- the live message ----------------------------------------------------------------------
@@ -336,7 +339,7 @@ async def test_live_needs_a_running_sender_and_a_live_transport():
 
 # -- the engine ----------------------------------------------------------------------------
 async def test_engine_meeting_runs_in_one_live_message_then_posts_the_summary(cfg, store, ledger):
-    eng, hook = make_engine(cfg, store)
+    eng, hook = await make_engine(cfg, store)
     async with eng.alerts.running():
         rec = await eng.meeting(execute=True)
         await eng.executor.drain()
@@ -345,27 +348,27 @@ async def test_engine_meeting_runs_in_one_live_message_then_posts_the_summary(cf
     first, final = hook.calls[0][2], hook.shown
     assert first.startswith(f"**Council in session** (`{rec['id']}`")
     assert final.startswith(f"**Council adjourned** after 0s (`{rec['id']}`): ok")
-    assert "- claude: done in 0s: BUY ETH 0.80" in final and "- gemini: done in 0s: HOLD on every asset" in final
-    assert "- chair (chair): decided in 0s: BUY ETH (conviction 0.70)" in final
-    assert "**Orders**\n- BUY ETH (conviction 0.70): filled $" in final
+    assert "- claude: done in 0s: BUY TLT 0.80" in final and "- gemini: done in 0s: HOLD on every asset" in final
+    assert "- chair (chair): decided in 0s: BUY TLT (conviction 0.70)" in final
+    assert "**Orders**\n- BUY TLT (conviction 0.70): filled $" in final
     # The summary still goes out as its own post (an edit doesn't notify anyone), then the fill.
-    assert hook.posts[0].startswith(f"**Council {rec['id']}** (ok): BUY ETH")
-    assert hook.posts[1].startswith("**BUY ETH**")
+    assert hook.posts[0].startswith(f"**Council {rec['id']}** (ok): BUY TLT")
+    assert hook.posts[1].startswith("**BUY TLT**")
     assert eng.progress is None and eng._awaiting_orders == {}
 
 
 async def test_the_live_message_shows_a_dry_run_verdict(cfg, store, ledger):
-    eng, hook = make_engine(cfg, store)
+    eng, hook = await make_engine(cfg, store)
     eng.kill.set(True, by="test")
     async with eng.alerts.running():
         await eng.meeting(execute=True)
         await eng.executor.drain()
-    assert "- BUY ETH (conviction 0.70): dry run, would fill $" in hook.shown
+    assert "- BUY TLT (conviction 0.70): dry run, would fill $" in hook.shown
 
 
 async def test_live_meeting_inside_the_running_engine(cfg, store, ledger):
-    eng, hook = make_engine(cfg, store)
-    store.set_state("next_meeting_at", 0)  # due now
+    eng, hook = await make_engine(cfg, store)
+    store.set_state("next_meeting_at", OPEN)  # due now (the rig's clock)
     stop = asyncio.Event()
     run = asyncio.create_task(eng.run(stop))
     await until(lambda: hook.shown and "filled $" in hook.shown)  # the executor task's verdict
@@ -375,7 +378,7 @@ async def test_live_meeting_inside_the_running_engine(cfg, store, ledger):
 
 
 async def test_live_view_off_posts_only_the_summary(cfg, store, ledger):
-    eng, hook = make_engine(cfg, store, limits=dataclasses.replace(FAST, live_meeting=False))
+    eng, hook = await make_engine(cfg, store, limits=dataclasses.replace(FAST, live_meeting=False))
     async with eng.alerts.running():
         await eng.meeting(execute=True)
         await eng.executor.drain()
@@ -383,15 +386,15 @@ async def test_live_view_off_posts_only_the_summary(cfg, store, ledger):
 
 
 async def test_a_broken_live_view_cannot_touch_the_meeting(cfg, store, ledger, caplog):
-    eng, hook = make_engine(cfg, store)
+    eng, hook = await make_engine(cfg, store)
     hook.raise_on_edit = True
     async with eng.alerts.running():
         rec = await eng.meeting(execute=True)
         await eng.executor.drain()
-    assert rec["status"] == "ok" and "ETH" in eng.ledger.positions()
+    assert rec["status"] == "ok" and "TLT" in eng.ledger.positions()
     assert hook.posts[0].startswith("**Council") and "live message meeting:" in caplog.text
 
-    eng2, hook2 = make_engine(cfg, store)
+    eng2, hook2 = await make_engine(cfg, store)
 
     def boom(*a, **kw):
         raise RuntimeError("display bug")
@@ -402,8 +405,12 @@ async def test_a_broken_live_view_cannot_touch_the_meeting(cfg, store, ledger, c
 
 
 async def test_an_aborted_meeting_says_so(cfg, store, ledger):
-    eng, hook = make_engine(cfg, store)
-    eng.market.fail = True
+    eng, hook = await make_engine(cfg, store)
+
+    async def outage(*a, **kw):
+        raise MarketDataError("scripted outage")
+
+    eng.market.prices = outage
     async with eng.alerts.running():
         with pytest.raises(MarketDataError):
             await eng.meeting()
@@ -413,7 +420,7 @@ async def test_an_aborted_meeting_says_so(cfg, store, ledger):
 
 async def test_a_meeting_cut_short_by_a_stop_is_marked_aborted(cfg, store, ledger):
     council, _ = held_council(cfg)
-    eng, hook = make_engine(cfg, store, council)
+    eng, hook = await make_engine(cfg, store, council)
     async with eng.alerts.running():
         task = asyncio.create_task(eng.meeting())
         await until(lambda: eng.progress is not None and eng.progress.analysts["gpt"]["status"] == "done")
@@ -426,7 +433,7 @@ async def test_a_meeting_cut_short_by_a_stop_is_marked_aborted(cfg, store, ledge
 
 
 async def test_orders_left_undecided_at_shutdown_are_said_so(cfg, store, ledger):
-    eng, hook = make_engine(cfg, store)
+    eng, hook = await make_engine(cfg, store)
     async with eng.alerts.running():
         await eng.meeting(execute=True)  # submitted, never processed
         assert list(eng._awaiting_orders) and "at the risk gate" in eng.alerts._live[
@@ -439,7 +446,7 @@ async def test_orders_left_undecided_at_shutdown_are_said_so(cfg, store, ledger)
 # -- API and chat --------------------------------------------------------------------------
 async def test_api_council_shows_who_is_done_while_a_meeting_runs(cfg, store, ledger):
     council, gate = held_council(cfg)
-    eng = Engine(cfg, store, FakeMarket(cfg, PRICES), council=council)
+    eng, _ = await make_engine(cfg, store, council)
     server = ApiServer(eng, "127.0.0.1", 0)
     await server.start()
     try:
@@ -453,7 +460,7 @@ async def test_api_council_shows_who_is_done_while_a_meeting_runs(cfg, store, le
             assert p["phase"] == "analysts" and p["chair"]["status"] == "waiting"
             by = {a["name"]: a for a in p["analysts"]}
             assert by["claude"]["status"] == "done"
-            assert by["claude"]["stances"] == [{"asset": "ETH", "stance": "BUY", "conviction": 0.8}]
+            assert by["claude"]["stances"] == [{"asset": "TLT", "stance": "BUY", "conviction": 0.8}]
             assert by["gemini"]["status"] == "thinking" and by["gemini"]["latency_sec"] is None
             # What /status in the chat bot makes of that JSON:
             assert render.council_line(d).endswith(": claude and gpt done, gemini thinking")

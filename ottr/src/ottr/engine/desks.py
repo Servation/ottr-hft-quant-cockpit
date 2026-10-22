@@ -1,19 +1,17 @@
 """
-Desks: the market-specific half of the executor.
+The Desk: the market-specific half of the executor.
 
-What it does: the Executor owns everything that must never differ between markets (the
+What it does: the Executor owns everything that must never differ between brokers (the
 priority queue, idempotency, dry run, the one-transaction commit, cooldowns, outcomes and
-notifications). A Desk supplies the rest: `context()` gathers the facts the gate needs,
-`evaluate()` is the gate, `book()` executes an approved order and records the fill, and
-`funding()` names the order that frees cash for a BUY that's short of it.
+notifications). The Desk supplies the rest for US equities: `context()` gathers the facts
+the gate needs (session, a sanity-checked quote, the book, buying power, events),
+`evaluate()` is the gate, `book()` has the Broker (the SimBroker, later Alpaca) execute an
+approved order and records the fill with the regulatory fees it accrued, and `funding()`
+names the cash-ETF sale that frees cash for a BUY that's short of it.
 
-- CryptoDesk is the crypto engine's behavior, unchanged, until the cutover retires it.
-- UsDesk prices US equities: session-aware, quotes checked by the data layer, sized and
-  capped by the US gate, filled by a Broker (the SimBroker, later Alpaca) and booked with
-  the regulatory fees the broker says the fill accrued.
-
-Why: one executor means every invariant (no double fill, crash safety, dry run, protective
-exits first) holds for both desks by construction, and is tested once against each.
+Why the split: every invariant (no double fill, crash safety, dry run, protective exits
+first) lives in the executor by construction, so swapping the SimBroker for a live
+broker later changes nothing above this file.
 """
 
 from __future__ import annotations
@@ -30,7 +28,7 @@ from ottr.ledger.book import Fill, Ledger
 from ottr.ledger.store import Store
 from ottr.market.calendar import TradingCalendar
 from ottr.market.types import Quote
-from ottr.risk import gate, us_gate
+from ottr.risk import gate
 from ottr.risk.monitor import RiskState
 from ottr.risk.types import PROTECTIVE, Intent, Verdict
 from ottr.universe import Member
@@ -55,50 +53,8 @@ def risk_flags(store: Store, intent: Intent) -> Tuple[RiskState, bool]:
     return st, since is not None
 
 
-# -- crypto (until the cutover) ------------------------------------------------------------
-class CryptoDesk:
-    transient = ("no_quote", "stale_quote", "book_unmarkable", "market_data_error")
-
-    def __init__(self, cfg, store: Store, ledger: Ledger, market) -> None:
-        self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
-
-    async def context(self, intent: Intent) -> gate.GateContext:
-        import time
-        from ottr.market.service import build_view
-        quotes = await self.market.quotes()
-        q = quotes.get(intent.asset)
-        if q is None or q.age() > REFRESH_IF_OLDER_SEC:
-            quotes = await self.market.quotes(force=True)
-        view = None
-        try:
-            candles = await self.market.candles()
-            btc = [c for _, c in candles.get("BTC", [])]
-            view = build_view(intent.asset, quotes.get(intent.asset), candles.get(intent.asset, []), btc, self.cfg)
-        except Exception:
-            logger.warning("candles unavailable; sizing with unknown vol/regime", exc_info=True)
-        st, hit = risk_flags(self.store, intent)
-        return gate.GateContext(
-            cfg=self.cfg, now=time.time(), quote=quotes.get(intent.asset),
-            vol=view.vol if view else None, regime=view.regime if view else "UNKNOWN",
-            valuation=self.ledger.value(quotes), position=self.ledger.positions().get(intent.asset),
-            halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0), risk_event_since_intent=hit)
-
-    def evaluate(self, intent: Intent, ctx) -> Verdict:
-        return gate.evaluate(intent, ctx)
-
-    def book(self, intent: Intent, verdict: Verdict, ctx) -> BookResult:
-        return BookResult(self.ledger.apply_fill(
-            idem_key=intent.idem_key, asset=intent.asset, side=verdict.side, quantity=verdict.quantity,
-            price=verdict.price, fee_pct=self.cfg.trading.fee_pct, quote_source=verdict.quote_source,
-            origin=intent.origin, ref=intent.ref, reason=intent.reason))
-
-    def funding(self, intent: Intent, verdict: Verdict, ctx) -> Optional[Intent]:
-        return None
-
-
-# -- US equities ---------------------------------------------------------------------------
-class UsMarket(Protocol):
-    """What the US desk needs from market data (the Alpaca-backed service lands in PR 7)."""
+class Market(Protocol):
+    """What the desk needs from market data (`ottr.market.service.MarketData`)."""
 
     calendar: TradingCalendar
 
@@ -123,16 +79,16 @@ class Events(Protocol):
         """What blocks a BUY (a pending action, or actions unknown), or None."""
 
 
-class UsDesk:
+class Desk:
     transient = ("market_closed", "no_quote", "book_unmarkable", "market_data_error",
                  "limit_not_marketable", "needs_cash")
 
-    def __init__(self, cfg, store: Store, ledger: Ledger, market: UsMarket, broker: SimBroker,
+    def __init__(self, cfg, store: Store, ledger: Ledger, market: Market, broker: SimBroker,
                  members: Mapping[str, Member], events: Events, clock: Clock = SYSTEM) -> None:
         self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
         self.broker, self.members, self.events, self.clock = broker, members, events, clock
 
-    async def context(self, intent: Intent) -> us_gate.UsGateContext:
+    async def context(self, intent: Intent) -> gate.GateContext:
         now = self.clock.time()
         cal = self.market.calendar
         quote, problem = await self.market.quote(intent.asset)
@@ -145,10 +101,10 @@ class UsDesk:
         cash_symbol = self.cfg.universe.cash_symbol
         values = valuation.values if valuation else {}
         satellites = sum(v for a, v in values.items()
-                         if self.members.get(a) is None or self.members[a].asset_class == us_gate.STOCK)
+                         if self.members.get(a) is None or self.members[a].asset_class == gate.STOCK)
         vol, regime = await self.market.vol_regime(intent.asset)
         st, hit = risk_flags(self.store, intent)
-        return us_gate.UsGateContext(
+        return gate.GateContext(
             cfg=self.cfg, now=now, market=cal.state_at(now), member=member,
             quote=quote, quote_problem=problem,
             limit_price=self.broker.price_for(intent.side, quote) if quote is not None else None,
@@ -159,10 +115,10 @@ class UsDesk:
             corp_action=self.events.corp_action(intent.asset, now),
             halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0), risk_event_since_intent=hit)
 
-    def evaluate(self, intent: Intent, ctx: us_gate.UsGateContext) -> Verdict:
-        return us_gate.evaluate(intent, ctx)
+    def evaluate(self, intent: Intent, ctx: gate.GateContext) -> Verdict:
+        return gate.evaluate(intent, ctx)
 
-    def book(self, intent: Intent, verdict: Verdict, ctx: us_gate.UsGateContext) -> BookResult:
+    def book(self, intent: Intent, verdict: Verdict, ctx: gate.GateContext) -> BookResult:
         member = self.members.get(intent.asset)
         order = Order(intent.idem_key, intent.asset, verdict.side, verdict.quantity,
                       ctx.limit_price, intent.origin)
@@ -174,7 +130,7 @@ class UsDesk:
             accrued=ex.accrued, quote=ctx.quote, quote_source=ctx.quote.source, origin=intent.origin,
             ref=intent.ref, reason=intent.reason, now=ctx.now))
 
-    def funding(self, intent: Intent, verdict: Verdict, ctx: us_gate.UsGateContext) -> Optional[Intent]:
+    def funding(self, intent: Intent, verdict: Verdict, ctx: gate.GateContext) -> Optional[Intent]:
         """Sell enough of the cash ETF to cover the shortfall (plus a hair for the fill's
         spread and rounding)."""
         held = ctx.cash_etf_value

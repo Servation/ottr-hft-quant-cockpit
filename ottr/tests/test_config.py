@@ -1,5 +1,5 @@
 """
-US desk config tests (config.us.toml via load_us): the shipped file is valid, lookups
+US desk config tests (config.toml via load): the shipped file is valid, lookups
 resolve caps and floors as intended, env overrides apply, secrets stay out of repr, and
 every validation rule rejects a broken file with a message naming the problem.
 """
@@ -7,9 +7,9 @@ every validation rule rejects a broken file with a message naming the problem.
 import pytest
 
 from ottr import config as cfgmod
-from ottr.config import ConfigError, load_us
+from ottr.config import ConfigError, load
 
-SHIPPED = cfgmod.US_CONFIG.read_text(encoding="utf-8")
+SHIPPED = cfgmod.DEFAULT_CONFIG.read_text(encoding="utf-8")
 
 
 def variant(tmp_path, *edits):
@@ -18,13 +18,13 @@ def variant(tmp_path, *edits):
     for old, new in edits:
         assert old in text, old
         text = text.replace(old, new, 1)
-    p = tmp_path / "config.us.toml"
+    p = tmp_path / "config.toml"
     p.write_text(text, encoding="utf-8")
-    return load_us(p, data_dir=tmp_path)
+    return load(p, data_dir=tmp_path)
 
 
 def test_the_shipped_config_is_valid(tmp_path):
-    c = load_us(data_dir=tmp_path)
+    c = load(data_dir=tmp_path)
     assert c.account.type == "margin_1x" and c.account.starting_cash == 10000
     assert len(c.core) == 16 and c.universe.cash_symbol == "SGOV"
     assert c.asset_class("TLT") == "bond_etf" and c.asset_class("NVDA") is None
@@ -35,7 +35,7 @@ def test_the_shipped_config_is_valid(tmp_path):
 
 
 def test_caps_resolve_override_then_class_and_cash_is_uncapped(tmp_path):
-    c = load_us(data_dir=tmp_path)
+    c = load(data_dir=tmp_path)
     assert c.cap_pct("SPY") == 25.0            # class cap
     assert c.cap_pct("EEM") == 15.0            # symbol override beats its class
     assert c.cap_pct("SGOV") is None           # swept cash: uncapped
@@ -45,7 +45,7 @@ def test_caps_resolve_override_then_class_and_cash_is_uncapped(tmp_path):
 
 
 def test_vol_floors_and_quote_limits(tmp_path):
-    c = load_us(data_dir=tmp_path)
+    c = load(data_dir=tmp_path)
     assert c.vol_floor("cash_etf") < c.vol_floor("bond_etf") < c.vol_floor("equity_etf")
     q = c.data.quote_limits()
     assert (q.max_spread_pct, q.max_age_sec) == (1.0, 120)
@@ -55,7 +55,7 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     monkeypatch.setenv("OTTR_DRY_RUN", "1")
     monkeypatch.setenv("MAX_TRADE_USD", "500")
     monkeypatch.setenv("DISCORD_WEBHOOK_URL", "https://discord.com/api/webhooks/1/SECRET-TOKEN")
-    c = load_us(data_dir=tmp_path)
+    c = load(data_dir=tmp_path)
     assert c.trading.dry_run and c.trading.max_trade_usd == 500
     assert c.discord_webhook_url and "SECRET-TOKEN" not in repr(c)
 

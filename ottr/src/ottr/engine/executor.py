@@ -9,7 +9,7 @@ transaction. A BUY that is short of cash while the desk holds its cash ETF is fu
 (the desk names the SELL), then checked again, once. Why: v1 had several code paths that
 could trade and needed a separate idempotency guard; here there is one, and a crash at any
 point either fully booked the trade or left no trace of it. The market-specific parts live
-in engine/desks.py, so every invariant here holds for every desk.
+in engine/desks.py, so every invariant here holds whatever the broker.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ import logging
 import time
 from typing import Awaitable, Callable, Optional
 
-from ottr.engine.desks import CryptoDesk
 from ottr.engine.killswitch import KillSwitch
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store, dumps
@@ -38,10 +37,9 @@ OutcomeHook = Callable[[Intent, str, Verdict], None]
 
 
 class Executor:
-    def __init__(self, cfg, store: Store, ledger: Ledger, market=None,
-                 notify: Optional[Notifier] = None, kill: Optional[KillSwitch] = None, desk=None) -> None:
-        self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
-        self.desk = desk or CryptoDesk(cfg, store, ledger, market)
+    def __init__(self, cfg, store: Store, ledger: Ledger, desk,
+                 notify: Optional[Notifier] = None, kill: Optional[KillSwitch] = None) -> None:
+        self.cfg, self.store, self.ledger, self.desk = cfg, store, ledger, desk
         self.notify = notify
         self.on_outcome: Optional[OutcomeHook] = None
         # Read at every decision, so engaging the switch stops the very next fill.

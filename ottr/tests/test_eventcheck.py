@@ -8,7 +8,7 @@ import dataclasses
 from datetime import date, datetime
 
 from ottr import cli
-from ottr.config import load_us
+from ottr.config import load
 from ottr.events import check
 from ottr.events.earnings import AlphaVantage
 from ottr.events.fred import Fred
@@ -26,7 +26,7 @@ SYMS = ["SPY", "TLT", "GLD"]
 
 
 def rig(tmp_path, av=True, sec=True, alpaca_ok=True):
-    cfg = load_us(data_dir=tmp_path).events
+    cfg = load(data_dir=tmp_path).events
     cfg = dataclasses.replace(cfg, macro={"VIXCLS": "VIX", "DGS10": "10y"})
     fred = FakeFred()
     fred.add("VIXCLS", {date(2026, 10, 20): 17.5})

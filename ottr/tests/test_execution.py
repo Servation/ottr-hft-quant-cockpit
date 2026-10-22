@@ -1,11 +1,11 @@
 """
 US execution tests: ticks and the SimBroker, the account model, the US gate through the
-real Executor on a UsDesk (session, quotes, members, earnings, caps, buying power), funding
+real Executor on a Desk (session, quotes, members, earnings, caps, buying power), funding
 a BUY from the cash ETF, the daily sweep and fee charge, and ports of the core invariants
 (no double fill, crash safety, dry run, protective exits never blocked).
 
 Runs on the fake 2026 NYSE calendar with a fake clock and fake quotes; the broker and fee
-schedule are the real ones from config.us.toml.
+schedule are the real ones from config.toml.
 """
 
 import dataclasses
@@ -18,8 +18,8 @@ from ottr.broker.account import buying_power
 from ottr.broker.base import Order, round_against_us
 from ottr.broker.sim import SimBroker
 from ottr.clock import FakeClock
-from ottr.config import load_us
-from ottr.engine.desks import UsDesk
+from ottr.config import load
+from ottr.engine.desks import Desk
 from ottr.engine.executor import Executor
 from ottr.engine.jobs import close_of_day, sweep_intent, sweep_moment
 from ottr.ledger.book import Ledger
@@ -79,7 +79,7 @@ class Events:
 
 @pytest.fixture
 def ucfg(tmp_path):
-    return load_us(data_dir=tmp_path)
+    return load(data_dir=tmp_path)
 
 
 @pytest.fixture
@@ -90,7 +90,7 @@ def rig(ucfg, store):
     market = FakeUsMarket(clock)
     members = core_members(ucfg, {s: s != "PDBC" for s in ucfg.core})
     members["NVDA"] = Member("NVDA", "stock")
-    desk = UsDesk(ucfg, store, lg, market, SimBroker(ucfg.fees), members, Events(), clock)
+    desk = Desk(ucfg, store, lg, market, SimBroker(ucfg.fees), members, Events(), clock)
     ex = Executor(ucfg, store, lg, desk=desk)
     return dataclasses.make_dataclass("Rig", ["cfg", "store", "ledger", "market", "desk", "ex", "clock"])(
         ucfg, store, lg, market, desk, ex, clock)

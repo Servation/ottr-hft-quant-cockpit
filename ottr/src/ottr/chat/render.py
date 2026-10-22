@@ -13,10 +13,11 @@ signed out or the hourly budget is spent, and they must say exactly what the API
 from __future__ import annotations
 
 import re
-import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from ottr.chat.client import ApiError, ApiUnreachable
+from ottr.market.calendar import ET
 from ottr.notify import clip, no_em_dash
 
 DISCORD_LIMIT = 2000
@@ -50,8 +51,20 @@ def when(ts: Optional[float], style: str = "R") -> str:
     return "n/a" if ts is None else f"<t:{int(ts)}:{style}>"
 
 
-def utc(ts: Optional[float]) -> str:
-    return "n/a" if ts is None else time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(ts))
+def et(ts: Optional[float]) -> str:
+    """New York time, the desk's clock: "Wed 2026-10-21 15:15 ET"."""
+    return "n/a" if ts is None else datetime.fromtimestamp(ts, tz=ET).strftime("%a %Y-%m-%d %H:%M ET")
+
+
+def market_line(m: Optional[dict]) -> str:
+    """The session from /api/book's `market` (None from an engine without a calendar)."""
+    if not m:
+        return "Market: unknown"
+    if m.get("open"):
+        s = m.get("session") or {}
+        early = " (early close)" if s.get("early_close") else ""
+        return f"Market: **open**, closes {when(s.get('close_ts'))}{early}"
+    return f"Market: closed, opens {when(m.get('next_open_ts'))}"
 
 
 def names(items: List[str]) -> str:
@@ -120,6 +133,8 @@ def status(health: Optional[dict], book: Optional[dict], council: Optional[dict]
     verdict = VERDICTS.get(health.get("exit_code"), "UNKNOWN") if health else "UNKNOWN"
     kill = (book or {}).get("kill_switch") or (health or {}).get("kill_switch")
     lines = [f"**OTTR {verdict}** | {kill_line(kill)}"]
+    if book and "market" in book:
+        lines.append(market_line(book.get("market")))
     if book:
         eq, cash = book.get("equity"), float(book["cash"])
         if eq:
@@ -128,12 +143,13 @@ def status(health: Optional[dict], book: Optional[dict], council: Optional[dict]
             lines.append(f"P&L: unrealized {signed_usd(book.get('unrealized_pnl'))} | realized "
                          f"{signed_usd(book.get('realized_pnl'))} | fees {usd(book.get('fees'))}")
         else:
-            lines.append(f"Equity unknown (no quotes: {book.get('quotes_error') or 'unmarked'}) | cash {usd(cash)}")
+            lines.append(f"Equity unknown (no price: {book.get('prices_error') or 'a holding is unpriced'}) | "
+                         f"cash {usd(cash)}")
             lines.append(f"P&L: realized {signed_usd(book.get('realized_pnl'))} | fees {usd(book.get('fees'))}")
         b = book.get("benchmarks") or {}
-        if b.get("btc_hold") is not None or b.get("equal_weight_hold") is not None:
-            lines.append(f"Benchmarks from day 0: BTC hold {usd(b.get('btc_hold'))} | equal weight "
-                         f"{usd(b.get('equal_weight_hold'))}")
+        if b.get("spy_hold") is not None or b.get("sixty_forty") is not None:
+            lines.append(f"Benchmarks from day 0: SPY hold {usd(b.get('spy_hold'))} | 60/40 "
+                         f"{usd(b.get('sixty_forty'))}")
         r = book.get("risk") or {}
         state = f"**HALTED** {when(r.get('halted_since'))} (BUYs blocked)" if r.get("halted") else "normal"
         dd = f" | drawdown {pct(r['drawdown'])} from peak {usd(r.get('peak_equity'))}" \
@@ -159,19 +175,21 @@ def positions(d: dict, now: float) -> str:
     rows = d.get("positions") or []
     if not rows:
         return "No open positions: the book is all cash."
-    head = f"**Positions** ({len(rows)}), marked at the bid {when(d.get('as_of'))}"
+    head = f"**Positions** ({len(rows)}) {when(d.get('as_of'))}"
     if not d.get("marked"):
-        head += f"\nUnmarked: {d.get('quotes_error') or 'a holding has no quote'}"
-    table = [f"{'ASSET':<5} {'VALUE':>11} {'WEIGHT':>6} {'P&L':>7} {'TO STOP':>7}"]
+        head += f"\nUnmarked: {d.get('prices_error') or 'a holding has no price'}"
+    table = [f"{'ASSET':<6} {'VALUE':>11} {'WEIGHT':>6} {'P&L':>7} {'TO STOP':>7} {'PRICE':<7}"]
     for p in rows:
-        table.append(f"{p['asset']:<5} {usd(p.get('value')):>11} {pct(p.get('weight')):>6} "
-                     f"{pct(p.get('unrealized_pct'), signed=True):>7} {pct(p.get('stop_distance_pct')):>7}")
+        table.append(f"{p['asset']:<6} {usd(p.get('value')):>11} {pct(p.get('weight')):>6} "
+                     f"{pct(p.get('unrealized_pct'), signed=True):>7} {pct(p.get('stop_distance_pct')):>7} "
+                     f"{p.get('price_basis') or 'none':<7}")
     notes = []
     for p in rows:
         if p.get("risk_blind_since"):
-            notes.append(f"! {p['asset']}: no fresh quote {when(p['risk_blind_since'])}, its stop isn't enforced")
+            notes.append(f"! {p['asset']}: no live quote {when(p['risk_blind_since'])}, its stop isn't enforced")
     body = "\n".join([head, "```", *table, "```"])
-    footer = "-# TO STOP: how far the bid is above the trailing stop. P&L is unrealized, fees included."
+    footer = ("-# PRICE: live (the bid), delayed (a minute close 16+ min old) or close (the last official "
+              "close). TO STOP: how far the price is above the trailing stop. P&L is unrealized, fees included.")
     return "\n".join([body, *notes, footer])
 
 
@@ -219,48 +237,6 @@ def meeting(m: Optional[dict], now: float) -> str:
                 out.append(f"> {s['asset']} {s['stance']}: {clip(s.get('thesis'), 220)} "
                            f"Risk: {clip(s.get('key_risk'), 140)}")
     return no_em_dash("\n".join(out))  # most of this view is model text
-
-
-def screen(d: Optional[dict], now: float) -> str:
-    """The latest screener run: candidates outside the universe, and where the universe ranks."""
-    from ottr.market import screen as sc
-    if d is None:
-        return ("No screen yet: the engine runs one a day, the first a couple of minutes after it "
-                "starts. `ottr screen` on the host runs one now.")
-    rows = d.get("rows", [])
-    outside = [r for r in rows if not r["in_universe"]]
-    n = (d.get("settings") or {}).get("top_n", 5)
-    head = (f"**Screener** {when(d.get('ts'))}: {len(outside)} liquid Kraken pairs outside the universe "
-            f"scored (of {d.get('listed', '?')} listed). Advisory: the desk never trades these.")
-    top = sc.candidates(d, n)
-    out = [head]
-    if top:
-        out.append("**Candidates** (up over 14, 30 and 90 days, ahead of BTC, near the 30-day high):")
-        shown = top
-    else:
-        out.append("**No candidate qualifies right now.** Strongest pairs outside the universe:")
-        shown = sc.closest(d, 3)
-    table = [f"{'':6} {'SCORE':>5} {'TREND':>6} {'vsBTC':>6} {'SIZE':>5} {'30D':>5} {'VOL':>5} {'$/DAY':>7}"]
-    for r in shown:
-        size = "n/a" if r.get("sizable") is None else f"{r['sizable'] * 100:.1f}%"
-        vol = "n/a" if r.get("vol") is None else f"{r['vol'] * 100:.0f}%"
-        table.append(f"{r['symbol']:6} {r['score']:>5.0f} {r['trend']:>+6.2f} {r['vs_btc']:>+6.2f} {size:>5} "
-                     f"{sc.signed_pct(r.get('chg_30d')):>5} {vol:>5} {sc.money(r.get('usd_volume')):>7}")
-    out += ["```", *table, "```"]
-    notes = [f"{r['symbol']}: {', '.join(r['flags'])}" for r in shown if r.get("flags")]
-    if not top:
-        notes += [f"{r['symbol']}: {sc.why_not(r)}" for r in shown]
-    if notes:
-        out.append("; ".join(notes))
-    ranks = ", ".join(f"{r['symbol']} #{r['rank']}" for r in rows if r["in_universe"])
-    if ranks:
-        out.append(f"Your universe ranks {ranks} (of {len(rows)}).")
-    if top:
-        out.append(sc.promote_hint(top[0]))
-    out.append("-# TREND and vsBTC: volatility-adjusted drift (a steadier climb scores higher). SIZE: what "
-               "the risk model would hold at full conviction. Score: ranks on trend, vs BTC, size, "
-               "smoothness, diversification and volume.")
-    return "\n".join(out)
 
 
 def kill_result(state: dict, engaged: bool, who: str) -> str:

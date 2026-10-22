@@ -45,7 +45,6 @@ class DeskContext:
     meeting: Optional[dict] = None     # the latest council meeting, if any
     fills: Optional[dict] = None
     council: Optional[dict] = None
-    screen: Optional[dict] = None      # the latest screener run, if there is one yet
     errors: Dict[str, str] = field(default_factory=dict)
 
 
@@ -108,21 +107,12 @@ class ApiClient:
     async def kill_state(self, timeout: Optional[float] = None) -> dict:
         return await self.get("/kill-switch", timeout=timeout)
 
-    async def screen(self) -> Optional[dict]:
-        """The latest screener run, or None before the first one (not an error)."""
-        try:
-            return await self.get("/screen")
-        except ApiError as e:
-            if e.status == 404 and e.message.startswith("no screen yet"):
-                return None
-            raise  # including a bare 404 from an engine older than the screener
-
     async def desk_context(self) -> DeskContext:
         """All /ask sections, read concurrently. Partial failures are kept as `errors`;
         only an engine that answers nothing at all raises (ApiUnreachable)."""
-        names = ("health", "book", "positions", "meeting", "fills", "council", "screen")
+        names = ("health", "book", "positions", "meeting", "fills", "council")
         results = await asyncio.gather(self.health(), self.book(), self.positions(), self.latest_meeting(),
-                                       self.fills(10), self.council(), self.screen(), return_exceptions=True)
+                                       self.fills(10), self.council(), return_exceptions=True)
         ctx = DeskContext()
         for name, res in zip(names, results):
             if isinstance(res, ApiError):

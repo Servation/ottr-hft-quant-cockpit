@@ -1,14 +1,19 @@
 """
 Protective monitor: trailing stops, concentration trims, drawdown breaker. Pure function.
 
-What it does: given the book, fresh quotes, the persisted risk state and the equity
-history, returns (intents to submit, new risk state, high-water updates, events).
+What it does: given the book, live quotes (in session only: a stop needs a bid to sell
+at), the persisted risk state and the equity history, returns (intents to submit, new risk
+state, high-water updates, events). A holding with no live quote is reported blind, since
+its stop can't be enforced. The cash ETF is never stopped or trimmed: it is swept cash.
 Why pure: every rule is unit-testable without clocks, network or a database, and the
 engine applies the outputs in one place.
 
 Drawdown deadlock fix (v1 bug): the breaker only blocks BUYs. It resumes when drawdown
 recovers under resume_pct, or after halt_max_hours with the peak re-baselined to current
 equity, because a book de-risked into cash may never climb back on its own.
+
+The stop is a fixed trailing percentage for now; volatility-scaled stops, the open delay
+and gap exits replace it in the next PR.
 """
 
 from __future__ import annotations
@@ -16,12 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Mapping, Optional, Tuple
 
-from ottr.config import Config
 from ottr.ledger.book import Position, Valuation
 from ottr.market.types import Quote
 from ottr.risk.types import Intent
 
-DAY = 86400.0
+STOCK = "stock"
 
 
 @dataclass
@@ -49,10 +53,27 @@ class MonitorResult:
     high_water: Dict[str, float]
     events: List[Tuple[str, dict]]
 
+    def summary(self) -> str:
+        """One line for the risk heartbeat: what this check did."""
+        blind = sorted(d["asset"] for k, d in self.events if k == "risk_blind")
+        parts = [f"{i.origin} {i.asset}" for i in self.intents]
+        if blind:
+            parts.append(f"blind on {', '.join(blind)}")
+        if self.state.halted:
+            parts.append("breaker halted")
+        return "; ".join(parts) or "all clear"
 
-def check(cfg: Config, now: float, positions: Mapping[str, Position],
-          valuation: Optional[Valuation], quotes: Mapping[str, Quote],
-          state: RiskState, equity_points: int) -> MonitorResult:
+
+def cap_for(cfg, symbol: str, classes: Mapping[str, str]) -> Optional[float]:
+    """The position cap (% of equity) for a holding; a holding that left the universe is
+    capped as a single stock, the tightest class."""
+    return cfg.cap_pct(symbol, classes.get(symbol, STOCK))
+
+
+def check(cfg, now: float, positions: Mapping[str, Position], valuation: Optional[Valuation],
+          quotes: Mapping[str, Quote], state: RiskState, equity_points: int,
+          classes: Mapping[str, str]) -> MonitorResult:
+    """`quotes`: live quotes that passed the sanity check. `classes`: member -> asset class."""
     r = cfg.risk
     st = RiskState.from_dict(state.to_dict())
     st.cooldowns = {a: u for a, u in st.cooldowns.items() if u > now}
@@ -62,17 +83,16 @@ def check(cfg: Config, now: float, positions: Mapping[str, Position],
     if not r.enabled:
         return MonitorResult(intents, st, hwm, events)
 
+    cash_symbol = cfg.universe.cash_symbol
     exiting = set()
     for a, p in positions.items():
-        q = quotes.get(a)
-        if q is None or q.age(now) > cfg.trading.max_data_age_sec:
-            events.append(("risk_blind", {"asset": a, "why": "no fresh quote"}))
+        if a == cash_symbol:
             continue
-        # The 24h high only counts once we've held for 24h, else it predates our entry.
-        cand = q.bid
-        if q.high_24h and now - p.opened_ts >= DAY:
-            cand = max(cand, q.high_24h)
-        new_hwm = max(p.high_water, cand)
+        q = quotes.get(a)
+        if q is None or q.age(now) > cfg.data.max_quote_age_sec:
+            events.append(("risk_blind", {"asset": a, "why": "no live quote"}))
+            continue
+        new_hwm = max(p.high_water, q.bid)
         if new_hwm > p.high_water:
             hwm[a] = new_hwm
         stop_px = new_hwm * (1 - r.trailing_stop_pct / 100)
@@ -81,13 +101,14 @@ def check(cfg: Config, now: float, positions: Mapping[str, Position],
             intents.append(Intent(
                 origin="stop", asset=a, side="SELL", fraction=1.0, ref="trailing_stop",
                 idem_key=f"stop:{a}:{p.opened_ts:.0f}", created_ts=now,
-                reason=f"bid {q.bid:.6g} <= stop {stop_px:.6g} ({r.trailing_stop_pct:.0f}% off high {new_hwm:.6g})"))
+                reason=f"bid {q.bid:.2f} <= stop {stop_px:.2f} ({r.trailing_stop_pct:.0f}% off high {new_hwm:.2f})"))
 
     if valuation is not None:
         for a, w in valuation.weights.items():
-            cap = cfg.cap_pct(a) / 100
-            if a in exiting or st.cooldowns.get(a, 0) > now:
+            cap = cap_for(cfg, a, classes)
+            if cap is None or a in exiting or st.cooldowns.get(a, 0) > now:
                 continue
+            cap /= 100
             if w > cap + r.trim_band_pct / 100:
                 intents.append(Intent(
                     origin="trim", asset=a, side="SELL", fraction=round((w - cap) / w, 6),
@@ -102,7 +123,7 @@ def check(cfg: Config, now: float, positions: Mapping[str, Position],
             events.append(("halt", {"drawdown": dd, "equity": eq, "peak": st.peak_equity}))
             if r.drawdown_derisk:
                 for a in positions:
-                    if a not in exiting:
+                    if a not in exiting and a != cash_symbol:
                         intents.append(Intent(
                             origin="derisk", asset=a, side="SELL", fraction=r.drawdown_derisk_pct / 100,
                             ref="drawdown", idem_key=f"derisk:{a}:{now:.0f}", created_ts=now,

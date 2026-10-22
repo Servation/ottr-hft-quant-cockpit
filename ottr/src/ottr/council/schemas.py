@@ -120,7 +120,7 @@ def chair_validator(universe: List[str], max_trades: int):
 ANALYST_SHAPE = """{
   "overall_view": "2-3 sentences on the market right now",
   "assets": [
-    {"asset": "BTC", "stance": "BUY|SELL|HOLD", "conviction": 0.0-1.0,
+    {"asset": "SPY", "stance": "BUY|SELL|HOLD", "conviction": 0.0-1.0,
      "thesis": "one or two sentences citing the numbers given",
      "key_risk": "the single biggest way this call is wrong"}
   ]
@@ -130,7 +130,7 @@ CHAIR_SHAPE = """{
   "summary": "2-4 sentences: what the council concluded and why",
   "dissent_notes": "who disagreed with the decision and their strongest point",
   "trades": [
-    {"action": "BUY", "asset": "ETH", "conviction": 0.0-1.0, "reasoning": "one sentence"},
-    {"action": "SELL", "asset": "SOL", "fraction_of_position": 0.0-1.0, "reasoning": "one sentence"}
+    {"action": "BUY", "asset": "IEF", "conviction": 0.0-1.0, "reasoning": "one sentence"},
+    {"action": "SELL", "asset": "GLD", "fraction_of_position": 0.0-1.0, "reasoning": "one sentence"}
   ]
 }"""

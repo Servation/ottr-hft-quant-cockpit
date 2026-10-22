@@ -13,7 +13,6 @@ import time
 import pytest
 
 from ottr import config as cfgmod
-from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store
 from ottr.market.types import Quote
 
@@ -62,10 +61,8 @@ def restore_logging():
 @pytest.fixture
 def cfg(tmp_path):
     c = cfgmod.load(data_dir=tmp_path)
-    # Engine tests must never bind the real dashboard port (API tests opt in with port 0)
-    # or reach Kraken through the screener (screener tests pass a fake one).
-    return dataclasses.replace(c, api=dataclasses.replace(c.api, enabled=False, port=0),
-                               screen=dataclasses.replace(c.screen, enabled=False))
+    # Engine tests must never bind the real dashboard port (API tests opt in with port 0).
+    return dataclasses.replace(c, api=dataclasses.replace(c.api, enabled=False, port=0))
 
 
 @pytest.fixture
@@ -77,12 +74,13 @@ def store(tmp_path):
 
 @pytest.fixture
 def ledger(store):
-    lg = Ledger(store)
-    lg.initialize(10000)
-    return lg
+    # Opened a week before the market rig's day (tests/fakes.py), so fills at the rig's
+    # fake time come after the deposit, as they would in a real book.
+    from tests.fakes import open_book
+    return open_book(store)
 
 
-def quote(asset, price, spread_pct=0.1, age=0.0, source="kraken", high=None):
+def quote(asset, price, spread_pct=0.1, age=0.0, source="alpaca", now=None):
     half = price * spread_pct / 200
     return Quote(asset=asset, bid=price - half, ask=price + half, last=price,
-                 ts=time.time() - age, source=source, high_24h=high, low_24h=None)
+                 ts=(time.time() if now is None else now) - age, source=source)

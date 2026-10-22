@@ -2,11 +2,14 @@
 Health: one definition of "is OTTR OK?", shared by the engine's watchdog, `ottr status`
 and the API.
 
-What it does: turns the persisted heartbeats, the risk monitor's blind list and a ledger
-replay into a list of Alarms plus an exit code. A task is unhealthy when its last
-SUCCESS (not just its last report) is older than 3x its interval, because a task that
-fails every tick still writes a heartbeat. The Watchdog adds clear-hysteresis on top so
-a value hovering at a threshold can't raise and resolve an alarm every minute.
+What it does: turns the persisted heartbeats, the risk monitor's blind list, the events
+feeds and a ledger replay into a list of Alarms plus an exit code. A periodic task is
+unhealthy when its last SUCCESS (not just its last report) is older than 3x its interval,
+because a task that fails every tick still writes a heartbeat. The council is judged by its
+schedule instead: the newest meeting slot that has passed (plus time to finish) must have a
+successful meeting after it. A stale corporate-actions or earnings feed is an alarm too,
+since it blocks the BUYs it guards. The Watchdog adds clear-hysteresis on top so a value
+hovering at a threshold can't raise and resolve an alarm every minute.
 
 Why one module: v1 died for three months unnoticed. Every observer must agree on what
 "stale" means, and the in-engine watchdog and the external `ottr status` both need it
@@ -17,11 +20,14 @@ from __future__ import annotations
 
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from ottr.config import Config
 from ottr.ledger.book import Ledger
 from ottr.ledger.store import Store
+from ottr.market.calendar import ET, last_meeting_at
+from ottr.market.history import load_calendar
 
 STALE_FACTOR = 3.0
 
@@ -31,20 +37,26 @@ EXIT_LEDGER = 2     # the books don't balance (same code as `ottr check`)
 EXIT_DOWN = 3       # the engine is not running
 
 CRITICAL, WARNING = "critical", "warning"
-# Risk and market feed the protective exits; equity and council only measure and propose.
+# Risk and market feed the protective exits; jobs, equity and council run the day's
+# routine, measure and propose.
 SEVERITY = {"watchdog": CRITICAL, "market": CRITICAL, "risk": CRITICAL,
-            "equity": WARNING, "council": WARNING, "screen": WARNING}  # screen: advisory only
+            "jobs": WARNING, "equity": WARNING, "council": WARNING}
+# A meeting gets this long past its slot to finish before a missing one is stale: two
+# council timeouts (analysts, then the chair) plus margin.
+COUNCIL_GRACE_EXTRA_SEC = 600.0
+FEED_STARTUP_GRACE_SEC = 600.0     # feeds refresh in the first jobs tick after a start
 
 
 def intervals(cfg: Config) -> Dict[str, float]:
-    """Expected cadence of each engine heartbeat, in seconds."""
+    """Expected cadence of each periodic engine heartbeat, in seconds (the council is
+    judged by its schedule, see `council_health`)."""
+    e = cfg.engine
     return {
-        "watchdog": cfg.engine.watchdog_interval_sec,  # the engine's own pulse
-        "market": cfg.market.spot_ttl_sec,
-        "risk": cfg.engine.risk_interval_sec,
-        "equity": cfg.engine.equity_interval_sec,
-        "council": cfg.council.interval_hours * 3600,
-        **({"screen": cfg.screen.interval_hours * 3600} if cfg.screen.enabled else {}),
+        "watchdog": e.watchdog_interval_sec,  # the engine's own pulse
+        "market": e.market_interval_sec,
+        "jobs": e.jobs_interval_sec,
+        "risk": e.risk_interval_sec,
+        "equity": e.equity_interval_sec,
     }
 
 
@@ -76,11 +88,12 @@ class TaskHealth:
     detail: str
     healthy: bool
     problem: str = ""
+    expect: str = ""              # when it should report, in words ("every 60s", the schedule)
 
     def to_dict(self, now: float) -> dict:
         d = asdict(self)
         d["age_sec"] = None if self.last_ts is None else round(now - self.last_ts, 1)
-        d["stale_after_sec"] = self.interval * STALE_FACTOR
+        d["stale_after_sec"] = self.interval * STALE_FACTOR if self.interval else None
         return d
 
 
@@ -138,7 +151,56 @@ def task_health(name: str, interval: float, hb: Optional[dict], now: float,
             problem = f"{name} task failing for {fmt_age(now - ref) if ref else 'ever'}: {hb['detail'] or 'no detail'}"
     return TaskHealth(task=name, interval=interval, last_ts=last_ts, last_ok_ts=last_ok,
                       ok=None if hb is None else bool(hb["ok"]), detail=(hb or {}).get("detail") or "",
-                      healthy=healthy, problem=problem)
+                      healthy=healthy, problem=problem, expect=f"every {fmt_age(interval)}")
+
+
+def council_health(cfg: Config, store: Store, hb: Optional[dict], now: float,
+                   epoch: Optional[float]) -> TaskHealth:
+    """Healthy when a meeting succeeded after the newest slot that should be over by now,
+    or the engine (re)started after it. Nights, weekends and holidays have no slots, so they
+    are never stale; a calendar not loaded yet is the market task's alarm, not this one."""
+    times = cfg.schedule.meeting_times
+    expect = f"at {' and '.join(times)} ET on trading days"
+    last_ts = hb["ts"] if hb else None
+    last_ok = hb.get("ok_ts") if hb else None
+    base = dict(task="council", interval=0.0, last_ts=last_ts, last_ok_ts=last_ok,
+                ok=None if hb is None else bool(hb["ok"]), detail=(hb or {}).get("detail") or "",
+                expect=expect)
+    cal = load_calendar(store)
+    grace = 2 * cfg.council.timeout_sec + COUNCIL_GRACE_EXTRA_SEC
+    due = last_meeting_at(cal, now - grace, times, cfg.schedule.min_before_close_min) if cal else None
+    refs = [t for t in (last_ok, epoch) if t is not None]
+    if due is None or (refs and max(refs) >= due):
+        return TaskHealth(healthy=True, **base)
+    slot = datetime.fromtimestamp(due, tz=ET).strftime("%a %H:%M ET")
+    why = (f"the last meeting failed: {hb['detail'] or 'no detail'}" if hb and not hb["ok"]
+           else "no meeting was recorded")
+    return TaskHealth(healthy=False, problem=f"council missed the {slot} meeting ({why})", **base)
+
+
+def feed_alarms(cfg: Config, store: Store, now: float, epoch: Optional[float]) -> List[Alarm]:
+    """Events feeds too old to trust block BUYs, so they are alarms. Earnings only matter
+    while the desk can hold or buy single stocks."""
+    from ottr.events import db
+    from ottr.events.view import FEED_CORPORATE, FEED_EARNINGS
+    if epoch is not None and now - epoch < FEED_STARTUP_GRACE_SEC:
+        return []
+    core = set(cfg.universe.core)
+    stocks = any(c == "stock" for c in cfg.universe.core.values()) or any(
+        s not in core for s in Ledger(store).positions())
+    checks = [(FEED_CORPORATE, "corporate actions unknown, so every BUY is blocked")]
+    if stocks:
+        checks.append((FEED_EARNINGS, "earnings dates unknown, so single-stock BUYs are blocked"))
+    out = []
+    max_age = cfg.events.max_age_hours * 3600
+    for name, what in checks:
+        f = db.feed(store, name)
+        if f is not None and f.ok_ts is not None and now - f.ok_ts <= max_age:
+            continue
+        since = f"last refreshed {fmt_age(now - f.ok_ts)} ago" if f and f.ok_ts else "never refreshed"
+        why = f" ({f.detail})" if f and not f.ok and f.detail else ""
+        out.append(Alarm(f"feed:{name}", WARNING, f"{name.replace('_', ' ')} feed {since}{why}: {what}"))
+    return out
 
 
 def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_engine: bool,
@@ -152,6 +214,7 @@ def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_e
     hbs = store.heartbeats()
     tasks = [task_health(n, iv, hbs.get(n), now, epoch) for n, iv in intervals(cfg).items()
              if not (inside_engine and n == "watchdog")]
+    tasks.append(council_health(cfg, store, hbs.get("council"), now, epoch))
     alarms: List[Alarm] = []
 
     alive: Optional[bool] = None
@@ -177,8 +240,9 @@ def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_e
                 oldest = min(blind.values())
                 alarms.append(Alarm("risk:blind", CRITICAL,
                                     f"risk monitor blind on {', '.join(sorted(blind))} for up to "
-                                    f"{fmt_age(now - oldest)}: no fresh quote, so trailing stops and "
+                                    f"{fmt_age(now - oldest)}: no live quote, so trailing stops and "
                                     "trims are not enforced"))
+        alarms += feed_alarms(cfg, store, now, epoch)
 
     problems: List[str] = []
     lg = Ledger(store)
