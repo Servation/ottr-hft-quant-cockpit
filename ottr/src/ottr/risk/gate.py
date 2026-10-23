@@ -171,8 +171,14 @@ def _buy(intent: Intent, ctx: GateContext) -> Verdict:
         current = val.values.get(intent.asset, 0.0)
         want, binding = w * val.equity - current, "target"
         notes.append(f"target {w * 100:.2f}% (${w * val.equity:,.2f}), holding ${current:,.2f}")
-        if want < t.min_trade_usd:
+        if want <= 0:
             return Verdict.reject(intent, "at_or_above_target", *notes)
+        if want < t.min_trade_usd:
+            # A gap to target too small to trade, rejected here so a short of cash can't sell
+            # the cash ETF to fund it. Its own reason: the desk may hold none of the asset
+            # (a small target), which "at or above target" would misreport.
+            return Verdict.reject(intent, "sized_below_min_by_target", *notes,
+                                  f"${want:,.2f} < ${t.min_trade_usd:,.2f}")
         if t.max_trade_usd > 0 and want > t.max_trade_usd:
             want, binding = t.max_trade_usd, "max_trade_usd"
         invested = val.invested - ctx.cash_etf_value
