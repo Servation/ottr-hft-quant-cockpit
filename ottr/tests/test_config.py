@@ -78,6 +78,8 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     ([('at = "15:45"', 'at = "17:00"')], "sweep.at"),
     ([('host = "127.0.0.1"', 'host = "0.0.0.0"')], "loopback"),          # shared rule applies too
     ([("min_analysts = 2", "min_analysts = 5")], "min_analysts"),
+    ([('chair_fallback = "gpt"', 'chair_fallback = "claude"')], "council.chair_fallback"),   # the chair itself
+    ([('chair_fallback = "gpt"', 'chair_fallback = "llama"')], "council.chair_fallback"),
     ([('earnings_horizon = "6month"', 'earnings_horizon = "1year"')], "events.earnings_horizon"),
     ([("max_age_hours = 72", "max_age_hours = 24")], "events.max_age_hours"),    # stale between refreshes
     ([('VIXCLS = "VIX', 'vixcls = "VIX')], "events.macro.vixcls"),

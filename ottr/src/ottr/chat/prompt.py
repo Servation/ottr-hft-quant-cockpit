@@ -165,6 +165,9 @@ def _meeting(ctx: DeskContext, now: float) -> List[str]:
         lines.append(f"  Dropped by code: {tr.get('action')} {tr.get('asset')}: {clip(x.get('why'), 200)}")
     for name, err in (m.get("errors") or {}).items():
         lines.append(f"  Analyst {name} dropped out: {clip(err, 200)}")
+    ch = m.get("chair") or {}
+    if ch.get("replaced"):
+        lines.append(f"  Chair: {ch.get('name')} stood in for {ch['replaced']}, which failed: {clip(ch.get('error'), 200)}")
     for name, a in (m.get("analysts") or {}).items():
         lines.append(f"  Analyst {name} (shown to the chair as {a.get('label')}): {clip(a.get('overall_view'), 500)}")
         for s in a.get("stances") or []:

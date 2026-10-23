@@ -121,3 +121,22 @@ async def test_a_signed_out_cli_says_so_in_the_error(monkeypatch):
     monkeypatch.setattr(models, "_run", FakeRun(2, "", "boom"))
     with pytest.raises(ModelError, match="claude exit 2: boom$"):
         await c.complete("hi")
+
+
+async def test_a_rejected_token_says_which_one_and_how_to_replace_it(monkeypatch):
+    """What the claude CLI prints when CLAUDE_CODE_OAUTH_TOKEN is bad (reproduced with a
+    made-up token): the alarm should say the token in ottr/.env needs replacing."""
+    c = ClaudeCLI()
+    monkeypatch.setattr(c, "locate", lambda: "claude.exe")
+    rejected = "Failed to authenticate. API Error: 401 OAuth access token is invalid.\n"
+    monkeypatch.setattr(models, "_run", FakeRun(1, rejected, ""))
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "sk-ant-oat01-test")
+    with pytest.raises(ModelError) as e:
+        await c.complete("hi")
+    assert str(e.value).endswith("(the CLAUDE_CODE_OAUTH_TOKEN in ottr/.env was rejected, expired or revoked: "
+                                 "make a new one with `claude setup-token`, replace it, then restart the engine)")
+    assert "sk-ant-oat01-test" not in str(e.value)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN")
+    with pytest.raises(ModelError) as e:
+        await c.complete("hi")
+    assert str(e.value).endswith("(the CLI's sign-in was rejected: sign it back in from a terminal on this PC)")

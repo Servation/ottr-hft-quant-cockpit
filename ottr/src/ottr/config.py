@@ -50,6 +50,7 @@ class Risk:
 class Council:
     analysts: List[str] = field(default_factory=lambda: ["claude", "gpt", "gemini"])
     chair: str = "claude"
+    chair_fallback: str = "gpt"            # chairs a meeting the chair fails ("" = abstain instead)
     min_analysts: int = 2
     timeout_sec: float = 300.0
     claude_model: str = "opus"
@@ -260,6 +261,10 @@ def _validate_shared(cfg) -> None:
         raise ConfigError("risk: stop_vol_mult > 0, stop_horizon_sessions in 1..63, open_delay_min in 0..60")
     if cfg.council.min_analysts < 1 or cfg.council.min_analysts > len(cfg.council.analysts):
         raise ConfigError("council.min_analysts must be between 1 and the analyst count")
+    fb = cfg.council.chair_fallback
+    if fb not in ("", "claude", "gpt", "gemini") or fb == cfg.council.chair:
+        raise ConfigError(f"council.chair_fallback must be \"\" or claude, gpt or gemini other than "
+                          f"the chair, got {fb!r}")
 
 
 REQUIRED_FEES = ("sec", "taf", "cat")   # the pass-through fees every US equity fill can owe

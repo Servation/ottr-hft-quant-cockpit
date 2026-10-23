@@ -3,7 +3,8 @@
 A US-markets paper-trading desk run by three AI models and a rulebook.
 
 Claude, GPT and Gemini each read the same market packet on their own and give a stance on
-every asset. A Claude chair reads their anonymized reports and decides what to trade.
+every asset. A Claude chair reads their anonymized reports and decides what to trade
+(GPT stands in if the chair fails).
 Between meetings, Claude watches the market and can call a meeting when something changes.
 Code does the rest:
 - It sizes every order, enforces the risk limits and fills trades at real bid/ask quotes
@@ -67,7 +68,8 @@ graph LR
 
 Requires Python 3.11+, a free Alpaca paper account (market data only), and the `claude`,
 Codex and `agy` (Antigravity) CLIs signed in on the same machine. The models run through
-those CLIs, so no model API keys live in this repo.
+those CLIs, so no model API keys live in this repo. For an unattended engine, give Claude
+its own sign-in with `claude setup-token` (see [`ottr/README.md`](ottr/README.md#model-sign-in)).
 
 ```bash
 cd ottr

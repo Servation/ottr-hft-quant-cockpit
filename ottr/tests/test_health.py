@@ -51,6 +51,19 @@ def _all_fresh(store):
         store.heartbeat(t, True)
 
 
+async def test_a_meeting_has_time_for_the_fallback_chair_before_it_is_missed(cfg, store):
+    import dataclasses
+    from tests.fakes import et, market_rig
+    await market_rig(cfg, store).market.refresh_calendar()
+    now = et(2026, 10, 21, 10, 15) + 22 * 60      # 22 minutes after the 10:15 slot, no meeting yet
+    start = et(2026, 10, 21, 9)                    # the engine started before the open
+    with_fallback = health.council_health(cfg, store, None, now, epoch=start)
+    assert with_fallback.healthy                    # analysts, chair, fallback: 3 x 300s + 600s
+    alone = dataclasses.replace(cfg, council=dataclasses.replace(cfg.council, chair_fallback=""))
+    missed = health.council_health(alone, store, None, now, epoch=start)
+    assert not missed.healthy and "missed the Wed 10:15 ET meeting" in missed.problem
+
+
 def test_outside_view_healthy_engine_exits_0(cfg, store, ledger):
     _engine_running(store, time.time() - 30)
     _all_fresh(store)

@@ -46,7 +46,8 @@ class MeetingProgress:
             n: {"name": n, "status": "waiting", "latency_sec": None, "stances": [], "view": None,
                 "error": None} for n in analysts}
         self.chair: Dict[str, Any] = {"name": chair, "status": "waiting", "reports": None,
-                                      "latency_sec": None, "error": None}
+                                      "latency_sec": None, "error": None,
+                                      "replaced": None}  # {name, error, latency_sec}: the chair that failed
         self.trades: List[Dict[str, Any]] = []
         self.dropped: List[Dict[str, Any]] = []
         self.status: Optional[str] = None      # the meeting record's status ("ok", "abstain: ...")
@@ -80,6 +81,10 @@ class MeetingProgress:
         elif kind == "chair_started":
             self.phase = "chair"
             self.chair.update(status="thinking", reports=d.get("reports"))
+        elif kind == "chair_replaced":
+            self.chair.update(name=d.get("name"), status="thinking", replaced={
+                "name": d.get("replaced"), "error": d.get("error"),
+                "latency_sec": round(float(d.get("latency") or 0.0), 1)})
         elif kind == "chair_done":
             self.chair.update(status="done", latency_sec=round(float(d.get("latency") or 0.0), 1))
             self.trades = [_trade(t) for t in d.get("trades") or []]
@@ -141,7 +146,7 @@ class MeetingProgress:
             "called": self.called,
             "elapsed_sec": round(end - self.started, 1), "status": self.status, "note": self.note,
             "analysts": [dict(a, stances=list(a["stances"])) for a in self.analysts.values()],
-            "chair": dict(self.chair),
+            "chair": dict(self.chair, replaced=dict(self.chair["replaced"]) if self.chair["replaced"] else None),
             "executing": self.executing,
             "trades": [dict(t, outcome=dict(t["outcome"]) if t["outcome"] else None) for t in self.trades],
             "dropped": [dict(x) for x in self.dropped],

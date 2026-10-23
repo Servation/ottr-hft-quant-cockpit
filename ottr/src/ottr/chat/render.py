@@ -112,8 +112,11 @@ def meeting_progress(p: Optional[dict]) -> str:
     for a in p.get("analysts") or []:
         by_state.setdefault(str(a.get("status")), []).append(str(a.get("name")))
     parts = [f"{names(by_state[s])} {word}" for s, word in ANALYST_STATES if by_state.get(s)]
+    c = p.get("chair") or {}
     chair = {"thinking": "chair deliberating", "done": "chair decided",
-             "failed": "chair failed"}.get((p.get("chair") or {}).get("status"))
+             "failed": "chair failed"}.get(c.get("status"))
+    if chair and c.get("replaced"):
+        chair += f" ({c.get('name')} standing in for {(c['replaced'] or {}).get('name')})"
     return ", ".join(parts + ([chair] if chair else []))
 
 
@@ -232,6 +235,9 @@ def meeting(m: Optional[dict], now: float) -> str:
         out.append(f"- dropped by code: {_trade(x.get('trade') or {})}: {clip(x.get('why'), 160)}")
     for name, err in (m.get("errors") or {}).items():
         out.append(f"- {name} dropped out: {clip(err, 160)}")
+    ch = m.get("chair") or {}
+    if ch.get("replaced"):
+        out.append(f"- chaired by {ch.get('name')}: {ch['replaced']} failed ({clip(ch.get('error'), 160)})")
     for name, a in (m.get("analysts") or {}).items():
         lat = (f", {a['latency_sec']:.0f}s" if isinstance(a.get("latency_sec"), (int, float)) else "")
         out.append(f"\n**{name}** (analyst {a.get('label') or '?'}{lat}): {clip(a.get('overall_view'), 400)}")

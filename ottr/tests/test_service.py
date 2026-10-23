@@ -176,6 +176,10 @@ def test_preflight_warns_about_missing_clis_and_webhook(tmp_path, monkeypatch):
     monkeypatch.setattr(models.CodexCLI, "_find", staticmethod(lambda: "codex.exe"))
     monkeypatch.setenv("PATHEXT", ".EXE")
     assert service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path)) == []
+    (warn,) = service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path),
+                                claude_token=False)
+    assert warn.startswith("CLAUDE_CODE_OAUTH_TOKEN is not set") and "claude setup-token" in warn
+    assert service.preflight(["gpt", "gemini"], webhook="https://x", path=str(tmp_path), claude_token=False) == []
 
 
 def fake_executable(folder, name):

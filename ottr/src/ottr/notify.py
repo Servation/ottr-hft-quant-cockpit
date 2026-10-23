@@ -92,17 +92,20 @@ def _live_analyst(a: dict) -> str:
 
 def _live_chair(d: dict) -> str:
     c = d.get("chair") or {}
+    rep = c.get("replaced")
+    head = (f"- chair ({rep.get('name')}): failed after {_dur(rep.get('latency_sec') or 0)} "
+            f"({clip(rep.get('error'), 160)}), so {c.get('name')} stands in\n") if rep else ""
     who, st = f"- chair ({c.get('name')})", c.get("status")
     if st == "thinking":
-        return f"{who}: deliberating on {c.get('reports')} reports"
+        return f"{head}{who}: deliberating on {c.get('reports')} reports"
     if st == "done":
         trades = ", ".join(_trade(t) for t in d.get("trades") or []) or "no trades"
-        return f"{who}: decided in {_dur(c.get('latency_sec') or 0)}: {trades}"
+        return f"{head}{who}: decided in {_dur(c.get('latency_sec') or 0)}: {trades}"
     if st == "failed":
-        return f"{who}: failed after {_dur(c.get('latency_sec') or 0)} ({clip(c.get('error'), 160)})"
+        return f"{head}{who}: failed after {_dur(c.get('latency_sec') or 0)} ({clip(c.get('error'), 160)})"
     if st == "skipped":
-        return f"{who}: not convened"
-    return f"{who}: " + {"waiting": "waits for the analysts"}.get(st, str(st))
+        return f"{head}{who}: not convened"
+    return f"{head}{who}: " + {"waiting": "waits for the analysts"}.get(st, str(st))
 
 
 def _live_outcome(o: Optional[dict], d: dict) -> str:
@@ -160,8 +163,11 @@ def format_event(kind: str, d: dict) -> str:
         dropped = "".join(f"\n- dropped {x['trade']['action']} {x['trade']['asset']}: {x['why']}"
                           for x in d.get("dropped", []))
         called = f"\nCalled by the watcher: {clip(no_em_dash(d['called']), 300)}" if d.get("called") else ""
-        return (f"**Council {d['id']}** ({d['status']}): {trades}{called}\n{no_em_dash(d.get('summary', ''))}"
-                f"{dropped}")
+        ch = d.get("chair") or {}
+        stood = (f"\nChaired by {ch.get('name')}: {ch.get('replaced')} failed ({clip(ch.get('error'), 160)})"
+                 if ch.get("replaced") else "")
+        return (f"**Council {d['id']}** ({d['status']}): {trades}{called}{stood}\n"
+                f"{no_em_dash(d.get('summary', ''))}{dropped}")
     if kind == "watch_set":
         head = f"**Watching** ({d.get('reason')})" + (f": {clip(no_em_dash(d['note']), 200)}" if d.get("note") else "")
         rows = [f"- {c}: {clip(no_em_dash(why), 160)}" for c, why in d.get("triggers") or []]

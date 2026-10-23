@@ -7,6 +7,10 @@ applies code-side rules to the decision (no BUY without analyst support, no SELL
 asset not held). Returns a record; it never trades. Why: models judge, code counts and
 enforces, and the record keeps every raw input/output for audit and the scorecard.
 
+If the chair fails (its CLI signed out, a timeout, JSON it can't repair) a fallback model
+chairs on the same prompt, so one provider being down doesn't cost the meeting; the record
+says who chaired and why.
+
 While it runs it can report progress to an `observe(kind, data)` callback (an analyst
 done or dropped out, the chair deliberating or decided). The callback is synchronous and
 its errors are swallowed, so whoever watches (the live Discord message, the API) can
@@ -29,6 +33,7 @@ logger = logging.getLogger(__name__)
 
 # observe(kind, data). Kinds: analysts_started {analysts}, analyst_done {name, report,
 # latency}, analyst_dropped {name, error, latency}, chair_started {reports},
+# chair_replaced {name, replaced, error, latency} (the fallback stands in),
 # chair_done {decision, trades, dropped, latency}, chair_failed {error, latency}.
 Observer = Callable[[str, Dict[str, Any]], None]
 
@@ -136,8 +141,9 @@ def enforce_rules(decision: Dict[str, Any], reports: Dict[str, Dict[str, Any]],
 
 class Council:
     def __init__(self, analysts: Dict[str, ModelAdapter], chair: ModelAdapter, universe: List[str],
-                 min_analysts: int = 2, max_trades: int = 3, timeout: float = 300.0) -> None:
-        self.analysts, self.chair = analysts, chair
+                 min_analysts: int = 2, max_trades: int = 3, timeout: float = 300.0,
+                 fallback: Optional[ModelAdapter] = None) -> None:
+        self.analysts, self.chair, self.fallback = analysts, chair, fallback
         self.universe, self.min_analysts = list(universe), min_analysts
         self.max_trades, self.timeout = max_trades, timeout
 
@@ -179,16 +185,34 @@ class Council:
         tally = compute_tally(reports, universe)
         labels = {n: chr(ord("A") + i) for i, n in enumerate(sorted(reports))}
         anon = {labels[n]: reports[n] for n in sorted(reports)}
-        rec.update(tally=tally, labels=labels)
+        rec.update(tally=tally, labels=labels, chair={"name": self.chair.name})
         _emit(observe, "chair_started", reports=len(reports))
+        prompt = chair_prompt(context, anon, tally, universe, self.max_trades)
+        validate = chair_validator(universe, self.max_trades)
         t0 = time.time()
         try:
-            decision = await ask_json(self.chair, chair_prompt(context, anon, tally, universe, self.max_trades),
-                                      chair_validator(universe, self.max_trades), timeout=self.timeout)
+            decision = await ask_json(self.chair, prompt, validate, timeout=self.timeout)
         except ModelError as e:
-            rec["status"] = f"abstain: chair failed ({e})"
-            _emit(observe, "chair_failed", error=str(e), latency=time.time() - t0)
-            return rec
+            if self.fallback is None:
+                rec["status"] = f"abstain: chair failed ({e})"
+                _emit(observe, "chair_failed", error=str(e), latency=time.time() - t0)
+                return rec
+            # Same reports, same rules: only who reads them changes. The fallback may have
+            # been an analyst too, as the chair usually is; the reports stay anonymized.
+            failed_after = round(time.time() - t0, 1)
+            logger.warning("chair %s failed after %.0fs, %s stands in: %s",
+                           self.chair.name, failed_after, self.fallback.name, e)
+            rec["chair"] = {"name": self.fallback.name, "replaced": self.chair.name, "error": str(e),
+                            "failed_after_sec": failed_after}
+            _emit(observe, "chair_replaced", name=self.fallback.name, replaced=self.chair.name,
+                  error=str(e), latency=failed_after)
+            t0 = time.time()
+            try:
+                decision = await ask_json(self.fallback, prompt, validate, timeout=self.timeout)
+            except ModelError as e2:
+                rec["status"] = f"abstain: chair failed ({e}); fallback {self.fallback.name} failed too ({e2})"
+                _emit(observe, "chair_failed", error=str(e2), latency=time.time() - t0)
+                return rec
         rec["latency"]["chair"] = round(time.time() - t0, 1)
         kept, dropped = enforce_rules(decision, reports, held, blocked)
         rec.update(decision=decision, trades=kept,

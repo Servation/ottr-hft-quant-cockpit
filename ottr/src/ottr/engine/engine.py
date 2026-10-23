@@ -94,7 +94,8 @@ def build_council(cfg: Config) -> Council:
     c = cfg.council
     return Council(analysts={n: make_adapter(n, c) for n in c.analysts}, chair=make_adapter(c.chair, c),
                    universe=list(cfg.core), min_analysts=c.min_analysts,
-                   max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec)
+                   max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec,
+                   fallback=make_adapter(c.chair_fallback, c) if c.chair_fallback else None)
 
 
 def members_from(cfg: Config, assets: Mapping[str, Asset],
@@ -735,6 +736,9 @@ class Engine:
             logger.info("council %s: %s done in %.0fs (%s)", prog.id, d["name"], d["latency"], leans or "all HOLD")
         elif kind == "chair_started":
             logger.info("council %s: chair deliberating on %d reports", prog.id, d["reports"])
+        elif kind == "chair_replaced":
+            logger.warning("council %s: chair %s failed after %.0fs, %s stands in: %s", prog.id,
+                           d["replaced"], d["latency"], d["name"], d["error"])
         elif kind == "chair_done":
             logger.info("council %s: chair decided in %.0fs (%d trade(s))", prog.id, d["latency"], len(d["trades"]))
         elif kind == "chair_failed":
@@ -802,7 +806,7 @@ class Engine:
         self.alerts.event("meeting", {"id": rec["id"], "status": rec["status"],
                                       "summary": (rec["decision"] or {}).get("summary", ""),
                                       "trades": rec["trades"], "dropped": rec["dropped"],
-                                      "called": (called or {}).get("why")})
+                                      "called": (called or {}).get("why"), "chair": rec.get("chair")})
         return rec
 
     def next_meeting(self, after: float) -> float:

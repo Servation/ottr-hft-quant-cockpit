@@ -25,7 +25,7 @@ money.
    No model output can carry a dollar size, and no model can add a symbol.
 2. **Independence, then synthesis.** Analysts see one shared market packet and never see
    each other. The chair sees their reports anonymized as A/B/C.
-3. **Fail closed.** No quorum, a failed chair, stale or insane market data, an unknown
+3. **Fail closed.** No quorum, a failed chair and fallback chair, stale or insane market data, an unknown
    earnings date or corporate action, or a failed check all mean no trade, and the reason
    is recorded.
 4. **Unknown is never zero.** A missing price, volatility or indicator stays `None`.
@@ -103,7 +103,10 @@ Each equity point records which basis it used.
    technical, cross-asset risk appetite.
 3. Code tallies the stances and gives the tally to the chair as a fact.
 4. The chair returns at most 3 trades: `BUY {asset, conviction}` or
-   `SELL {asset, fraction_of_position}`.
+   `SELL {asset, fraction_of_position}`. If the chair fails (its CLI signed out, a
+   timeout, JSON it can't repair), the fallback chair (GPT) gets the same prompt, so one
+   provider being down doesn't cost the meeting. The record and the Discord post say who
+   chaired and why; if both fail, the meeting abstains.
 5. Code enforces the rules: no BUY without an analyst's BUY, no SELL of what isn't held,
    no BUY of a blocked asset (sunset, earnings blackout, corporate action), each dropped
    with its reason.
@@ -242,7 +245,9 @@ stays exact and a corrected rule applies to all history at once.
 
 - **Supervisor + Task Scheduler.** The task starts the supervisor at logon and checks it
   every 5 minutes. The supervisor restarts the engine with backoff, as the user, because
-  the model CLIs are signed in under that profile.
+  the model CLIs are signed in under that profile. Claude can instead sign in with its own
+  long-lived subscription token (`CLAUDE_CODE_OAUTH_TOKEN` in `ottr/.env`), so signing out
+  of Claude Code on the PC doesn't sign the engine out.
 - **Events feeds** refresh on their own cadences:
   - FRED: every 12h.
   - Earnings: daily (one Alpha Vantage call).

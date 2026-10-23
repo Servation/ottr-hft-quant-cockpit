@@ -42,8 +42,8 @@ CRITICAL, WARNING = "critical", "warning"
 # routine, measure and propose.
 SEVERITY = {"watchdog": CRITICAL, "market": CRITICAL, "risk": CRITICAL,
             "jobs": WARNING, "equity": WARNING, "council": WARNING, "screen": WARNING, "watch": WARNING}
-# A meeting gets this long past its slot to finish before a missing one is stale: two
-# council timeouts (analysts, then the chair) plus margin.
+# A meeting gets this long past its slot to finish before a missing one is stale: its
+# council timeouts (analysts, the chair, the fallback chair) plus this margin.
 COUNCIL_GRACE_EXTRA_SEC = 600.0
 FEED_STARTUP_GRACE_SEC = 600.0     # feeds refresh in the first jobs tick after a start
 SCREEN_GRACE_SEC = 3 * 3600.0      # a weekly screen (minutes of downloads) has this long to land
@@ -170,7 +170,8 @@ def council_health(cfg: Config, store: Store, hb: Optional[dict], now: float,
                 ok=None if hb is None else bool(hb["ok"]), detail=(hb or {}).get("detail") or "",
                 expect=expect)
     cal = load_calendar(store)
-    grace = 2 * cfg.council.timeout_sec + COUNCIL_GRACE_EXTRA_SEC
+    calls = 3 if cfg.council.chair_fallback else 2
+    grace = calls * cfg.council.timeout_sec + COUNCIL_GRACE_EXTRA_SEC
     due = last_meeting_at(cal, now - grace, times, cfg.schedule.min_before_close_min) if cal else None
     refs = [t for t in (last_ok, epoch) if t is not None]
     if due is None or (refs and max(refs) >= due):

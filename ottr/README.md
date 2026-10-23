@@ -9,7 +9,8 @@ rationale: [`../docs/DESIGN.md`](../docs/DESIGN.md).
   - SGOV holds idle cash.
 - **Council:** Claude, GPT (Codex CLI) and Gemini (Antigravity CLI) each give a stance per
   asset as validated JSON at 10:15 and 15:15 New York time on trading days. A Claude
-  chair decides on anonymized reports. The chair never gives dollar sizes.
+  chair decides on anonymized reports, and GPT stands in if the chair fails. The chair
+  never gives dollar sizes.
 - **Code:**
   - **Sizing:** sizes BUYs (vol target x conviction x regime, topping up only to target).
   - **Gate:** runs the pre-trade gate (session, quote sanity, caps, sleeve, earnings blackout, corporate actions).
@@ -45,6 +46,7 @@ and real environment variables take precedence:
 | `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY` | Alpaca market data (a free paper account; OTTR never sends Alpaca an order) |
 | `ALPHAVANTAGE_API_KEY` | earnings dates (one call a day); without it no single stock can be bought |
 | `SEC_USER_AGENT` | your name and email for the SEC (the screener's company lists and profiles) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | Claude's own long-lived sign-in for the engine (recommended, see [Model sign-in](#model-sign-in)) |
 | `DISCORD_WEBHOOK_URL` | where meetings, fills, risk events, screens and alarms are posted (optional) |
 | `OTTR_API_KEY` | 16+ chars; enables `POST /api/kill-switch` (the GETs need no key) |
 | `OTTR_DRY_RUN=1` | kill switch from config: record "would fill" verdicts, never fill |
@@ -53,6 +55,31 @@ and real environment variables take precedence:
 
 Set your tax rates in `config.toml` under `[tax]` (federal and state) for the after-tax
 estimates.
+
+### Model sign-in
+
+The models run through their CLIs, signed in under your Windows profile: `claude`,
+`codex` and `agy`. By default the engine shares the claude CLI's interactive sign-in, so
+signing out of Claude Code on this PC signs the engine out too. That happened on
+2026-10-23: the chair failed and a meeting abstained.
+
+Give the engine its own Claude sign-in instead. It uses your Claude subscription, so there
+is no per-token bill:
+1. In a terminal, run `claude setup-token`. It opens a browser sign-in and prints a token
+   that lasts about a year.
+2. Put it in `ottr/.env` as `CLAUDE_CODE_OAUTH_TOKEN=...`.
+3. Restart the engine: `ottr service stop`, then `ottr service start`.
+
+The engine then signs in with the token, whatever your own Claude Code sign-in is doing.
+When a model can't sign in, the watch alarm on Discord says how to fix it:
+- A signed-out CLI: sign it back in from a terminal on this PC.
+- A rejected token (expired or revoked): make a new one and replace it.
+
+A meeting survives one provider being down:
+- An analyst that fails drops out. Two of the three are enough.
+- If the chair fails, the fallback chair (`council.chair_fallback`, GPT) decides on the
+  same anonymized reports. The meeting's Discord post says who chaired and why.
+- The watcher has no stand-in: it alarms until its model works again.
 
 ## Commands
 
@@ -120,7 +147,8 @@ moving the checkout or recreating the venv.
 At your logon, and every 5 minutes after (a keepalive that does nothing while it's
 already running), the task starts `pythonw -m ottr.cli supervise` as you, with no console
 window:
-- It runs as you because the claude, codex and agy CLIs are signed in under your profile.
+- It runs as you because the codex and agy CLIs are signed in under your profile (and
+  claude, unless it has its own token: see [Model sign-in](#model-sign-in)).
 - It starts at **logon, not boot**: turn on Windows automatic sign-in if the PC has to
   recover from a reboot on its own.
 - Keep the PC awake from 9:00 to 16:30 on trading days.
