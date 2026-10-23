@@ -85,6 +85,7 @@ class WatchState:
     last_review_ts: Optional[float] = None
     last_review: str = ""                    # the last review's answer, one line
     last_error: str = ""                     # the last review that failed, and why
+    last_error_ts: Optional[float] = None    # when it failed (cleared by a review that works)
     called: List[Dict[str, Any]] = field(default_factory=list)   # {"ts", "by", "why", "ran"}
     pending: Optional[Dict[str, Any]] = None                     # a call waiting for the council loop
 
@@ -94,12 +95,19 @@ class WatchState:
         return cls(note=d.get("note", ""), triggers=[Trigger(**t) for t in d.get("triggers") or []],
                    set_ts=d.get("set_ts"), last_review_ts=d.get("last_review_ts"),
                    last_review=d.get("last_review", ""), last_error=d.get("last_error", ""),
+                   last_error_ts=d.get("last_error_ts"),
                    called=list(d.get("called") or []), pending=d.get("pending"))
 
     def to_dict(self) -> dict:
         d = asdict(self)
         d["triggers"] = [asdict(t) for t in self.triggers]
         return d
+
+    def last_attempt(self) -> Optional[float]:
+        """When a review last ran, whether it worked or not: a failing model is retried
+        on the same cadence, not every minute."""
+        tried = [t for t in (self.last_review_ts, self.last_error_ts) if t is not None]
+        return max(tried) if tried else None
 
     def called_on(self, ts: float) -> List[Dict[str, Any]]:
         """Meetings the watcher called that ran on `ts`'s trade day."""

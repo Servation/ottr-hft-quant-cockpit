@@ -537,7 +537,7 @@ class Engine:
             reply = await ask_json(self.watcher_model, text, watcher.validate_reply, timeout=self.cfg.watch.timeout_sec)
         except ModelError as e:
             if apply:
-                st.last_error = f"{_et(now)} ET: {e}"[:300]
+                st.last_error, st.last_error_ts = f"{_et(now)} ET: {e}"[:400], now
                 self._save_watch(st)
             raise
         prices = {s: v.price.mid for s, v in snap.assets.items() if v.price is not None}
@@ -547,7 +547,7 @@ class Engine:
             return out
         changed = [t.describe() for t in triggers] != [t.describe() for t in st.triggers] or reply["note"] != st.note
         st.triggers, st.note, st.set_ts = triggers, reply["note"], now
-        st.last_review_ts, st.last_error = now, ""
+        st.last_review_ts, st.last_error, st.last_error_ts = now, "", None
         st.last_review = f"{_et(now)} ET ({why}): {'call a meeting' if reply['call_meeting'] else 'no meeting'}: {reply['why']}"[:400]
         self._save_watch(st)
         self.store.audit("watch_review", reason=why, call_meeting=reply["call_meeting"], why=reply["why"],
@@ -626,11 +626,16 @@ class Engine:
                 why = "; ".join(f"{t.describe()} (now ${px:,.2f}), watched because {t.why}" for t, px in hits)
                 self.request_meeting("condition", why)
         busy = self._review_task is not None and not self._review_task.done()
+        last = st.last_attempt()
         if busy:
             notes.append("reviewing")
-        elif self.meeting_started is None and (st.last_review_ts is None or now - st.last_review_ts >= w.check_every_min * 60):
+        elif self.meeting_started is None and (last is None or now - last >= w.check_every_min * 60):
             self._start_review("routine check")
             notes.append("review started")
+        if st.last_error_ts is not None:
+            # The conditions are still checked, but the model isn't reviewing: an alarm, so
+            # someone fixes the model (most often a CLI that was signed out).
+            raise ModelError(f"watcher reviews failing: {st.last_error}")
         watching = f"watching {len(st.triggers)} condition(s)" if st.triggers else "no conditions set"
         return "; ".join([watching, *notes])
 
@@ -984,9 +989,9 @@ class Engine:
                 out = await fn()
                 summary = getattr(out, "summary", None)
                 ok, detail = True, out if isinstance(out, str) else summary() if callable(summary) else ""
-            except MarketDataError as e:  # an outage, not a bug: no traceback every minute
+            except (MarketDataError, ModelError) as e:  # an outage, not a bug: no traceback every minute
                 logger.warning("task %s: %s", name, e)
-                ok, detail = False, f"MarketDataError: {e}"
+                ok, detail = False, f"{type(e).__name__}: {e}"
             except Exception as e:
                 logger.exception("task %s failed", name)
                 ok, detail = False, f"{type(e).__name__}: {e}"
