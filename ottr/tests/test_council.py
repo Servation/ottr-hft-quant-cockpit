@@ -9,7 +9,7 @@ from ottr.council.models import ModelError, ask_json, extract_json
 from ottr.council.schemas import SchemaError, analyst_validator, chair_validator
 from tests.fakes import ScriptedModel, analyst_reply
 
-U = ["BTC", "ETH"]
+U = ["SPY", "TLT"]
 
 
 def test_extract_json_tolerates_fences_rejects_nan():
@@ -28,19 +28,19 @@ def test_analyst_schema_requires_every_asset_once():
     with pytest.raises(SchemaError):
         v(ok)
     with pytest.raises(SchemaError):
-        v(analyst_reply(U, {"BTC": ("MOON", 0.5)}))
+        v(analyst_reply(U, {"SPY": ("MOON", 0.5)}))
     with pytest.raises(SchemaError):
-        v(analyst_reply(U, {"BTC": ("BUY", 1.5)}))
+        v(analyst_reply(U, {"SPY": ("BUY", 1.5)}))
 
 
 def test_chair_schema_has_no_sizing_and_bounds():
     v = chair_validator(U, max_trades=1)
-    assert v({"summary": "s", "trades": [{"action": "buy", "asset": "eth", "conviction": 0.5,
-                                          "reasoning": "r"}]})["trades"][0]["asset"] == "ETH"
-    for t in ([{"action": "BUY", "asset": "ETH", "conviction": 0.5, "usd_amount": 5, "reasoning": "r"}],
-              [{"action": "SELL", "asset": "ETH", "fraction_of_position": 0, "reasoning": "r"}],
+    assert v({"summary": "s", "trades": [{"action": "buy", "asset": "tlt", "conviction": 0.5,
+                                          "reasoning": "r"}]})["trades"][0]["asset"] == "TLT"
+    for t in ([{"action": "BUY", "asset": "TLT", "conviction": 0.5, "usd_amount": 5, "reasoning": "r"}],
+              [{"action": "SELL", "asset": "TLT", "fraction_of_position": 0, "reasoning": "r"}],
               [{"action": "BUY", "asset": "DOGE", "conviction": 0.5, "reasoning": "r"}],
-              [{"action": "BUY", "asset": "ETH", "conviction": True, "reasoning": "r"}]):
+              [{"action": "BUY", "asset": "TLT", "conviction": True, "reasoning": "r"}]):
         with pytest.raises(SchemaError):
             v({"summary": "s", "trades": t})
 
@@ -54,14 +54,14 @@ async def test_ask_json_repairs_once_then_gives_up():
 
 
 def test_tally_and_rules():
-    reps = {n: analyst_validator(U)(analyst_reply(U, {"BTC": (s, 0.6)}))
+    reps = {n: analyst_validator(U)(analyst_reply(U, {"SPY": (s, 0.6)}))
             for n, s in (("a", "BUY"), ("b", "BUY"), ("c", "SELL"))}
     t = compute_tally(reps, U)
-    assert t["assets"]["BTC"]["counts"] == {"BUY": 2, "SELL": 1} and t["assets"]["BTC"]["split"]
-    decision = {"trades": [{"action": "BUY", "asset": "BTC"}, {"action": "BUY", "asset": "ETH"},
-                           {"action": "SELL", "asset": "ETH"}]}
+    assert t["assets"]["SPY"]["counts"] == {"BUY": 2, "SELL": 1} and t["assets"]["SPY"]["split"]
+    decision = {"trades": [{"action": "BUY", "asset": "SPY"}, {"action": "BUY", "asset": "TLT"},
+                           {"action": "SELL", "asset": "TLT"}]}
     kept, dropped = enforce_rules(decision, reps, held=set())
-    assert kept == [{"action": "BUY", "asset": "BTC"}]
+    assert kept == [{"action": "BUY", "asset": "SPY"}]
     assert [w for _, w in dropped] == ["no analyst rated it BUY", "not held (desk is long-only)"]
 
 

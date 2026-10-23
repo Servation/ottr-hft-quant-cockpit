@@ -79,15 +79,15 @@ def test_one_blind_alarm_for_all_held_assets(cfg, store, ledger):
     _engine_running(store, now - 30)
     _all_fresh(store)
     with store.tx():
-        for asset, px in (("ETH", "2000"), ("BTC", "80000")):
-            ledger.apply_fill(idem_key=f"b-{asset}", asset=asset, side="BUY", quantity="0.01", price=px,
-                              fee_pct=0.4, quote_source="kraken", origin="test")
-    # SOL isn't held: a stale entry for it is not news.
-    store.set_state("risk_blind", {"ETH": now - 300, "BTC": now - 60, "SOL": now - 300})
+        for asset, px in (("TLT", "90"), ("GLD", "380")):
+            ledger.apply_fill(idem_key=f"b-{asset}", asset=asset, side="BUY", quantity="1", price=px,
+                              quote_source="alpaca", origin="test")
+    # IEF isn't held: a stale entry for it is not news.
+    store.set_state("risk_blind", {"TLT": now - 300, "GLD": now - 60, "IEF": now - 300})
     rep = health.evaluate(cfg, store, inside_engine=True, epoch=now - 30)
     assert [a.key for a in rep.alarms] == ["risk:blind"] and rep.exit_code == health.EXIT_DEGRADED
-    assert rep.alarms[0].message.startswith("risk monitor blind on BTC, ETH for up to 5m")
-    assert "trailing stops" in rep.alarms[0].message and rep.blind.keys() == {"BTC", "ETH"}
+    assert rep.alarms[0].message.startswith("risk monitor blind on GLD, TLT for up to 5m")
+    assert "trailing stops" in rep.alarms[0].message and rep.blind.keys() == {"GLD", "TLT"}
 
 
 def test_ledger_problem_wins_exit_2(cfg, store, ledger):
