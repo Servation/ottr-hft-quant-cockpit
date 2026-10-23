@@ -37,6 +37,7 @@ from typing import Dict, Optional, Tuple
 
 from ottr import config as cfgmod
 from ottr import health
+from ottr.clock import SYSTEM, Clock
 from ottr.engine.engine import Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.events.refresh import Sources
@@ -120,17 +121,18 @@ async def cmd_init(cfg, args) -> int:
         store.close()
 
 
-async def seed(cfg, store: Store, alpaca, sources: Sources, say=print) -> bool:
+async def seed(cfg, store: Store, alpaca, sources: Sources, say=print, clock: Clock = SYSTEM) -> bool:
     """Load what the first session needs so the engine starts with it: the calendar, the
     asset records and daily bars, the events feeds, and the first stock screen (applied).
     True when everything loaded. A step that fails is reported; the engine retries each
-    one on its own (the screen runs at start-up while none has been applied)."""
+    one on its own (the screen runs at start-up while none has been applied). `clock`:
+    a test's market lives at a fixed time, so "now" must be its time, not the wall's."""
     from ottr.events.refresh import refresh_due
     from ottr.market.http import HttpError
     from ottr.universe import db as udb
     from ottr.universe import run as urun
     say("Loading the market data, the events feeds and the first stock screen (a few minutes)...")
-    market = MarketData(cfg, alpaca, store)
+    market = MarketData(cfg, alpaca, store, clock=clock)
     try:
         cal = await market.refresh_calendar(force=True)
         await market.refresh_assets(cfg.core, force=True)
@@ -140,16 +142,16 @@ async def seed(cfg, store: Store, alpaca, sources: Sources, say=print) -> bool:
         return False
     say(f"  market data: the calendar through {cal.last_day}, {n:,} daily bars for {len(market.tracked())} symbols")
     ok = True
-    for r in await refresh_due(cfg, store, sources, list(cfg.core), time.time()):
+    for r in await refresh_due(cfg, store, sources, list(cfg.core), clock.time()):
         say(f"  {r.feed}: {r.detail}")
         ok = ok and r.ok
     try:
-        res = await urun.run_screen(cfg, store, alpaca, sources.sec, cal, time.time(), kind="init",
+        res = await urun.run_screen(cfg, store, alpaca, sources.sec, cal, clock.time(), kind="init",
                                     progress=lambda line: say(f"  {line}"))
     except (urun.ScreenError, MarketDataError, HttpError) as e:
         say(f"  first screen failed ({e}); the engine runs it when it starts")
         return False
-    now = time.time()
+    now = clock.time()
     urun.apply(store, res, set(Ledger(store).positions()), now)
     udb.save_screen(store, res.id, "init", True, res.summary(), res.to_dict(), now)
     say(f"  first screen: {res.summary()}")
@@ -157,7 +159,7 @@ async def seed(cfg, store: Store, alpaca, sources: Sources, say=print) -> bool:
         # The new satellites need their history and their corporate actions checked
         # before the first meeting can buy them.
         await market.refresh_bars(force=True)
-        for r in await refresh_due(cfg, store, sources, list(cfg.core) + udb.member_symbols(store), time.time()):
+        for r in await refresh_due(cfg, store, sources, list(cfg.core) + udb.member_symbols(store), clock.time()):
             say(f"  {r.feed}: {r.detail}")
             ok = ok and r.ok
     return ok

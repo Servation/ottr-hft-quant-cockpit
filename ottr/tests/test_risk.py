@@ -78,8 +78,18 @@ def test_caps_by_class_and_symbol(cfg):
 def test_a_buy_trades_only_the_gap_to_target(cfg):
     v = gate.evaluate(buy(), ctx(cfg, valuation=val(values={"TLT": 1000.0})))
     assert v.approved and v.notional == pytest.approx(500.0, rel=0.02)
-    full = val(values={"TLT": 1450.0})
+    full = val(values={"TLT": 1500.0})
     assert gate.evaluate(buy(), ctx(cfg, valuation=full)).reason == "at_or_above_target"
+    nearly = gate.evaluate(buy(), ctx(cfg, valuation=val(values={"TLT": 1450.0})))  # $50 short of target
+    assert nearly.reason == "sized_below_min_by_target" and "$50.00 < $100.00" in nearly.notes
+
+
+def test_a_target_below_the_minimum_trade_is_not_called_at_target(cfg):
+    """2026-10-23: the chair bought PDBC at a conviction whose whole target was $94.99, under
+    the $100 minimum trade. The desk held none, yet the verdict said "at_or_above_target"."""
+    v = gate.evaluate(buy(conviction=0.06), ctx(cfg, valuation=val()))
+    assert not v.approved and v.reason == "sized_below_min_by_target"
+    assert "holding $0.00" in v.notes[0] and v.notes[-1].endswith("< $100.00")
 
 
 def test_the_per_trade_ceiling_and_gross_exposure_bind(cfg):

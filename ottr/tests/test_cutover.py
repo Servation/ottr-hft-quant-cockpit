@@ -82,8 +82,10 @@ def test_archive_refuses_to_overwrite_or_to_run_beside_the_engine(tmp_path):
 async def test_init_seeds_the_market_data_feeds_and_first_screen(cfg, store, ledger):
     eng, rig, _ = await screen_rig(cfg, store)
     lines = []
+    # On the rig's clock: before it took one, this test read the wall clock and began
+    # failing once real time passed the fake market's last session (2026-10-23 16:00 ET).
     ok = await cli.seed(cfg, store, rig.market.alpaca, Sources(sec=eng.sources.sec, alpaca=rig.market.alpaca),
-                        say=lines.append)
+                        say=lines.append, clock=rig.clock)
     assert not ok                                            # no FRED or Alpha Vantage client in this test
     text = "\n".join(lines)
     assert "market data: the calendar through" in text and "corporate_actions: " in text
