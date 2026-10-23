@@ -79,15 +79,29 @@ async def _run(argv, stdin_text: Optional[str], timeout: float, cwd: str) -> tup
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
-def cli_message(out: str, err: str, tail: bool = False, limit: int = 300) -> str:
+# The claude CLI signs in with this long-lived subscription token when it is set (made by
+# `claude setup-token`, kept in ottr/.env), so the engine doesn't share, and can't lose,
+# this PC's interactive Claude Code sign-in.
+CLAUDE_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+
+
+def cli_message(out: str, err: str, tail: bool = False, limit: int = 300,
+                token_env: Optional[str] = None) -> str:
     """What a failed CLI said: stderr, else stdout (the claude CLI prints "Not logged in"
-    on stdout), clipped. A CLI that has been signed out gets the fix spelled out, because
-    this text ends up in a Discord alarm."""
+    on stdout), clipped. A CLI that has been signed out, or whose sign-in was rejected, gets
+    the fix spelled out, because this text ends up in a Discord alarm. `token_env` names
+    the variable that holds the CLI's token, if it takes one."""
     text = (err.strip() or out.strip() or "no output")
     text = text[-limit:] if tail else text[:limit]
     low = text.lower()
     if "not logged in" in low or "/login" in low or "please log in" in low:
         text += " (the CLI is signed out: sign it back in from a terminal on this PC)"
+    elif "failed to authenticate" in low or "token is invalid" in low or "token has expired" in low:
+        if token_env and os.environ.get(token_env):
+            text += (f" (the {token_env} in ottr/.env was rejected, expired or revoked: make a new "
+                     "one with `claude setup-token`, replace it, then restart the engine)")
+        else:
+            text += " (the CLI's sign-in was rejected: sign it back in from a terminal on this PC)"
     return text
 
 
@@ -116,7 +130,7 @@ class ClaudeCLI(ModelAdapter):
                 "--model", self.model, "--effort", self.effort]
         rc, out, err = await _run(argv, prompt, timeout, tempfile.gettempdir())
         if rc != 0 or not out.strip():
-            raise ModelError(f"claude exit {rc}: {cli_message(out, err)}")
+            raise ModelError(f"claude exit {rc}: {cli_message(out, err, token_env=CLAUDE_TOKEN_ENV)}")
         return _normalize(out)
 
 

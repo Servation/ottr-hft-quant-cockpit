@@ -231,6 +231,7 @@ er_threshold = 0.30
 [council]
 analysts = ["claude", "gpt", "gemini"]
 chair = "claude"
+chair_fallback = "gpt"     # chairs when the chair fails (signed out, timed out, bad JSON); "" = abstain
 min_analysts = 2
 timeout_sec = 300
 claude_model = "opus"

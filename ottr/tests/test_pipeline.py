@@ -12,6 +12,7 @@ benchmarks; and a clean stop.
 
 import asyncio
 import dataclasses
+import json
 from datetime import date
 from decimal import Decimal
 
@@ -88,6 +89,24 @@ async def test_the_chair_cannot_send_dollar_sizes(cfg, store, ledger, rig):
     analysts = {n: ScriptedModel(n, [analyst_reply(u, {"TLT": ("BUY", 0.9)})]) for n in ("claude", "gpt", "gemini")}
     rec = await engine(cfg, store, rig, Council(analysts, ScriptedModel("chair", [bad, bad]), u)).meeting()
     assert rec["status"].startswith("abstain: chair failed")
+
+
+async def test_a_signed_out_chair_still_trades_through_the_fallback(cfg, store, ledger, rig):
+    u = list(cfg.core)
+    analysts = {"claude": ScriptedModel("claude", [ModelError("claude exit 1: Not logged in")]),
+                "gpt": ScriptedModel("gpt", [analyst_reply(u, {"TLT": ("BUY", 0.8)})]),
+                "gemini": ScriptedModel("gemini", [analyst_reply(u)])}
+    buy_tlt = {"summary": "buy tlt", "trades": [{"action": "BUY", "asset": "TLT", "conviction": 0.7,
+                                                 "reasoning": "trend"}]}
+    council = Council(analysts, ScriptedModel("claude", [ModelError("claude exit 1: Not logged in")]), u,
+                      fallback=ScriptedModel("gpt", [buy_tlt]))
+    eng = engine(cfg, store, rig, council)
+    rec = await eng.meeting(execute=True)
+    await eng.executor.drain()
+    assert rec["status"] == "ok" and rec["errors"] == {"claude": "claude exit 1: Not logged in"}
+    assert fills(store) == [("BUY", "TLT", "council")]
+    stored = json.loads(store.conn.execute("SELECT record FROM meetings").fetchone()[0])
+    assert stored["chair"]["name"] == "gpt" and stored["chair"]["replaced"] == "claude"
 
 
 async def test_quorum_failure_means_no_trades(cfg, store, ledger, rig):

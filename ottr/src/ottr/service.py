@@ -169,8 +169,10 @@ def registry_path() -> Optional[str]:
     return os.pathsep.join(parts) if parts else None
 
 
-def preflight(analysts: List[str], webhook: Optional[str], path: Optional[str] = None) -> List[str]:
-    """Warnings about things that would make the scheduled engine misbehave."""
+def preflight(analysts: List[str], webhook: Optional[str], path: Optional[str] = None,
+              claude_token: bool = True) -> List[str]:
+    """Warnings about things that would make the scheduled engine misbehave. `claude_token`:
+    the claude CLI has its own long-lived token (CLAUDE_CODE_OAUTH_TOKEN)."""
     from ottr.council.models import CodexCLI
     warns = []
     path = path if path is not None else registry_path()
@@ -182,6 +184,10 @@ def preflight(analysts: List[str], webhook: Optional[str], path: Optional[str] =
         elif name in exes and path is not None and not shutil.which(exes[name], path=path):
             warns.append(f"`{exes[name]}` is not on your user/system PATH (registry), so the scheduled "
                          f"engine won't find it: the {name} analyst would drop out")
+    if "claude" in analysts and not claude_token:
+        warns.append("CLAUDE_CODE_OAUTH_TOKEN is not set (ottr/.env): the engine shares this PC's Claude Code "
+                     "sign-in, so signing out of Claude Code signs the engine out too (`claude setup-token`, "
+                     "see ottr/README.md)")
     if not webhook:
         warns.append("DISCORD_WEBHOOK_URL is not set (env or ottr/.env): alarms will only reach the log")
     return warns

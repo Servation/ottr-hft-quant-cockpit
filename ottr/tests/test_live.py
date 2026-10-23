@@ -547,3 +547,28 @@ async def test_webhook_edit_failures_are_quiet_and_never_leak_the_token(caplog):
     assert not await DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(boom)).edit("1", "hi")
     assert "no message id" in caplog.text and "edit returned HTTP 404" in caplog.text
     assert "edit unreachable (ConnectError)" in caplog.text and "SECRET-TOKEN" not in caplog.text
+
+
+def test_a_stand_in_chair_shows_who_failed_and_who_decided():
+    p = MeetingProgress("m-1", ["claude", "gpt"], "claude", now=1000.0)
+    p.apply("analysts_started", {})
+    p.apply("chair_started", {"reports": 2})
+    p.apply("chair_replaced", {"name": "gpt", "replaced": "claude", "latency": 2.4,
+                               "error": "claude exit 1: Not logged in"})
+    d = p.to_dict(1010.0)
+    assert d["chair"]["name"] == "gpt" and d["chair"]["status"] == "thinking"
+    assert d["chair"]["replaced"] == {"name": "claude", "error": "claude exit 1: Not logged in", "latency_sec": 2.4}
+    text = format_event("meeting_live", d)
+    assert ("- chair (claude): failed after 2s (claude exit 1: Not logged in), so gpt stands in\n"
+            "- chair (gpt): deliberating on 2 reports") in text
+    assert render.meeting_progress(d).endswith("chair deliberating (gpt standing in for claude)")
+    trade = {"action": "BUY", "asset": "TLT", "conviction": 0.7, "reasoning": "r"}
+    p.apply("chair_done", {"latency": 40.0, "trades": [trade], "dropped": [], "decision": {}})
+    assert "- chair (gpt): decided in 40s: BUY TLT" in format_event("meeting_live", p.to_dict(1050.0))
+    posted = format_event("meeting", {"id": "m-1", "status": "ok", "summary": "s", "trades": [trade],
+                                      "dropped": [], "chair": {"name": "gpt", "replaced": "claude",
+                                                               "error": "claude exit 1: Not logged in"}})
+    assert "\nChaired by gpt: claude failed (claude exit 1: Not logged in)\n" in posted
+    plain = format_event("meeting", {"id": "m-2", "status": "ok", "summary": "s", "trades": [],
+                                     "dropped": [], "chair": {"name": "claude"}})
+    assert "Chaired by" not in plain

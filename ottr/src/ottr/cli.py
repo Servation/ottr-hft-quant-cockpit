@@ -335,6 +335,9 @@ def _print_meeting(rec, store: Store) -> None:
     print(f"\nmeeting {rec['id']}: {rec['status']}  latency {rec['latency']}")
     for n, e in rec["errors"].items():
         print(f"  ! {n} dropped: {e}")
+    ch = rec.get("chair") or {}
+    if ch.get("replaced"):
+        print(f"  ! chair {ch['replaced']} failed, {ch.get('name')} chaired: {ch.get('error')}")
     if rec["tally"]:
         from ottr.council.council import format_tally
         print(format_tally(rec["tally"]))
@@ -653,7 +656,10 @@ async def cmd_service(cfg, args) -> int:
     name = args.name
     if args.action == "install":
         spec = service.default_spec(args.config, name)
-        warns = service.preflight(cfg.council.analysts, cfg.discord_webhook_url)
+        from ottr.council.models import CLAUDE_TOKEN_ENV
+        models = list(dict.fromkeys([*cfg.council.analysts, cfg.council.chair, cfg.watch.model]))
+        warns = service.preflight(models, cfg.discord_webhook_url,
+                                  claude_token=bool(os.environ.get(CLAUDE_TOKEN_ENV)))
         if os.name != "nt" and not args.dry_run:
             print("Task Scheduler is Windows-only; use --dry-run to see the task XML")
             return 2

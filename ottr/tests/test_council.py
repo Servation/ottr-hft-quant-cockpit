@@ -1,5 +1,6 @@
 """
-Council tests: JSON extraction, schema rules, repair retry, anonymization, code-side rules.
+Council tests: JSON extraction, schema rules, repair retry, anonymization, code-side rules,
+and the fallback chair that stands in when the chair fails.
 """
 
 import pytest
@@ -72,3 +73,53 @@ async def test_chair_sees_anonymized_reports():
     p = chair.prompts[0].lower()
     assert "analyst a" in p and not any(n in p for n in ("claude", "gpt", "gemini"))
     assert rec["labels"] == {"claude": "A", "gemini": "B", "gpt": "C"}  # kept internally
+
+
+# -- the fallback chair ----------------------------------------------------------------------------
+SIGNED_OUT = "claude exit 1: Not logged in · Please run /login"
+
+
+def _analysts():
+    return {n: ScriptedModel(n, [analyst_reply(U, {"SPY": ("BUY", 0.7)})]) for n in ("claude", "gpt", "gemini")}
+
+
+async def test_a_failed_chair_hands_the_same_reports_to_the_fallback():
+    """2026-10-23: the claude CLI was signed out, so the chair failed and the 10:15 meeting
+    abstained although GPT and Gemini had reported. Now the fallback chairs instead."""
+    chair = ScriptedModel("claude", [ModelError(SIGNED_OUT)])
+    fallback = ScriptedModel("gpt", [{"summary": "buy spy", "trades": [
+        {"action": "BUY", "asset": "SPY", "conviction": 0.6, "reasoning": "trend"}]}])
+    events = []
+    rec = await Council(_analysts(), chair, U, fallback=fallback).run(
+        "ctx", held=set(), observe=lambda k, d: events.append((k, d)))
+    assert rec["status"] == "ok" and [t["asset"] for t in rec["trades"]] == ["SPY"]
+    assert rec["chair"]["name"] == "gpt" and rec["chair"]["replaced"] == "claude"
+    assert rec["chair"]["error"] == SIGNED_OUT and rec["chair"]["failed_after_sec"] >= 0
+    assert fallback.prompts == chair.prompts  # the same anonymized reports and rules
+    assert [k for k, _ in events if k.startswith("chair")] == ["chair_started", "chair_replaced", "chair_done"]
+    replaced = dict(events)["chair_replaced"]
+    assert (replaced["name"], replaced["replaced"], replaced["error"]) == ("gpt", "claude", SIGNED_OUT)
+
+
+async def test_a_chair_that_works_is_recorded_and_the_fallback_never_asked():
+    chair = ScriptedModel("claude", [{"summary": "s", "trades": []}])
+    fallback = ScriptedModel("gpt", [])
+    rec = await Council(_analysts(), chair, U, fallback=fallback).run("ctx", held=set())
+    assert rec["status"] == "ok" and rec["chair"] == {"name": "claude"} and fallback.prompts == []
+
+
+async def test_both_chairs_failing_abstains_with_both_reasons():
+    bad = {"summary": "s", "trades": [{"action": "BUY", "asset": "SPY", "usd_amount": 900, "reasoning": "r"}]}
+    chair = ScriptedModel("claude", [ModelError(SIGNED_OUT)])
+    fallback = ScriptedModel("gpt", [bad, bad])  # sizes in dollars twice: invalid after the retry
+    events = []
+    rec = await Council(_analysts(), chair, U, fallback=fallback).run(
+        "ctx", held=set(), observe=lambda k, d: events.append((k, d)))
+    assert rec["status"].startswith(f"abstain: chair failed ({SIGNED_OUT}); fallback gpt failed too (gpt: invalid output")
+    assert rec["trades"] == [] and rec["chair"]["name"] == "gpt"
+    assert events[-1][0] == "chair_failed" and "invalid output" in events[-1][1]["error"]
+
+
+async def test_without_a_fallback_a_failed_chair_abstains():
+    rec = await Council(_analysts(), ScriptedModel("claude", [ModelError(SIGNED_OUT)]), U).run("ctx", held=set())
+    assert rec["status"] == f"abstain: chair failed ({SIGNED_OUT})"

@@ -390,7 +390,7 @@ def _meeting_view(ctx: ApiContext, mid: str, ts: float, status: str, record: str
     out = {"id": mid, "ts": ts, "status": status, "summary": d.get("summary"),
            "dissent_notes": d.get("dissent_notes"), "trades": rec.get("trades", []),
            "dropped": rec.get("dropped", []), "errors": rec.get("errors", {}),
-           "latency": rec.get("latency", {}), "tally": rec.get("tally"),
+           "latency": rec.get("latency", {}), "tally": rec.get("tally"), "chair": rec.get("chair"),
            "analysts": analysts, "orders": orders}
     if full:
         out["decision"] = rec.get("decision")
