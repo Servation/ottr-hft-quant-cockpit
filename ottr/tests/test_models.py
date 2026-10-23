@@ -106,3 +106,18 @@ async def test_live_agy_answers_a_prompt_longer_than_the_windows_command_line():
     assert len(prompt) > 40_000
     reply = await GeminiCLI(model="gemini-3.8-flash-low").complete(prompt, timeout=180)
     assert "LONGOK" in reply
+
+
+async def test_a_signed_out_cli_says_so_in_the_error(monkeypatch):
+    """2026-10-23: the claude CLI had been signed out. It printed "Not logged in" on stdout
+    and nothing on stderr, so the alarm read only "claude exit 1:"."""
+    c = ClaudeCLI()
+    monkeypatch.setattr(c, "locate", lambda: "claude.exe")
+    monkeypatch.setattr(models, "_run", FakeRun(1, "Not logged in · Please run /login\n", ""))
+    with pytest.raises(ModelError) as e:
+        await c.complete("hi")
+    assert str(e.value) == ("claude exit 1: Not logged in · Please run /login (the CLI is signed out: sign it "
+                            "back in from a terminal on this PC)")
+    monkeypatch.setattr(models, "_run", FakeRun(2, "", "boom"))
+    with pytest.raises(ModelError, match="claude exit 2: boom$"):
+        await c.complete("hi")

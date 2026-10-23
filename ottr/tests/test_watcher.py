@@ -225,3 +225,23 @@ def test_the_config_limits(cfg, tmp_path):
     with pytest.raises(config.ConfigError, match="min_gap_min"):
         config._validate(dataclasses.replace(cfg, watch=dataclasses.replace(cfg.watch, min_gap_min=5)))
     assert Trigger("SPY", "price_above", 1.0, "x", 1.0).describe() == "SPY above $1.00"
+
+
+async def test_a_failing_watcher_backs_off_and_raises_the_alarm(cfg, store, ledger):
+    """2026-10-23: with the claude CLI signed out, every review failed and the next one
+    started a minute later, all day, while the watch heartbeat stayed green."""
+    signed_out = ModelError("claude exit 1: Not logged in · Please run /login")
+    eng, rig, model = await rigged(cfg, store, [signed_out, reply(note="back")])
+    assert (await eng.watch_tick()) == "no conditions set; review started"
+    await eng._review_task                                      # fails (and logs it) in the background
+    assert "Not logged in" in eng.watch_state().last_error
+    rig.at(OPEN + 60)
+    with pytest.raises(ModelError, match="watcher reviews failing: .*Not logged in"):
+        await eng.watch_tick()                                  # the heartbeat fails: an alarm
+    assert len(model.prompts) == 1                             # and no new review a minute later
+    rig.at(OPEN + cfg.watch.check_every_min * 60 + 1)
+    with pytest.raises(ModelError):                             # still failing until a review works
+        await eng.watch_tick()
+    await eng._review_task                                      # the retry, on the normal cadence
+    assert len(model.prompts) == 2 and eng.watch_state().last_error == ""
+    assert await eng.watch_tick() == "no conditions set"

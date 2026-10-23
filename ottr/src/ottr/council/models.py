@@ -79,6 +79,18 @@ async def _run(argv, stdin_text: Optional[str], timeout: float, cwd: str) -> tup
     return proc.returncode, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
+def cli_message(out: str, err: str, tail: bool = False, limit: int = 300) -> str:
+    """What a failed CLI said: stderr, else stdout (the claude CLI prints "Not logged in"
+    on stdout), clipped. A CLI that has been signed out gets the fix spelled out, because
+    this text ends up in a Discord alarm."""
+    text = (err.strip() or out.strip() or "no output")
+    text = text[-limit:] if tail else text[:limit]
+    low = text.lower()
+    if "not logged in" in low or "/login" in low or "please log in" in low:
+        text += " (the CLI is signed out: sign it back in from a terminal on this PC)"
+    return text
+
+
 def _normalize(text: str) -> str:
     # Models sometimes emit narrow no-break spaces / non-breaking hyphens that break JSON.
     return text.replace(" ", " ").replace(" ", " ").replace("‑", "-")
@@ -104,7 +116,7 @@ class ClaudeCLI(ModelAdapter):
                 "--model", self.model, "--effort", self.effort]
         rc, out, err = await _run(argv, prompt, timeout, tempfile.gettempdir())
         if rc != 0 or not out.strip():
-            raise ModelError(f"claude exit {rc}: {err.strip()[:300]}")
+            raise ModelError(f"claude exit {rc}: {cli_message(out, err)}")
         return _normalize(out)
 
 
@@ -134,11 +146,11 @@ class CodexCLI(ModelAdapter):
             # "-" makes codex read the prompt from stdin (avoids Windows arg-length limits).
             argv = [exe, "exec", "--skip-git-repo-check", "--sandbox", "read-only",
                     "-c", f"model_reasoning_effort={self.effort}", "-o", out_path, "-"]
-            rc, _out, err = await _run(argv, prompt, timeout, tempfile.gettempdir())
+            rc, out, err = await _run(argv, prompt, timeout, tempfile.gettempdir())
             with open(out_path, encoding="utf-8", errors="replace") as f:
                 text = f.read()
             if rc != 0 or not text.strip():
-                raise ModelError(f"codex exit {rc}: {err.strip()[-300:]}")
+                raise ModelError(f"codex exit {rc}: {cli_message(out, err, tail=True)}")
             return _normalize(text)
         finally:
             try:
@@ -193,7 +205,7 @@ def agy_response(rc: int, out: str, err: str) -> str:
         if isinstance(ev, dict) and ev.get("event") == "result":
             result = ev.get("result") or {}
     if result is None:
-        raise ModelError(f"agy exit {rc}: no result event ({err.strip()[:300]})")
+        raise ModelError(f"agy exit {rc}: no result event ({cli_message(out, err)})")
     if rc != 0 or result.get("status") != "SUCCESS":
         why = result.get("error") or err.strip()
         raise ModelError(f"agy exit {rc}, status {result.get('status')}: {str(why)[:300]}")
