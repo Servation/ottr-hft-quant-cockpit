@@ -106,7 +106,7 @@ def test_deferred_raise_posts_when_window_passes_if_still_active():
 
 def test_event_flood_is_capped_and_summarized_later():
     a, clock = make(Limits(burst=5, per_hour=60))
-    fill = {"side": "BUY", "asset": "ETH", "notional": "100", "price": "2000", "origin": "council",
+    fill = {"side": "BUY", "asset": "TLT", "notional": "100", "price": "2000", "origin": "council",
             "realized_pnl": "0", "reason": "r"}
     for _ in range(50):
         a.event("fill", fill)

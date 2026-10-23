@@ -35,15 +35,15 @@ def sell(lg, asset, q, price, key, fee=0.4, **kw):
 # -- cash, cost, precision ----------------------------------------------------------------
 
 def test_buy_capitalizes_fee_and_sell_realizes_net(ledger):
-    buy(ledger, "ETH", "1", "2000", "b1")
-    p = ledger.positions()["ETH"]
+    buy(ledger, "QQQ", "1", "2000", "b1")
+    p = ledger.positions()["QQQ"]
     assert str(p.cost) == "2008.00"            # 2000 + 0.4% fee, in cents
     assert str(ledger.cash()) == "7992.00"
-    f = sell(ledger, "ETH", "0.5", "2200", "s1")
+    f = sell(ledger, "QQQ", "0.5", "2200", "s1")
     # proceeds 1100, fee 4.40, cost out 1004 -> realized 91.60
     assert str(f.realized_pnl) == "91.60"
     assert str(ledger.cash()) == "9087.60"
-    assert str(ledger.positions()["ETH"].cost) == "1004.00"
+    assert str(ledger.positions()["QQQ"].cost) == "1004.00"
     assert ledger.check() == []
 
 
@@ -56,24 +56,24 @@ def test_amounts_are_cents_and_quantities_nine_decimals(ledger):
 
 
 def test_full_exit_removes_position_and_books_balance(ledger):
-    buy(ledger, "SOL", "10", "100", "b")
-    sell(ledger, "SOL", "10", "90", "s")
-    assert "SOL" not in ledger.positions()
-    assert ledger.lots("SOL") == []                          # no open lots
-    assert ledger.lots("SOL", open_only=False)[0].closed_ts is not None
+    buy(ledger, "IEF", "10", "100", "b")
+    sell(ledger, "IEF", "10", "90", "s")
+    assert "IEF" not in ledger.positions()
+    assert ledger.lots("IEF") == []                          # no open lots
+    assert ledger.lots("IEF", open_only=False)[0].closed_ts is not None
     assert ledger.account()["realized_pnl"] == Decimal("-107.60")  # 896.40 - 1004.00
     assert ledger.check() == []
 
 
 def test_overspend_and_oversell_roll_back(ledger):
     with pytest.raises(LedgerError):
-        buy(ledger, "BTC", "1", "100000", "too-big")
-    buy(ledger, "ADA", "100", "1", "b")
+        buy(ledger, "SPY", "1", "100000", "too-big")
+    buy(ledger, "SLV", "100", "1", "b")
     with pytest.raises(LedgerError):
-        sell(ledger, "ADA", "101", "1", "too-many")
+        sell(ledger, "SLV", "101", "1", "too-many")
     assert ledger.cash() == Decimal("9899.60")
     assert ledger.store.conn.execute("SELECT COUNT(*) FROM fills").fetchone()[0] == 1
-    assert len(ledger.lots("ADA")) == 1
+    assert len(ledger.lots("SLV")) == 1
     assert ledger.check() == []
 
 
@@ -136,8 +136,8 @@ def test_init_holdings_are_lots_consumed_before_later_buys(store):
 
 def test_import_marks_holdings_at_day0(store):
     lg = Ledger(store)
-    lg.initialize(5898.76, note="v1 import", holdings={"ADA": (Decimal("10081.9"), 0.2215)})
-    p = lg.positions()["ADA"]
+    lg.initialize(5898.76, note="holdings brought in", holdings={"SLV": (Decimal("10081.9"), 0.2215)})
+    p = lg.positions()["SLV"]
     assert p.cost == Decimal("2233.14")       # qty * mark in cents: no invented history
     assert p.high_water == 0.2215
     assert lg.check() == []
@@ -211,24 +211,24 @@ def test_check_catches_tampering(ledger, sql, needle):
 # -- store guarantees ------------------------------------------------------------------------
 
 def test_same_idempotency_key_cannot_fill_twice(ledger):
-    buy(ledger, "ETH", "1", "100", "dup")
+    buy(ledger, "QQQ", "1", "100", "dup")
     with pytest.raises(Exception):
-        buy(ledger, "ETH", "1", "100", "dup")
-    assert ledger.positions()["ETH"].qty == Decimal("1")
-    assert len(ledger.lots("ETH")) == 1
+        buy(ledger, "QQQ", "1", "100", "dup")
+    assert ledger.positions()["QQQ"].qty == Decimal("1")
+    assert len(ledger.lots("QQQ")) == 1
     assert ledger.check() == []
 
 
 def test_fill_outside_transaction_is_refused(ledger):
     with pytest.raises(LedgerError):
-        ledger.apply_fill(idem_key="x", asset="ETH", side="BUY", quantity=1, price=1,
+        ledger.apply_fill(idem_key="x", asset="QQQ", side="BUY", quantity=1, price=1,
                           fee_pct=0, quote_source="t", origin="t")
 
 
 def test_value_marks_at_bid_and_unknown_quote_is_none(ledger):
-    buy(ledger, "ETH", "1", "2000", "b")
-    v = ledger.value({"ETH": quote("ETH", 2000, spread_pct=1.0)})
-    assert v.values["ETH"] == pytest.approx(1990.0)
+    buy(ledger, "QQQ", "1", "2000", "b")
+    v = ledger.value({"QQQ": quote("QQQ", 2000, spread_pct=1.0)})
+    assert v.values["QQQ"] == pytest.approx(1990.0)
     assert ledger.value({}) is None  # held asset with no quote: unknown, never $0
 
 
@@ -253,7 +253,7 @@ def test_crash_mid_transaction_leaves_no_partial_fill(ledger):
 
     with pytest.raises(Boom):
         with ledger.store.tx():
-            ledger.apply_fill(idem_key="k", asset="ETH", side="BUY", quantity=1, price=100,
+            ledger.apply_fill(idem_key="k", asset="QQQ", side="BUY", quantity=1, price=100,
                               fee_pct=0.4, quote_source="t", origin="t")
             raise Boom()  # e.g. the process dies before the order is marked filled
     assert ledger.positions() == {} and ledger.lots() == []

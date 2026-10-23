@@ -252,7 +252,7 @@ async def test_model_failure_is_reported_and_costs_budget(make):
 async def test_chat_cannot_trade(make, engine_api):
     # Asking for a trade only produces an explanation: every request the bot makes is a read.
     svc = make(model=RecordingModel(["I can't trade; the council decides."]))
-    out = await svc.ask(ME, "buy 1 BTC right now", Deferral())
+    out = await svc.ask(ME, "buy 10 SPY right now", Deferral())
     assert "can't trade" in out.text and engine_api.writes() == []
     assert "You cannot place, change or cancel trades" in svc.model.prompts[0]
 
