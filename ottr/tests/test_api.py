@@ -1,7 +1,9 @@
 """
 API tests against a real aiohttp server on an ephemeral loopback port: every read
-endpoint, input validation, the DNS-rebinding Host check, the read-only connection, and
-the kill switch (auth, persistence, effect on the executor, config-wins rule).
+endpoint, input validation, the DNS-rebinding Host check, the read-only connection, the
+kill switch (auth, persistence, effect on the executor, config-wins rule), and the owner's
+meeting call (auth, and the watcher's limits: refused with code's reason, queued once,
+run as a called meeting, counted against the day).
 
 The engine behind it runs on the market rig (the real MarketData over FakeAlpaca, on a
 mid-session Wednesday), after a council meeting that bought TLT.
@@ -9,6 +11,7 @@ mid-session Wednesday), after a council meeting that bought TLT.
 
 import asyncio
 import dataclasses
+import json
 import sqlite3
 import time
 
@@ -16,11 +19,13 @@ import aiohttp
 import pytest
 
 from ottr.api import ApiServer
+from ottr.engine import watcher
 from ottr.engine.engine import Engine
+from ottr.council.models import ModelError
 from ottr.engine.killswitch import KillSwitch
 from ottr.market.types import MarketDataError
 from ottr.risk.types import Intent
-from tests.fakes import OPEN, buy_council, market_rig, no_corporate_actions
+from tests.fakes import OPEN, ScriptedModel, buy_council, et, market_rig, no_corporate_actions
 
 KEY = "test-api-key-0123456789"
 
@@ -276,6 +281,129 @@ async def test_kill_switch_disabled_without_a_key(cfg, store, ledger):
             assert "OTTR_API_KEY" in d["error"]
     finally:
         await server.stop()
+
+
+async def post_call(session, body=None, key=KEY, status=200):
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
+    async with session.post("/api/meeting-call", json=body, headers=headers) as r:
+        assert r.status == status, await r.text()
+        return await r.json()
+
+
+@pytest.fixture
+async def call_api(cfg, store, ledger):
+    """The API after a council meeting at 11:00, like `api`, with the market rig in hand (a
+    called meeting needs quotes as fresh as the moved clock) and the review a called meeting
+    starts afterwards failing quietly."""
+    cfg = dataclasses.replace(cfg, api_key=KEY)
+    eng, rig = await make_engine(cfg, store)
+    await eng.meeting(execute=True)
+    await eng.executor.drain()
+    eng.watcher_model = ScriptedModel("watcher", [ModelError("no review in this test")])
+    server = ApiServer(eng, "127.0.0.1", 0)
+    await server.start()
+    async with aiohttp.ClientSession(f"http://127.0.0.1:{server.port}") as session:
+        yield eng, rig, session
+    await server.stop()
+
+
+def nothing_called(eng, store):
+    return eng.watch_state().pending is None and not eng._call.is_set() and store.audits("meeting_called") == []
+
+
+async def test_meeting_call_requires_the_key(api, store):
+    eng, s, _ = api
+    eng.clock.advance(46 * 60)                              # past the gap, so only the key is in the way
+    await post_call(s, {"why": "TLT broke"}, key=None, status=401)
+    await post_call(s, {"why": "TLT broke"}, key="wrong-key-wrong-key", status=401)
+    async with s.post("/api/meeting-call?key=" + KEY, json={"why": "TLT broke"}) as r:  # never in a URL
+        assert r.status == 401
+    assert nothing_called(eng, store)
+
+
+async def test_meeting_call_validates_the_body(api, store):
+    eng, s, _ = api
+    eng.clock.advance(46 * 60)
+    for body in (None, {}, {"why": ""}, {"why": "   "}, {"why": 7}, {"why": "x" * 401}, ["why"],
+                 {"why": "ok", "by": "not allowed!"}):
+        await post_call(s, body, status=400)
+    async with s.post("/api/meeting-call", data=b"{not json", headers={"Authorization": f"Bearer {KEY}"}) as r:
+        assert r.status == 400
+    assert nothing_called(eng, store)
+
+
+async def test_meeting_call_disabled_without_a_key(cfg, store, ledger):
+    eng, _ = await make_engine(cfg, store)
+    server = ApiServer(eng, "127.0.0.1", 0)
+    await server.start()
+    try:
+        async with aiohttp.ClientSession(f"http://127.0.0.1:{server.port}") as s:
+            d = await post_call(s, {"why": "TLT broke"}, key="anything-anything", status=503)
+            assert "OTTR_API_KEY" in d["error"]
+            assert (await get(s, "/api/meeting-call"))["allowed"] is True   # the read needs no key
+    finally:
+        await server.stop()
+    assert nothing_called(eng, store)
+
+
+async def test_meeting_call_is_held_to_the_watchers_limits(call_api, store):
+    eng, rig, s = call_api
+    # Right after the fixture's meeting: refused, with code's reason, and recorded as refused.
+    st = await get(s, "/api/meeting-call")
+    assert st["allowed"] is False and st["blocked"] == "the last meeting began 0 minutes ago (at least 45 apart)"
+    assert (st["called_today"], st["max_called_per_day"], st["min_gap_min"]) == (0, 4, 45)
+    d = await post_call(s, {"why": "TLT broke support", "by": "discord"}, status=409)
+    assert d["queued"] is False and d["blocked"] == st["blocked"] and d["error"] == "no meeting: " + st["blocked"]
+    (refused,) = store.audits("meeting_call_refused")
+    assert (refused["by"], refused["via"], refused["blocked"]) == ("owner", "discord", st["blocked"])
+    assert nothing_called(eng, store)
+
+    # 46 minutes on: queued exactly like a watcher's call.
+    rig.at(OPEN + 46 * 60)
+    assert (await get(s, "/api/meeting-call"))["allowed"] is True
+    d = await post_call(s, {"why": "  TLT broke\n support ", "by": "discord"})
+    assert d["queued"] is True and d["why"] == "TLT broke support" and d["called_today"] == 0
+    assert d["pending"]["by"] == watcher.OWNER and eng._call.is_set()
+    (called,) = store.audits("meeting_called")
+    assert (called["by"], called["via"], called["why"]) == ("owner", "discord", "TLT broke support")
+    # A second call before it starts is refused, and doesn't replace the first.
+    d = await post_call(s, {"why": "again"}, status=409)
+    assert d["blocked"] == "a meeting called by the owner is about to start"
+    assert eng.watch_state().pending["why"] == "TLT broke support"
+
+    # The council loop runs it as a called meeting, and the day's count includes it.
+    eng.council = buy_council(eng.cfg, "GLD")               # the 11:00 meeting used the first script
+    eng._call.clear()
+    await eng._called_meeting()
+    if eng._review_task is not None:
+        await asyncio.gather(eng._review_task, return_exceptions=True)
+    rec = json.loads(store.conn.execute("SELECT record FROM meetings ORDER BY ts DESC LIMIT 1").fetchone()[0])
+    assert rec["called"] == {"by": "owner", "why": "TLT broke support"}
+    assert rec["context"].startswith("WHY THIS MEETING: called at 11:46 ET, outside the schedule, by the desk "
+                                     "owner, from chat: TLT broke support")
+    st = await get(s, "/api/meeting-call")
+    assert st["called_today"] == 1 and st["pending"] is None
+    assert st["blocked"] == "the last meeting began 0 minutes ago (at least 45 apart)"
+
+
+async def test_meeting_call_shares_the_daily_cap_and_the_session(api, store):
+    eng, s, _ = api
+    eng.clock.advance(46 * 60)
+    st = eng.watch_state()
+    st.called = [{"ts": eng.clock.time() - 600 - i, "ran": True, "by": "watcher", "why": "x"} for i in range(4)]
+    eng._save_watch(st)
+    d = await post_call(s, {"why": "one more"}, status=409)
+    assert d["blocked"] == "today's 4 called meetings are used" and d["called_today"] == 4
+    eng._save_watch(watcher.WatchState())
+    eng.clock.set(et(2026, 10, 21, 15, 40))                 # 20 minutes to the close
+    assert "minutes to the close" in (await post_call(s, {"why": "late"}, status=409))["blocked"]
+    eng.clock.set(et(2026, 10, 21, 17))
+    assert (await post_call(s, {"why": "after hours"}, status=409))["blocked"] == "the market is closed"
+    eng.clock.set(OPEN + 2 * 3600)
+    eng.meeting_started = eng.clock.time()                  # a meeting under way
+    assert (await post_call(s, {"why": "now"}, status=409))["blocked"] == "a meeting is running"
+    eng.meeting_started = None
+    assert nothing_called(eng, store) and len(store.audits("meeting_call_refused")) == 4
 
 
 async def test_council_says_when_a_meeting_is_running(api):

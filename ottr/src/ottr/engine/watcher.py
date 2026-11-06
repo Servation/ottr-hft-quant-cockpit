@@ -15,6 +15,9 @@ What it does:
   within `schedule.min_before_close_min` of the close, at least `watch.min_gap_min` after
   the last meeting began and before the next scheduled one, at most
   `watch.max_called_per_day` a day, never while a meeting runs.
+- The owner can call one too, from chat (`by` OWNER, through `POST /api/meeting-call`):
+  when /ask's model proposes a meeting, the owner presses a button. The same limits
+  apply, and the owner's calls count against the same daily cap as the watcher's.
 
 Why: the schedule meets at 10:15 and 15:15 whatever happens. A desk that holds for days
 to weeks mostly needs only that, but a break, a gap or a shock in between deserves a look
@@ -39,6 +42,8 @@ KINDS = ("price_below", "price_above", "move_pct")
 LEVEL_BAND = 0.25                    # a price level within 25% of the current price
 MOVE_PCT = (0.5, 20.0)               # a move_pct condition's range, in percent
 CALLS_KEPT = 30                      # called meetings remembered (for the daily cap and the API)
+OWNER = "owner"                      # who called a meeting from chat (beside "watcher" and "condition")
+PENDING_FRESH_SEC = 300.0            # a queued call older than this was lost to a restart
 
 WATCH_SHAPE = """{
   "call_meeting": false,
@@ -195,6 +200,13 @@ def call_blocked(cfg, mt: MarketTime, now: float, state: WatchState, last_meetin
         return "the market is closed"
     if meeting_running:
         return "a meeting is running"
+    if state.pending and now - (state.pending.get("ts") or 0) < PENDING_FRESH_SEC:
+        # The council loop clears it within seconds; until then a second call would only
+        # overwrite the first one's reason (the watcher and the owner can both call). An
+        # older one was lost to a restart (the loop's wake-up lives in memory): it must not
+        # block every call after it, so the next call replaces it.
+        by = state.pending.get("by") or "someone"
+        return f"a meeting called by the {by} is about to start"
     left = mt.seconds_to_close()
     if left is not None and left < cfg.schedule.min_before_close_min * 60:
         return f"{left / 60:.0f} minutes to the close (none in the last {cfg.schedule.min_before_close_min})"

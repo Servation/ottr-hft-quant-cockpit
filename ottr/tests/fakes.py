@@ -1,6 +1,6 @@
 """
-Test doubles: a US market rig, scripted model adapters, a Discord webhook stand-in, and
-the engine's API as the chat bot sees it.
+Test doubles: a US market rig, scripted model adapters (and a scripted model for /ask's
+tool loop), a Discord webhook stand-in, and the engine's API as the chat bot sees it.
 
 The market rig is the real MarketData over FakeAlpaca, on a fake clock set to a
 mid-session Wednesday of the 2026 NYSE calendar, with a trending year of daily bars and
@@ -11,12 +11,17 @@ through the same code paths production uses, offline and deterministically.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import copy
+import itertools
 import json
 import time
 from dataclasses import dataclass
 from datetime import date, datetime
+from types import SimpleNamespace
 from typing import Dict, List, Optional, Tuple
 
+from ottr.chat.agent import Step, ToolCall
 from ottr.clock import FakeClock
 from ottr.council.council import Council
 from ottr.council.models import ModelAdapter
@@ -128,6 +133,48 @@ class ScriptedModel(ModelAdapter):
         return r if isinstance(r, str) else json.dumps(r)
 
 
+# -- /ask's tool loop: a scripted model -----------------------------------------------------
+_ids = itertools.count(1)
+
+
+def asks(*calls) -> Step:
+    """A turn that asks for lookups: (name, args) pairs."""
+    tcs = [ToolCall(f"toolu_{next(_ids)}", name, args) for name, args in calls]
+    content = [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.input} for c in tcs]
+    return Step(content, "tool_use", tcs, "", model="claude-opus-5-5", tokens=(1000, 40, 800))
+
+
+def replies(answer, propose=False, reason="") -> Step:
+    text = json.dumps({"answer": answer, "propose_meeting": propose, "meeting_reason": reason})
+    return Step([{"type": "text", "text": text}], "end_turn", [], text, model="claude-opus-5-5",
+                tokens=(1200, 90, 1000))
+
+
+class ScriptedTools:
+    """A ToolModel that plays back turns and records what each request carried."""
+
+    name, model = "claude", "claude-opus-5-5"
+
+    def __init__(self, *turns):
+        self.turns, self.requests, self.sessions = list(turns), [], 0
+        self.hold = None
+
+    @contextlib.asynccontextmanager
+    async def session(self):
+        self.sessions += 1
+        yield self
+
+    async def step(self, system, messages, tools, final, timeout):
+        self.requests.append(SimpleNamespace(system=system, messages=copy.deepcopy(messages), tools=tools,
+                                             final=final))
+        if self.hold is not None:
+            await self.hold.wait()
+        turn = self.turns.pop(0)
+        if isinstance(turn, Exception):
+            raise turn
+        return turn
+
+
 def analyst_reply(universe, overrides: Optional[Dict[str, Tuple[str, float]]] = None) -> dict:
     overrides = overrides or {}
     return {"overall_view": "test view", "assets": [
@@ -219,6 +266,9 @@ class FakeEngineApi:
                         "last_meeting": {"id": "m-1", "ts": now - 3600, "status": "ok"}}
         self.kill = {"effective_dry_run": False, "config_dry_run": False, "operator_engaged": False,
                      "since": None, "by": None, "reason": None}
+        # GET /api/meeting-call; a POST queues a call when `allowed`, else answers 409 with `blocked`.
+        self.call_state = {"as_of": now, "allowed": True, "blocked": None, "called_today": 1,
+                           "max_called_per_day": 4, "min_gap_min": 45.0, "pending": None}
         self.data = {
             "/api/health": {"ts": now, "ok": True, "exit_code": 0, "engine_alive": None, "alarms": [],
                             "tasks": [], "ledger_problems": [], "blind": {}},
@@ -266,7 +316,20 @@ class FakeEngineApi:
                            "next_before": None},
             "/api/screen": {"screen": None, "satellites": [], "changes": [], "schedule": "Sat 08:00 ET weekly",
                             "satellites_max": 6},
+            "/api/audit": {"audit": [
+                {"id": 41, "ts": now - 900, "kind": "order_rejected",
+                 "data": {"asset": "GLD", "reason": "cooldown", "why": "sold 20 minutes ago"}},
+                {"id": 40, "ts": now - 3500, "kind": "fill", "data": {"asset": "TLT", "side": "BUY"}}]},
+            "/api/equity": {"count": 2, "returned": 2, "base": {"ts": now - 7 * 86400, "equity": 10000.0},
+                            "points": [{"ts": now - 86400, "equity": 10150.0, "cash": 5000.0},
+                                       {"ts": now - 60, "equity": 10234.5, "cash": 5000.0}]},
+            "/api/universe": {"members": [{"asset": "TLT", "class": "bond_etf", "cap_pct": 25.0}],
+                              "cash_symbol": "SGOV", "reference": ["SPY"], "satellites_max": 6,
+                              "sleeve_pct": 30.0, "satellites": []},
         }
+        # One meeting in full, as GET /api/meetings/{id} returns it (the listing's view plus the packet).
+        self.data["/api/meetings/m-1"] = {**self.data["/api/meetings"]["meetings"][0],
+                                          "packet": {"prices": {"TLT": 90.2}, "note": "the packet the models saw"}}
 
     def handler(self, request):
         import httpx
@@ -287,6 +350,19 @@ class FakeEngineApi:
                                  reason=body.get("reason"),
                                  effective_dry_run=body["engaged"] or self.kill["config_dry_run"])
             return httpx.Response(200, json=self.kill)
+        if path == "/api/meeting-call":
+            if request.method == "POST":
+                if not self.key or request.headers.get("authorization") != f"Bearer {self.key}":
+                    return httpx.Response(401, json={"error": "missing or wrong API key", "status": 401})
+                if not self.call_state["allowed"]:
+                    blocked = self.call_state["blocked"]
+                    return httpx.Response(409, json={**self.call_state, "error": f"no meeting: {blocked}",
+                                                     "status": 409, "queued": False})
+                # Like the engine: queued, and a second call is blocked until it starts.
+                self.call_state.update(allowed=False, blocked="a meeting called by the owner is about to start",
+                                       pending={"ts": time.time(), "by": "owner", "why": body["why"]})
+                return httpx.Response(200, json={**self.call_state, "queued": True, "why": body["why"]})
+            return httpx.Response(200, json=self.call_state)
         if request.method != "GET" or path not in self.data:
             return httpx.Response(404, json={"error": "not found", "status": 404})
         d = dict(self.data[path])

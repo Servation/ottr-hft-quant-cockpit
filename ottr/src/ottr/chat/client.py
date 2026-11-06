@@ -1,8 +1,8 @@
 """
 HTTP client for the engine's loopback API, as the chat bot uses it.
 
-What it does: GETs the read endpoints and POSTs the kill switch (the only write the bot
-can make; the API has no trade endpoint). Transport failures and timeouts become
+What it does: GETs the read endpoints and POSTs the API's two writes: the kill switch and
+a meeting call (the owner's button; the API has no trade endpoint). Transport failures and timeouts become
 `ApiUnreachable`, error statuses become `ApiError` with the API's own message, so
 callers can tell "the engine is down" from "the engine said no".
 
@@ -111,6 +111,9 @@ class ApiClient:
     async def kill_state(self, timeout: Optional[float] = None) -> dict:
         return await self.get("/kill-switch", timeout=timeout)
 
+    async def meeting_call_state(self, timeout: Optional[float] = None) -> dict:
+        return await self.get("/meeting-call", timeout=timeout)
+
     async def desk_context(self) -> DeskContext:
         """All /ask sections, read concurrently. Partial failures are kept as `errors`;
         only an engine that answers nothing at all raises (ApiUnreachable)."""
@@ -129,9 +132,17 @@ class ApiClient:
             raise results[0]
         return ctx
 
-    # -- the one write ---------------------------------------------------------------------
-    async def set_kill(self, engaged: bool, reason: str = "", by: str = "discord") -> dict:
+    # -- the two writes --------------------------------------------------------------------
+    def _auth(self) -> dict:
         # The key goes in a header, never the URL, so it can't land in a log line.
-        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
-        return await self._request("POST", "/kill-switch", headers=headers,
+        return {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+
+    async def set_kill(self, engaged: bool, reason: str = "", by: str = "discord") -> dict:
+        return await self._request("POST", "/kill-switch", headers=self._auth(),
                                    json={"engaged": engaged, "reason": reason[:500], "by": by})
+
+    async def call_meeting(self, why: str, by: str = "discord") -> dict:
+        """A council meeting now. A refusal by code's limits is an ApiError with status 409
+        and the reason as its message."""
+        return await self._request("POST", "/meeting-call", headers=self._auth(),
+                                   json={"why": why[:400], "by": by})

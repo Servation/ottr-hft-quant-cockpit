@@ -567,20 +567,36 @@ class Engine:
     def request_meeting(self, by: str, why: str) -> bool:
         """Ask the council loop for a meeting now. Refused (and said so) when code's limits
         don't allow one; True when it was queued."""
+        return self.call_meeting(by, why) is None
+
+    def call_meeting(self, by: str, why: str, via: Optional[str] = None) -> Optional[str]:
+        """`request_meeting` that says why a refused call was refused (None: queued). `via`
+        labels where an owner's call came from ("discord"), for the audit log."""
         now = self.clock.time()
         st = self.watch_state()
         blocked = self._call_blocked(st, now)
+        where = {"via": via} if via else {}
         if blocked:
             logger.info("meeting call by the %s refused: %s (%s)", by, blocked, why)
-            self.store.audit("meeting_call_refused", by=by, why=why, blocked=blocked)
+            self.store.audit("meeting_call_refused", by=by, why=why, blocked=blocked, **where)
             self.alerts.event("meeting_call_refused", {"by": by, "why": why, "blocked": blocked})
-            return False
+            return blocked
         st.pending = {"ts": now, "by": by, "why": why}
         self._save_watch(st)
-        self.store.audit("meeting_called", by=by, why=why)
+        self.store.audit("meeting_called", by=by, why=why, **where)
         self.alerts.event("meeting_called", {"by": by, "why": why})
         self._call.set()
-        return True
+        return None
+
+    def meeting_call_state(self) -> Dict[str, Any]:
+        """Whether code would let a meeting be called right now, and why not: for chat, so
+        a proposal it can't act on isn't offered as a button (the call itself checks again)."""
+        now = self.clock.time()
+        st = self.watch_state()
+        blocked = self._call_blocked(st, now)
+        return {"as_of": now, "allowed": blocked is None, "blocked": blocked,
+                "called_today": len(st.called_on(now)), "max_called_per_day": self.cfg.watch.max_called_per_day,
+                "min_gap_min": self.cfg.watch.min_gap_min, "pending": st.pending}
 
     def _call_blocked(self, st: watcher.WatchState, now: float) -> Optional[str]:
         try:
@@ -703,7 +719,7 @@ class Engine:
             self._publish(stale)
         self._awaiting_orders.clear()
         prog = MeetingProgress(new_meeting_id(), list(self.council.analysts), self.council.chair.name)
-        prog.called = (called or {}).get("why")
+        prog.called, prog.called_by = (called or {}).get("why"), (called or {}).get("by")
         self.meeting_started, self.progress = prog.started, prog
         self._publish(prog)
         try:
@@ -771,8 +787,9 @@ class Engine:
             raise MarketDataError("no price for any asset")
         context = snap.packet() + "\n\n" + self.book_context(snap)
         if called:
-            context = (f"WHY THIS MEETING: called at {_et(snap.as_of, '%H:%M')} ET, outside the schedule, by the "
-                       f"desk watcher: {called['why']} Weigh whether that changes anything; doing nothing is "
+            who = "the desk owner, from chat" if called.get("by") == watcher.OWNER else "the desk watcher"
+            context = (f"WHY THIS MEETING: called at {_et(snap.as_of, '%H:%M')} ET, outside the schedule, by "
+                       f"{who}: {called['why']} Weigh whether that changes anything; doing nothing is "
                        "a fine answer.\n\n" + context)
         held = set(self.ledger.positions())
         rec = await self.council.run(context, held, meeting_id=prog.id,
@@ -806,7 +823,8 @@ class Engine:
         self.alerts.event("meeting", {"id": rec["id"], "status": rec["status"],
                                       "summary": (rec["decision"] or {}).get("summary", ""),
                                       "trades": rec["trades"], "dropped": rec["dropped"],
-                                      "called": (called or {}).get("why"), "chair": rec.get("chair")})
+                                      "called": (called or {}).get("why"), "called_by": (called or {}).get("by"),
+                                      "chair": rec.get("chair")})
         return rec
 
     def next_meeting(self, after: float) -> float:

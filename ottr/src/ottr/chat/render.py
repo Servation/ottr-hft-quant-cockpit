@@ -299,6 +299,22 @@ def kill_result(state: dict, engaged: bool, who: str) -> str:
     return f"**Kill switch released** by {who}: paper fills resume with the next council decision."
 
 
+def meeting_called(state: dict, who: str) -> str:
+    """The owner's meeting call, queued (POST /api/meeting-call answered 200)."""
+    # A queued call counts once it runs, so the count is the day's before this one.
+    used = (f" {state['called_today']} of {state['max_called_per_day']} called meetings were used today "
+            "before this one." if state.get("max_called_per_day") is not None else "")
+    return (f"**Council meeting called** by {who}: {clip(no_em_dash(state.get('why') or ''), 300)}\n"
+            "It starts within a minute; the live meeting message follows. It runs the full council "
+            f"and the risk checks, and may decide to do nothing.{used}")
+
+
+def meeting_refused(e: ApiError) -> str:
+    """Code's limits refused the call (409); the API's message is "no meeting: <why>"."""
+    why = e.message[len("no meeting: "):] if e.message.startswith("no meeting: ") else e.message
+    return f"**No meeting**: {why}. Code's limits for called meetings decide this, as for the watcher's."
+
+
 # -- splitting -----------------------------------------------------------------------------
 FENCE_RE = re.compile(r"^\s*```(.*)$")
 CLOSE = "\n```"

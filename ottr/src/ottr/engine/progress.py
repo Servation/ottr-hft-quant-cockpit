@@ -53,7 +53,8 @@ class MeetingProgress:
         self.status: Optional[str] = None      # the meeting record's status ("ok", "abstain: ...")
         self.executing = False                 # trades were handed to the executor
         self.note: Optional[str] = None        # why it was aborted, or left orders undecided
-        self.called: Optional[str] = None      # why the watcher called it (None: scheduled)
+        self.called: Optional[str] = None      # why it was called outside the schedule (None: scheduled)
+        self.called_by: Optional[str] = None   # who called it: watcher, condition or owner
 
     @property
     def final(self) -> bool:
@@ -143,7 +144,7 @@ class MeetingProgress:
         end = self.ended if self.ended is not None else now
         return {
             "id": self.id, "phase": self.phase, "started_at": self.started, "ended_at": self.ended,
-            "called": self.called,
+            "called": self.called, "called_by": self.called_by,
             "elapsed_sec": round(end - self.started, 1), "status": self.status, "note": self.note,
             "analysts": [dict(a, stances=list(a["stances"])) for a in self.analysts.values()],
             "chair": dict(self.chair, replaced=dict(self.chair["replaced"]) if self.chair["replaced"] else None),

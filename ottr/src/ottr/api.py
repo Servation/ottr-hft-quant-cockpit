@@ -1,15 +1,19 @@
 """
-Read-only HTTP API for the P4 dashboard, plus an authenticated kill switch.
+Read-only HTTP API for the P4 dashboard, plus two authenticated writes.
 
 What it does: serves JSON views of the book, positions, equity curve with the SPY and
 60/40 benchmarks, fills, meetings (with every analyst's stance), the universe, the audit
-log and health, from inside the engine process on 127.0.0.1. `POST /api/kill-switch` engages or releases the runtime dry
-run and needs `Authorization: Bearer $OTTR_API_KEY`.
+log and health, from inside the engine process on 127.0.0.1. Two POSTs need
+`Authorization: Bearer $OTTR_API_KEY`: `/api/kill-switch` engages or releases the runtime
+dry run, and `/api/meeting-call` asks for a council meeting now (the owner's button in
+chat), which the engine treats exactly like a call from the desk watcher: the same limits,
+audit entries and Discord posts.
 
 Why it can't corrupt anything: every GET reads through the API's own SQLite connection
 opened `mode=ro` (SQLite itself refuses writes on it), inside one snapshot per request so
-cash and positions always come from the same commit. The only write, the kill switch,
-goes through the engine's KillSwitch on the engine's single writer connection.
+cash and positions always come from the same commit. The two writes go through the
+engine's own objects (its KillSwitch, its meeting call) on the engine's single writer
+connection. Neither can trade: a called meeting runs the full council and risk gate.
 
 Why the Host check: a web page can point its own domain at 127.0.0.1 (DNS rebinding) and
 then read a loopback API from the browser. Requests whose Host isn't a loopback name are
@@ -37,6 +41,7 @@ from ottr.config import Config
 from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.engine.engine import WATCH_STATE
+from ottr.engine import watcher
 from ottr.engine.watcher import WatchState
 from ottr.ledger import tax
 from ottr.ledger.book import Ledger, trade_day
@@ -53,6 +58,7 @@ PRICES_TIMEOUT = 5.0
 KIND_RE = re.compile(r"^[a-z_]{1,40}$")
 MEETING_ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,80}$")
 BY_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,40}$")
+WHY_MAX = 400                         # a meeting call's reason, as the watcher's (it goes into the packet)
 
 ENDPOINTS = [
     "GET  /api/health           alarms, task heartbeats, ledger check, kill switch",
@@ -69,6 +75,8 @@ ENDPOINTS = [
     "GET  /api/screen           the latest stock screen (counts, changes, the top of the ranking), recent changes",
     "GET  /api/kill-switch      kill switch state",
     "POST /api/kill-switch      {\"engaged\": true|false, \"reason\": \"...\", \"by\": \"...\"}; empty body engages. Bearer auth.",
+    "GET  /api/meeting-call     whether code would let a meeting be called now, and why not",
+    "POST /api/meeting-call     {\"why\": \"...\", \"by\": \"...\"}: a council meeting now, within the watcher's limits. Bearer auth.",
 ]
 
 
@@ -90,6 +98,8 @@ class ApiContext:
     benchmarks: Callable[[Optional[dict]], Awaitable[Dict[str, Optional[float]]]] = _no_benchmarks
     market_state: Callable[[], Optional[dict]] = lambda: None
     members: Callable[[], Dict[str, dict]] = lambda: {}
+    call_state: Callable[[], dict] = lambda: {"allowed": False, "blocked": "no engine behind this API"}
+    call_meeting: Callable[[str, str], Optional[str]] = lambda why, via: "no engine behind this API"
 
     @classmethod
     def from_engine(cls, engine: Engine, reader: Store) -> "ApiContext":
@@ -132,12 +142,20 @@ class ApiContext:
                         "fractionable": m.fractionable, "cap_pct": cap_for(engine.cfg, s, engine.classes())}
                     for s, m in sorted(engine.members.items())}
 
+        def call_meeting(why: str, via: str) -> Optional[str]:
+            # The key is the authority, and only the owner holds it (the chat bot checks the
+            # Discord ID before it asks), so every call through here is the owner's.
+            blocked = engine.call_meeting(watcher.OWNER, why, via=via)
+            logger.warning("meeting call by the owner via %s %s: %s", via,
+                           f"refused ({blocked})" if blocked else "queued", why)
+            return blocked
+
         # Looked up per request (not bound once): the engine's market is the one source.
         return cls(cfg=engine.cfg, reader=reader, marks=lambda: engine.market.marks(), kill=engine.kill,
                    set_kill=set_kill, health=health_view, api_key=engine.cfg.api_key,
                    meeting_started=lambda: engine.meeting_started, meeting_progress=progress_view,
                    benchmarks=lambda base: engine.market.benchmarks(base), market_state=market_view,
-                   members=members_view)
+                   members=members_view, call_state=engine.meeting_call_state, call_meeting=call_meeting)
 
 
 CTX: web.AppKey = web.AppKey("ctx", ApiContext)
@@ -499,32 +517,79 @@ def _authorized(request: web.Request, key: str) -> bool:
     return bool(given) and hmac.compare_digest(given.encode("utf-8"), key.encode("utf-8"))
 
 
+def _refuse_unauthorized(request: web.Request, ctx: ApiContext, what: str) -> Optional[web.Response]:
+    """The answer to a write without the right key (None: authorized)."""
+    if not ctx.api_key:
+        return error(503, f"{what} API disabled: set OTTR_API_KEY (16+ chars) and restart")
+    if not _authorized(request, ctx.api_key):
+        logger.warning("%s: rejected unauthorized request from %s", what, request.remote)
+        return error(401, "missing or wrong API key (Authorization: Bearer <OTTR_API_KEY>)")
+    return None
+
+
+async def _json_body(request: web.Request) -> Dict[str, Any]:
+    """The request's JSON object ({} for an empty body); a bad one is a 400."""
+    raw = await request.read()
+    if not raw.strip():
+        return {}
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        raise web.HTTPBadRequest(reason="body must be JSON")
+    if not isinstance(body, dict):
+        raise web.HTTPBadRequest(reason="body must be a JSON object")
+    return body
+
+
+def _by(body: Dict[str, Any]) -> str:
+    by = body.get("by", "api")  # a label for the audit log (e.g. "discord"); the key is the authority
+    if not isinstance(by, str) or not BY_RE.match(by):
+        raise web.HTTPBadRequest(reason="by must be 1-40 letters, digits or _.:-")
+    return by
+
+
 async def post_kill(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
-    if not ctx.api_key:
-        return error(503, "kill switch API disabled: set OTTR_API_KEY (16+ chars) and restart")
-    if not _authorized(request, ctx.api_key):
-        logger.warning("kill switch: rejected unauthorized request from %s", request.remote)
-        return error(401, "missing or wrong API key (Authorization: Bearer <OTTR_API_KEY>)")
-    raw = await request.read()
-    body: Dict[str, Any] = {}
-    if raw.strip():
-        try:
-            body = json.loads(raw)
-        except ValueError:
-            return error(400, "body must be JSON")
-        if not isinstance(body, dict):
-            return error(400, "body must be a JSON object")
+    refused = _refuse_unauthorized(request, ctx, "kill switch")
+    if refused:
+        return refused
+    body = await _json_body(request)
     engaged = body.get("engaged", True)  # an empty POST is the panic button: engage
     if not isinstance(engaged, bool):
         return error(400, "engaged must be true or false")
     reason = body.get("reason", "")
     if not isinstance(reason, str) or len(reason) > 500:
         return error(400, "reason must be a string of at most 500 characters")
-    by = body.get("by", "api")  # a label for the audit log (e.g. "discord"); the key is the authority
-    if not isinstance(by, str) or not BY_RE.match(by):
-        return error(400, "by must be 1-40 letters, digits or _.:-")
-    return ok(ctx.set_kill(engaged, by, reason))
+    return ok(ctx.set_kill(engaged, _by(body), reason))
+
+
+async def get_meeting_call(request: web.Request) -> web.Response:
+    return ok(request.app[CTX].call_state())
+
+
+async def post_meeting_call(request: web.Request) -> web.Response:
+    """A council meeting now, for the owner. 200 when it is queued; 409, with code's reason,
+    when the watcher's limits refuse it (the market is closed, the last meeting was too
+    recent, today's called meetings are used). It can't trade: the meeting runs the full
+    council and risk gate, and may decide to do nothing."""
+    ctx = request.app[CTX]
+    refused = _refuse_unauthorized(request, ctx, "meeting call")
+    if refused:
+        return refused
+    body = await _json_body(request)
+    why = body.get("why")
+    if not isinstance(why, str) or not why.strip():
+        return error(400, "why must say what the council should weigh")
+    why = " ".join(why.split())
+    if len(why) > WHY_MAX:
+        return error(400, f"why must be at most {WHY_MAX} characters")
+    by = _by(body)
+    blocked = ctx.call_meeting(why, by)
+    state = ctx.call_state()
+    if blocked:
+        return ok({**state, "error": f"no meeting: {blocked}", "status": 409, "queued": False,
+                   "blocked": blocked}, 409)
+    return ok({**state, "queued": True, "why": why})
 
 
 def create_app(ctx: ApiContext) -> web.Application:
@@ -545,6 +610,8 @@ def create_app(ctx: ApiContext) -> web.Application:
     app.router.add_get("/api/screen", get_screen)
     app.router.add_get("/api/kill-switch", get_kill)
     app.router.add_post("/api/kill-switch", post_kill)
+    app.router.add_get("/api/meeting-call", get_meeting_call)
+    app.router.add_post("/api/meeting-call", post_meeting_call)
     return app
 
 

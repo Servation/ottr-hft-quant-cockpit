@@ -4,8 +4,9 @@ discord.py glue for `ottr chat`: slash commands over a gateway connection, and t
 What it does: registers /status, /positions, /meeting, /ask, /kill and /release, checks
 every interaction against the owner and allow-list before any command runs (strangers get
 a private refusal), defers anything that reads the API so Discord's 3-second deadline
-can't expire, asks for a button confirmation before /release, and splits long replies
-across messages. `run_chat` is the process: a single-instance lock (the supervised bot
+can't expire, asks for a button confirmation before /release, puts an owner-only "Call a
+meeting" button under an /ask answer that proposes one, and splits long replies across
+messages. `run_chat` is the process: a single-instance lock (the supervised bot
 stands by while one started by hand holds it), a stop-file watcher (so `ottr service
 stop` ends it cleanly), and exit code 78 for problems a restart can't fix, which tells
 the supervisor to stop restarting it.
@@ -28,10 +29,10 @@ from typing import Any, Optional
 import discord
 from discord import app_commands
 
-from ottr.chat import EXIT_CONFIG, api_base_url, render, unavailable
+from ottr.chat import EXIT_CONFIG, agent, api_base_url, render, unavailable
 from ottr.chat.client import ApiClient, ApiError
 from ottr.chat.log import Asker, ChatLog
-from ottr.chat.service import OWNER_ONLY, ChatService, Outcome
+from ottr.chat.service import MEETING_BUTTON_SEC, OWNER_ONLY, ChatService, Outcome
 from ottr.config import Config
 from ottr.control import install_stop_signals, restore_signals, stop_requested
 from ottr.council.models import make_adapter
@@ -70,9 +71,18 @@ class Handlers:
 
     async def send(self, interaction: Any, outcome: Outcome) -> None:
         chunks = render.split_message(outcome.text) or ["(empty reply)"]
+        # A proposed meeting gets its button on the answer's last message, under the proposal.
+        view = (MeetingView(self, asker_of(interaction), outcome.meeting_why, timeout=outcome.meeting_sec)
+                if outcome.meeting_why else None)
         for i, chunk in enumerate(chunks):
+            extra = {"view": view} if view is not None and i == len(chunks) - 1 else {}
             if i == 0 and not interaction.response.is_done():
-                await interaction.response.send_message(chunk, ephemeral=outcome.ephemeral)
+                await interaction.response.send_message(chunk, ephemeral=outcome.ephemeral, **extra)
+                if extra:
+                    view.origin = interaction
+            elif extra:
+                view.message = await interaction.followup.send(chunk, ephemeral=outcome.ephemeral, wait=True,
+                                                               **extra)
             else:
                 await interaction.followup.send(chunk, ephemeral=outcome.ephemeral)
 
@@ -121,6 +131,17 @@ class Handlers:
     async def release_cancelled(self, interaction: Any) -> None:
         self.service.note_release_cancelled(asker_of(interaction), "cancelled")
         await interaction.response.edit_message(content="Cancelled: the kill switch stays engaged.", view=None)
+
+    async def meeting_confirmed(self, interaction: Any, why: str) -> None:
+        # The buttons go first, so a second press can't call a second meeting.
+        await interaction.response.edit_message(view=None)
+        text = await self.service.call_meeting(asker_of(interaction), why)
+        await interaction.followup.send(text)  # public, so the channel keeps the record
+
+    async def meeting_declined(self, interaction: Any) -> None:
+        self.service.note_meeting_declined(asker_of(interaction), "not now")
+        await interaction.response.edit_message(view=None)
+        await interaction.followup.send("No meeting called.", ephemeral=True)
 
     async def on_error(self, interaction: Any, error: Exception) -> None:
         if isinstance(error, app_commands.CommandNotFound):
@@ -172,6 +193,49 @@ class ReleaseView(discord.ui.View):
                 pass
 
 
+class MeetingView(discord.ui.View):
+    """The "Call a meeting" and "Not now" buttons under an /ask answer that proposes a meeting.
+
+    Only the owner can press either (the asker may be an allow-listed user: they see the
+    proposal, not the power). The press is the confirmation: the model only proposed, and
+    code's limits still decide at the engine. It times out (after MEETING_BUTTON_SEC, or
+    sooner after a slow answer, before Discord's token for the answer expires), since a
+    proposal goes stale; nothing happens then but the buttons going away."""
+
+    def __init__(self, handlers: Handlers, asker: Asker, why: str, timeout: float = MEETING_BUTTON_SEC) -> None:
+        super().__init__(timeout=timeout)
+        self.handlers, self.asker, self.why = handlers, asker, why
+        self.origin: Any = None    # the /ask interaction, when the button went on its first response
+        self.message: Any = None   # else the follow-up message that carries it
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        refusal = self.handlers.service.may_call_meeting(asker_of(interaction))
+        if refusal is None:
+            return True
+        await interaction.response.send_message(refusal, ephemeral=True)
+        return False
+
+    @discord.ui.button(label="Call a meeting", style=discord.ButtonStyle.primary)
+    async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.stop()
+        await self.handlers.meeting_confirmed(interaction, self.why)
+
+    @discord.ui.button(label="Not now", style=discord.ButtonStyle.secondary)
+    async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button) -> None:
+        self.stop()
+        await self.handlers.meeting_declined(interaction)
+
+    async def on_timeout(self) -> None:
+        self.handlers.service.note_meeting_declined(self.asker, f"no answer within {self.timeout / 60:.0f} minutes")
+        try:
+            if self.message is not None:
+                await self.message.edit(view=None)
+            elif self.origin is not None:
+                await self.origin.edit_original_response(view=None)
+        except discord.HTTPException:
+            pass
+
+
 class OttrTree(app_commands.CommandTree):
     def __init__(self, client: discord.Client, handlers: Handlers) -> None:
         super().__init__(client)
@@ -207,8 +271,8 @@ def build_tree(client: discord.Client, handlers: Handlers, guild_id: Optional[in
     async def screen(interaction: discord.Interaction) -> None:
         await handlers.screen(interaction)
 
-    @tree.command(name="ask", description="Ask about the book, positions or the last meeting (can't trade)",
-                  **where)
+    @tree.command(name="ask", **where,
+                  description="Ask about the desk: it can look things up and propose a meeting (can't trade)")
     @app_commands.describe(question="Your question, e.g. why did the council buy TLT?")
     async def ask(interaction: discord.Interaction, question: app_commands.Range[str, 1, 1500]) -> None:
         await handlers.ask(interaction, question)
@@ -289,7 +353,7 @@ async def _watch_stop_file(cfg: Config, started: float, stop: asyncio.Event) -> 
 def _service(cfg: Config, log: ChatLog) -> ChatService:
     api = ApiClient(api_base_url(cfg), cfg.api_key)
     model = make_adapter(cfg.chat.model, cfg.council, effort=cfg.chat.effort)
-    return ChatService(cfg, api, model, log)
+    return ChatService(cfg, api, model, log, tools=agent.tool_model(cfg))
 
 
 async def _acquire(lock: _FileLock, standby: bool, stop: asyncio.Event) -> Optional[int]:
@@ -413,6 +477,13 @@ async def check_chat(cfg: Config, out=print) -> int:
         await api.aclose()
     exe = make_adapter(c.model, cfg.council, effort=c.effort).locate()
     out(f"model for {c.model}: {exe or 'NOT FOUND: /ask will fail'}")
+    if agent.tool_model(cfg) is not None:
+        out(f"/ask lookups: on (up to {agent.MAX_LOOKUPS} read-only lookups a question; it may propose a "
+            "meeting, which only the owner can call)")
+    else:
+        why = ("[chat] lookups = false" if not c.lookups else
+               "they need Claude on the Claude API (council.claude_backend = \"api\" and [chat] model = \"claude\")")
+        out(f"/ask lookups: off ({why}): one model call over the snapshot")
     why = unavailable(cfg)
     out(f"not ready: {why}" if why else "ready: `ottr chat` connects to Discord (or let `ottr supervise` run it)")
     return EXIT_CONFIG if why else 0
