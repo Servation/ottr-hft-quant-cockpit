@@ -46,7 +46,8 @@ class Recorder:
 def drain(alerts):
     out = []
     while not alerts.queue.empty():
-        out.append(alerts.queue.get_nowait())
+        out.append(alerts.queue.get_nowait().text)
+        alerts.queue.task_done()
     return out
 
 

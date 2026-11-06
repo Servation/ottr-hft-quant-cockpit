@@ -300,7 +300,7 @@ async def test_a_gap_through_the_stop_is_flagged_audited_and_posted(cfg, store, 
     gap = store.audits("risk_gap")
     assert gap and gap[0]["asset"] == "TLT" and gap[0]["close"] == pytest.approx(stop * 1.03)
     while not eng.alerts.queue.empty():
-        posts.append(eng.alerts.queue.get_nowait())
+        posts.append(eng.alerts.queue.get_nowait().text)
     assert any(p.startswith("**TLT gapped through its stop**") for p in posts)
 
 
