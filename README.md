@@ -66,16 +66,16 @@ graph LR
 
 ## Quick start
 
-Requires Python 3.11+, a free Alpaca paper account (market data only), and the `claude`,
-Codex and `agy` (Antigravity) CLIs signed in on the same machine. The models run through
-those CLIs, so no model API keys live in this repo. For an unattended engine, give Claude
-its own sign-in with `claude setup-token` (see [`ottr/README.md`](ottr/README.md#model-sign-in)).
+Requires Python 3.11+, a free Alpaca paper account (market data only), a Claude API key
+(Claude runs through the Claude API, billed per token), and the Codex and `agy`
+(Antigravity) CLIs signed in on the same machine for GPT and Gemini. Keys live in
+`ottr/.env`, which git ignores (see [`ottr/README.md`](ottr/README.md#model-sign-in)).
 
 ```bash
 cd ottr
 python -m venv .venv
 .venv/Scripts/pip install -e ".[dev]"
-cp .env.example .env              # add the Alpaca keys, Alpha Vantage key and SEC user agent
+cp .env.example .env              # add the Alpaca, Alpha Vantage and Claude API keys and the SEC user agent
 .venv/Scripts/ottr data --check   # every feed answers
 .venv/Scripts/ottr init           # opens the $10,000 book, loads the data, runs the first screen
 .venv/Scripts/ottr meeting        # one council meeting, propose-only (changes nothing)

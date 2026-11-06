@@ -412,7 +412,7 @@ async def check_chat(cfg: Config, out=print) -> int:
     finally:
         await api.aclose()
     exe = make_adapter(c.model, cfg.council, effort=c.effort).locate()
-    out(f"model CLI for {c.model}: {exe or 'NOT FOUND: /ask will fail'}")
+    out(f"model for {c.model}: {exe or 'NOT FOUND: /ask will fail'}")
     why = unavailable(cfg)
     out(f"not ready: {why}" if why else "ready: `ottr chat` connects to Discord (or let `ottr supervise` run it)")
     return EXIT_CONFIG if why else 0

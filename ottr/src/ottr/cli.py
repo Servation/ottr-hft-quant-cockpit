@@ -465,7 +465,18 @@ async def cmd_data(cfg, args) -> int:
     code = await datacheck.run(alpaca, symbols, time.time())
     print()
     print("Checking the events and macro feeds (FRED, Alpha Vantage, SEC, corporate actions)...", flush=True)
-    return max(code, await eventcheck.run(_sources(alpaca), cfg.events, symbols, time.time()))
+    code = max(code, await eventcheck.run(_sources(alpaca), cfg.events, symbols, time.time()))
+    c = cfg.council
+    if c.claude_backend == "api" and "claude" in {*c.analysts, c.chair, c.chair_fallback, cfg.watch.model, cfg.chat.model}:
+        from ottr.council.models import check_claude_api
+        from ottr.market.datacheck import Report
+        print()
+        print("Checking the Claude API key (a model lookup, no tokens spent)...", flush=True)
+        ok, note = await check_claude_api(c.claude_model)
+        rep = Report()
+        (rep.ok if ok else rep.fail)(note)
+        code = max(code, rep.finish(print, "Claude API"))
+    return code
 
 
 def screen_report(res, top: int) -> str:
@@ -608,7 +619,10 @@ async def cmd_archive(cfg, args) -> int:
 
 def watch_report(out: dict, cfg) -> str:
     """`ottr watch`: what the watcher would decide now."""
-    model = cfg.watch.model + (f" ({cfg.council.claude_model})" if cfg.watch.model == "claude" else "")
+    model = cfg.watch.model
+    if model == "claude":   # a full id (claude-opus-5-5) names itself; a CLI alias (opus) doesn't
+        cm = cfg.council.claude_model
+        model = cm if cm.startswith("claude") else f"claude ({cm})"
     lines = [f"Watcher ({model}): call a meeting now? {'YES' if out['call_meeting'] else 'no'}",
              f"  why: {out['why']}"]
     if out.get("note"):
@@ -658,9 +672,10 @@ async def cmd_service(cfg, args) -> int:
     name = args.name
     if args.action == "install":
         spec = service.default_spec(args.config, name)
-        from ottr.council.models import CLAUDE_TOKEN_ENV
+        from ottr.council.models import API_KEY_ENV, CLAUDE_TOKEN_ENV
         models = list(dict.fromkeys([*cfg.council.analysts, cfg.council.chair, cfg.watch.model]))
-        warns = service.preflight(models, cfg.discord_webhook_url,
+        warns = service.preflight(models, cfg.discord_webhook_url, claude_backend=cfg.council.claude_backend,
+                                  claude_key=bool(os.environ.get(API_KEY_ENV)),
                                   claude_token=bool(os.environ.get(CLAUDE_TOKEN_ENV)))
         if os.name != "nt" and not args.dry_run:
             print("Task Scheduler is Windows-only; use --dry-run to see the task XML")
@@ -703,7 +718,10 @@ def _setup_logging(verbose: bool, log_file: Optional[Path], console: bool,
         handlers.append(logging.NullHandler())
     logging.basicConfig(level=logging.DEBUG if verbose else logging.INFO, handlers=handlers, force=True,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
-    logging.getLogger("httpx").setLevel(logging.WARNING)
+    # A line per request is noise: httpx carries the feeds, httpx2 the Claude API (whose
+    # calls the adapter logs itself, with their token counts).
+    for name in ("httpx", "httpx2"):
+        logging.getLogger(name).setLevel(logging.WARNING)
 
 
 def main(argv=None) -> int:

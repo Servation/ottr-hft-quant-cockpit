@@ -226,3 +226,19 @@ def test_a_bad_config_is_a_message_not_a_traceback(tmp_path, capsys):
     assert cli.main(["--config", str(bad), "status"]) == 2
     err = capsys.readouterr().err
     assert err.startswith("ottr: config.toml: [risk] unknown keys: ['trailing_stop_pct']") and "Traceback" not in err
+
+
+def test_the_log_skips_a_line_per_http_request():
+    """httpx (the feeds) and httpx2 (the Claude API) log every request at INFO: noise in a
+    log read on a phone. The Claude adapter logs its own calls, with token counts."""
+    import logging
+    root = logging.getLogger()
+    handlers, level = root.handlers[:], root.level
+    try:
+        cli._setup_logging(False, None, console=False)
+        for name in ("httpx", "httpx2"):
+            assert not logging.getLogger(name).isEnabledFor(logging.INFO)
+            assert logging.getLogger(name).isEnabledFor(logging.WARNING)
+    finally:
+        root.handlers[:] = handlers
+        root.setLevel(level)

@@ -51,7 +51,7 @@ ottr/src/ottr/
                    profiles, corporate actions: fetched, sanity-checked, stored, read fail-closed
   universe/        membership (core ETFs from config, satellites from the DB), the weekly
                    stock screener: measures and score, membership rules, the run
-  council/         CLI model adapters (claude -p, codex exec, agy over stdin), schemas, Council
+  council/         model adapters (Claude API; codex exec, agy over stdin), schemas, Council
   risk/            gate (pre-trade checks and sizing), monitor (stops, trims, breaker,
                    corporate exits), Intent/Verdict types
   broker/          fee schedule (effective-dated), account model (buying power), SimBroker
@@ -245,9 +245,11 @@ stays exact and a corrected rule applies to all history at once.
 
 - **Supervisor + Task Scheduler.** The task starts the supervisor at logon and checks it
   every 5 minutes. The supervisor restarts the engine with backoff, as the user, because
-  the model CLIs are signed in under that profile. Claude can instead sign in with its own
-  long-lived subscription token (`CLAUDE_CODE_OAUTH_TOKEN` in `ottr/.env`), so signing out
-  of Claude Code on the PC doesn't sign the engine out.
+  the Codex and Antigravity CLIs are signed in under that profile. Claude goes through the
+  Claude API with `CLAUDE_API_KEY` from `ottr/.env`, so no CLI sign-in can lapse under
+  it; `council.claude_backend = "cli"` puts it back on `claude -p` and the subscription,
+  where its own long-lived token (`CLAUDE_CODE_OAUTH_TOKEN`) keeps a Claude Code sign-out
+  from signing the engine out.
 - **Events feeds** refresh on their own cadences:
   - FRED: every 12h.
   - Earnings: daily (one Alpha Vantage call).
