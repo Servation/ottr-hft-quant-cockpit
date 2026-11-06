@@ -168,7 +168,7 @@ async def test_one_turns_lookups_run_together_and_go_back_in_one_message(engine_
     seen = []
     ans = await agent.answer(model, lookups, "SYSTEM", "the question", timeout=30, on_lookup=seen.append)
     assert ans.text == "The council bought TLT on falling yields." and ans.proposal is None
-    assert ans.rounds == 2 and ans.tokens == (2200, 130, 1800) and ans.model == ""
+    assert ans.rounds == 2 and ans.tokens == (2200, 130, 1800, 800) and ans.model == ""
     assert [d.describe().split(")")[0] for d in ans.lookups] == ["get_meeting(meeting_id=m-1", "get_fills(limit=3"]
     assert seen == ans.lookups and model.sessions == 1
     r1, r2 = model.requests
@@ -287,7 +287,7 @@ async def test_ask_with_lookups_answers_and_records_them(make, engine_api, chat_
     assert "show me the last three fills" not in system     # data and the question go in the user turn
     row = svc.log.recent(1)[0]
     assert (row["command"], row["status"], row["model"]) == ("ask", "ok", "claude (lookups)")
-    assert "2 turn(s), 1 lookup(s); tokens 2200 in, 130 out, 1800 cached" in row["detail"]
+    assert "2 turn(s), 1 lookup(s); tokens 2,200 in, 130 out, 1,800 cache read, 800 cache write" in row["detail"]
     assert "get_fills(limit=3)" in row["detail"] and row["reply"] == "Three fills, all TLT."
     assert engine_api.writes() == []
 
@@ -406,7 +406,8 @@ def message(content, stop, usage=None, model="claude-opus-5-5"):
     return httpx2.Response(200, json={
         "id": "msg_test", "type": "message", "role": "assistant", "model": model, "content": content,
         "stop_reason": stop, "stop_sequence": None,
-        "usage": usage or {"input_tokens": 3000, "output_tokens": 50, "cache_read_input_tokens": 2500}})
+        "usage": usage or {"input_tokens": 3000, "output_tokens": 50, "cache_read_input_tokens": 2500,
+                            "cache_creation_input_tokens": 400}})
 
 
 THINKING = {"type": "thinking", "thinking": "", "signature": "sig-abc"}
@@ -422,11 +423,12 @@ async def test_claude_tools_on_the_messages_api(lookups):
             return message([THINKING, {"type": "tool_use", "id": "toolu_a", "name": "get_fills",
                                        "input": {"limit": 3}}], "tool_use")
         return message([THINKING, {"type": "text", "text": answer_json}], "end_turn",
-                       {"input_tokens": 3500, "output_tokens": 60, "cache_read_input_tokens": None})
+                       {"input_tokens": 3500, "output_tokens": 60, "cache_read_input_tokens": None,
+                        "cache_creation_input_tokens": None})
 
     model = ClaudeTools("claude-opus-5-5", "low", client=sdk(handler))
     ans = await agent.answer(model, lookups, "SYSTEM", "what do we hold?", timeout=30)
-    assert ans.text == "TLT is the only holding." and ans.tokens == (6500, 110, 2500) and ans.rounds == 2
+    assert ans.text == "TLT is the only holding." and ans.tokens == (6500, 110, 2500, 400) and ans.rounds == 2
     b1, b2 = (json.loads(r.content) for r in seen)
     assert seen[0].url.path == "/v1/messages" and seen[0].headers["authorization"] == f"Bearer {TEST_KEY}"
     assert FALLBACK_BETA in seen[0].headers["anthropic-beta"]

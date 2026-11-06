@@ -141,13 +141,13 @@ def asks(*calls) -> Step:
     """A turn that asks for lookups: (name, args) pairs."""
     tcs = [ToolCall(f"toolu_{next(_ids)}", name, args) for name, args in calls]
     content = [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.input} for c in tcs]
-    return Step(content, "tool_use", tcs, "", model="claude-opus-5-5", tokens=(1000, 40, 800))
+    return Step(content, "tool_use", tcs, "", model="claude-opus-5-5", tokens=(1000, 40, 800, 300))
 
 
 def replies(answer, propose=False, reason="") -> Step:
     text = json.dumps({"answer": answer, "propose_meeting": propose, "meeting_reason": reason})
     return Step([{"type": "text", "text": text}], "end_turn", [], text, model="claude-opus-5-5",
-                tokens=(1200, 90, 1000))
+                tokens=(1200, 90, 1000, 500))
 
 
 class ScriptedTools:

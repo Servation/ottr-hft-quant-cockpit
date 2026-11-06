@@ -74,7 +74,7 @@ class Step:
     calls: List[ToolCall]
     text: str                     # the text blocks, joined
     model: str = ""               # who answered (a fallback model after a refusal)
-    tokens: Tuple[int, int, int] = (0, 0, 0)   # input, output, cache read
+    tokens: Tuple[int, int, int, int] = (0, 0, 0, 0)   # input, output, cache read, cache write
 
 
 class ToolSession(Protocol):
@@ -101,14 +101,15 @@ class Answer:
     proposal: Optional[Proposal]
     lookups: List[Done] = field(default_factory=list)
     rounds: int = 0
-    tokens: Tuple[int, int, int] = (0, 0, 0)
+    tokens: Tuple[int, int, int, int] = (0, 0, 0, 0)
     model: str = ""
 
     def detail(self) -> str:
-        """The lookups and token counts, for the exchange's row in chat.db."""
-        i, o, c = self.tokens
-        parts = [f"{self.rounds} turn(s), {len(self.lookups)} lookup(s); tokens {i} in, {o} out, {c} cached"
-                 + (f"; answered by {self.model}" if self.model else "")]
+        """The lookups and token counts, for the exchange's row in chat.db. Cache writes are
+        named apart: with automatic caching most of a question's input is billed as one."""
+        i, o, r, w = self.tokens
+        parts = [f"{self.rounds} turn(s), {len(self.lookups)} lookup(s); tokens {i:,} in, {o:,} out, "
+                 f"{r:,} cache read, {w:,} cache write" + (f"; answered by {self.model}" if self.model else "")]
         parts += [d.describe() for d in self.lookups]
         if self.proposal:
             parts.append(f"proposed a meeting: {self.proposal.why}")
@@ -137,19 +138,19 @@ async def answer(model: ToolModel, lookups: Lookups, system: str, user: str, tim
     answers; `timeout` caps the whole loop, lookups included (the caller enforces it)."""
     messages: List[dict] = [{"role": "user", "content": user}]
     done: List[Done] = []
-    tin = tout = tcache = 0
+    tokens = (0, 0, 0, 0)
     async with model.session() as s:
         for rnd in range(1, MAX_ROUNDS + 1):
             final = rnd == MAX_ROUNDS or len(done) >= MAX_LOOKUPS
             step = await s.step(system, messages, TOOLS, final, timeout)
-            tin, tout, tcache = tin + step.tokens[0], tout + step.tokens[1], tcache + step.tokens[2]
+            tokens = tuple(a + b for a, b in zip(tokens, step.tokens))
             if step.stop_reason != "tool_use" or not step.calls:
                 if not step.text.strip():
                     raise ModelError(f"empty reply (stop reason {step.stop_reason})")
                 text, proposal = parse_answer(step.text)
                 if not text:
                     raise ModelError("the reply had an empty answer")
-                return Answer(text, proposal, done, rnd, (tin, tout, tcache),
+                return Answer(text, proposal, done, rnd, tokens,
                               step.model if step.model and step.model != model.model else "")
             if final:
                 raise ModelError(f"still asking for lookups after {rnd} turns and {len(done)} lookups")
@@ -199,7 +200,8 @@ class _ClaudeSession:
         calls = [ToolCall(b.id, b.name, b.input) for b in msg.content if b.type == "tool_use"]
         text = "".join(b.text for b in msg.content if b.type == "text")
         return Step(content=msg.content, stop_reason=msg.stop_reason or "", calls=calls, text=text,
-                    model=msg.model, tokens=(u.input_tokens, u.output_tokens, u.cache_read_input_tokens or 0))
+                    model=msg.model, tokens=(u.input_tokens, u.output_tokens, u.cache_read_input_tokens or 0,
+                                             u.cache_creation_input_tokens or 0))
 
 
 class ClaudeTools:
