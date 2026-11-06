@@ -15,6 +15,11 @@ What it does:
   within `schedule.min_before_close_min` of the close, at least `watch.min_gap_min` after
   the last meeting began and before the next scheduled one, at most
   `watch.max_called_per_day` a day, never while a meeting runs.
+- A scheduled meeting that fails, or that the engine was down through, leaves a held
+  make-up (`WatchState.makeup`). Code calls it, under the same limits, once live prices
+  answer again, and drops it when it can't run that day (`makeup_expired`). Why: on
+  2026-11-06 a DNS outage failed the 10:15 meeting, and the desk went without a council
+  decision until 15:15 although the network was back by 13:55.
 
 Why: the schedule meets at 10:15 and 15:15 whatever happens. A desk that holds for days
 to weeks mostly needs only that, but a break, a gap or a shock in between deserves a look
@@ -39,6 +44,7 @@ KINDS = ("price_below", "price_above", "move_pct")
 LEVEL_BAND = 0.25                    # a price level within 25% of the current price
 MOVE_PCT = (0.5, 20.0)               # a move_pct condition's range, in percent
 CALLS_KEPT = 30                      # called meetings remembered (for the daily cap and the API)
+MAKEUP = "makeup"                    # who called a make-up meeting (beside "watcher" and "condition")
 
 WATCH_SHAPE = """{
   "call_meeting": false,
@@ -88,6 +94,9 @@ class WatchState:
     last_error_ts: Optional[float] = None    # when it failed (cleared by a review that works)
     called: List[Dict[str, Any]] = field(default_factory=list)   # {"ts", "by", "why", "ran"}
     pending: Optional[Dict[str, Any]] = None                     # a call waiting for the council loop
+    # A scheduled meeting that didn't happen, held for a make-up: {"slot" (its time), "why",
+    # "since", "tries", "tried_ts" (the last make-up called), "waiting" (why not yet)}.
+    makeup: Optional[Dict[str, Any]] = None
 
     @classmethod
     def from_dict(cls, d: Optional[Mapping]) -> "WatchState":
@@ -96,7 +105,7 @@ class WatchState:
                    set_ts=d.get("set_ts"), last_review_ts=d.get("last_review_ts"),
                    last_review=d.get("last_review", ""), last_error=d.get("last_error", ""),
                    last_error_ts=d.get("last_error_ts"),
-                   called=list(d.get("called") or []), pending=d.get("pending"))
+                   called=list(d.get("called") or []), pending=d.get("pending"), makeup=d.get("makeup"))
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -207,6 +216,37 @@ def call_blocked(cfg, mt: MarketTime, now: float, state: WatchState, last_meetin
     used = len(state.called_on(now))
     if used >= w.max_called_per_day:
         return f"today's {w.max_called_per_day} called meetings are used"
+    return None
+
+
+def makeup_expired(cfg, mt: MarketTime, now: float, state: WatchState,
+                   next_meeting_ts: Optional[float]) -> Optional[str]:
+    """Why the held make-up can no longer run, or None while it still may. The limits that
+    only pass with time (the gap after the last meeting, a meeting running) are
+    `call_blocked`'s: a make-up waits those out. These ones it can't: the session is over,
+    the close is too near, the next scheduled meeting comes first (and stands in for it),
+    or today's called meetings are used."""
+    w, m = cfg.watch, state.makeup
+    if not mt.is_open or trade_day(now) != trade_day(m["slot"]):
+        return "the session ended first"
+    left = mt.seconds_to_close()
+    if left is not None and left < cfg.schedule.min_before_close_min * 60:
+        return f"none in the last {cfg.schedule.min_before_close_min} minutes of the session"
+    if next_meeting_ts is not None and 0 <= next_meeting_ts - now < w.min_gap_min * 60:
+        at = datetime.fromtimestamp(next_meeting_ts, tz=ET).strftime("%H:%M")
+        return f"the scheduled meeting at {at} ET comes first"
+    if len(state.called_on(now)) >= w.max_called_per_day:
+        return f"today's {w.max_called_per_day} called meetings are used"
+    return None
+
+
+def makeup_spaced(cfg, now: float, makeup: Mapping) -> Optional[str]:
+    """A failed make-up is retried no sooner than `watch.min_gap_min` after it began, as
+    any two meetings are; `call_blocked` can't see one that failed before it was recorded
+    (no prices, say)."""
+    tried, gap = makeup.get("tried_ts"), cfg.watch.min_gap_min
+    if tried is not None and now - tried < gap * 60:
+        return f"the last make-up began {(now - tried) / 60:.0f} minutes ago (at least {gap:g} apart)"
     return None
 
 

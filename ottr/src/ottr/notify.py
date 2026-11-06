@@ -147,6 +147,11 @@ def _live_outcome(o: Optional[dict], d: dict) -> str:
     return f"{st}: {detail}"  # rejected / deferred
 
 
+def _called_label(by: Optional[str]) -> str:
+    """How a meeting outside the schedule came about, for its messages."""
+    return "Make-up" if by == "makeup" else "Called by the watcher"
+
+
 def _live_meeting(d: dict) -> str:
     """The live council message: who is done, who is thinking, what the chair decided, and
     the risk gate's answer per trade. Model text is clipped so the message stays one post."""
@@ -159,7 +164,7 @@ def _live_meeting(d: dict) -> str:
         head = f"**Council in session** (`{mid}`, started <t:{int(d.get('started_at') or 0)}:R>)"
     lines = [head]
     if d.get("called"):
-        lines.append(f"Called by the watcher: {clip(no_em_dash(d['called']), 240)}")
+        lines.append(f"{_called_label(d.get('called_by'))}: {clip(no_em_dash(d['called']), 240)}")
     if phase == "market":
         lines.append("Reading the market and the book.")
     for a in d.get("analysts") or []:
@@ -184,7 +189,8 @@ def format_event(kind: str, d: dict) -> str:
         trades = ", ".join(f"{t['action']} {t['asset']}" for t in d["trades"]) or "no trades"
         dropped = "".join(f"\n- dropped {x['trade']['action']} {x['trade']['asset']}: {x['why']}"
                           for x in d.get("dropped", []))
-        called = f"\nCalled by the watcher: {clip(no_em_dash(d['called']), 300)}" if d.get("called") else ""
+        called = (f"\n{_called_label(d.get('called_by'))}: {clip(no_em_dash(d['called']), 300)}"
+                  if d.get("called") else "")
         ch = d.get("chair") or {}
         stood = (f"\nChaired by {ch.get('name')}: {ch.get('replaced')} failed ({clip(ch.get('error'), 160)})"
                  if ch.get("replaced") else "")
@@ -195,11 +201,20 @@ def format_event(kind: str, d: dict) -> str:
         rows = [f"- {c}: {clip(no_em_dash(why), 160)}" for c, why in d.get("triggers") or []]
         return "\n".join([head, *(rows or ["- nothing: no condition set until the next meeting"])])
     if kind == "meeting_called":
+        if d.get("by") == "makeup":
+            return f"**Make-up meeting called**: {clip(no_em_dash(d.get('why', '')), 600)}"
         who = "a watched condition was met" if d.get("by") == "condition" else "the watcher"
         return f"**Meeting called** ({who}): {clip(no_em_dash(d.get('why', '')), 600)}"
     if kind == "meeting_call_refused":
-        who = "A watched condition was met" if d.get("by") == "condition" else "The watcher asked for a meeting"
+        who = {"condition": "A watched condition was met", "makeup": "A make-up meeting was due"}.get(
+            d.get("by"), "The watcher asked for a meeting")
         return (f"**{who}, but no meeting**: {d.get('blocked')}.\n> {clip(no_em_dash(d.get('why', '')), 400)}")
+    if kind == "makeup_held":
+        return (f"**Meeting missed**: {clip(no_em_dash(d.get('why', '')), 400)}. A make-up runs once live "
+                "prices answer again, within the called-meeting limits.")
+    if kind == "makeup_dropped":
+        return (f"**No make-up meeting**: {clip(no_em_dash(d.get('why', '')), 400)}, and "
+                f"{d.get('reason')}.")
     if kind == "meeting_live":
         return _live_meeting(d)
     if kind == "risk_halt":

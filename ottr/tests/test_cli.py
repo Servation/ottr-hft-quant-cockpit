@@ -57,6 +57,16 @@ def test_status_healthy_engine_exits_0(book, capsys):
     assert "task council  ok" in out and "(at 10:15 and 15:15 ET on trading days)" in out
 
 
+def test_status_shows_a_pending_make_up(book, capsys):
+    from ottr.engine.engine import WATCH_STATE
+    book.set_state(WATCH_STATE, {"makeup": {"slot": et(2026, 10, 21, 10, 15), "tries": 0,
+                                            "why": "the 10:15 ET meeting failed (no price for any asset)",
+                                            "waiting": "no live prices yet"}})
+    status()
+    assert ("make-up pending: the 10:15 ET meeting failed (no price for any asset) (waiting: no live "
+            "prices yet)") in capsys.readouterr().out
+
+
 def test_status_marks_holdings_from_stored_closes_without_keys(book, capsys, monkeypatch):
     """No Alpaca keys and a closed market: the stored official close prices the book."""
     from decimal import Decimal
