@@ -49,7 +49,7 @@ and real environment variables take precedence:
 | `CLAUDE_API_KEY` | Claude for the council, the watcher and `/ask`, through the Claude API (billed per token; see [Model sign-in](#model-sign-in)) |
 | `CLAUDE_CODE_OAUTH_TOKEN` | only with `claude_backend = "cli"`: Claude's own long-lived CLI sign-in for the engine |
 | `DISCORD_WEBHOOK_URL` | where meetings, fills, risk events, screens and alarms are posted (optional) |
-| `OTTR_API_KEY` | 16+ chars; enables `POST /api/kill-switch` (the GETs need no key) |
+| `OTTR_API_KEY` | 16+ chars; enables `POST /api/kill-switch` and `POST /api/meeting-call` (the GETs need no key) |
 | `OTTR_DRY_RUN=1` | kill switch from config: record "would fill" verdicts, never fill |
 | `DISCORD_BOT_TOKEN`, `CEO_DISCORD_ID` | the chat bot (see [Discord chat](#discord-chat)) |
 | `OTTR_CHAT_ALLOWED_IDS`, `DISCORD_GUILD_ID` | optional chat allow-list and server |
@@ -226,15 +226,19 @@ meeting and answers two questions:
 - in session only, and none in the last 45 minutes;
 - at least 45 minutes after the last meeting and before the next scheduled one;
 - at most 4 called meetings a day;
-- never while a meeting runs.
+- never while a meeting runs, and one call waiting at a time.
+
+The owner can call a meeting too, with the button under an `/ask` answer that proposes one
+([Discord chat](#discord-chat)). The same limits apply, and the owner's calls, the
+watcher's and [make-ups](#make-up-meetings) share the 4 a day.
 
 A condition that is unpriced, more than 25% from the price, or already met is dropped and
 said so.
 
 The watcher can't trade. A called meeting runs the full council and the same risk gate;
-its packet opens with why it was called, and the chair may well decide nothing. Discord
-gets a post when the watched conditions change, when a meeting is called (and why), and
-when a call is refused (and why). `/status`, `ottr status` and `GET /api/council` show
+its packet opens with why it was called and by whom, and the chair may well decide nothing.
+Discord gets a post when the watched conditions change, when a meeting is called (by whom
+and why), and when a call is refused (and why). `/status`, `ottr status` and `GET /api/council` show
 what it is watching. `ottr watch` asks it what it would do right now, changing nothing.
 `[watch]` in config.toml holds every limit, the model and how often it reviews
 (`enabled = false` turns it off).
@@ -277,7 +281,8 @@ progress from `GET /api/council`.
 ## HTTP API (for the dashboard)
 
 Read-only JSON on `http://127.0.0.1:8765/api` (loopback only, enforced), through its own
-`mode=ro` SQLite connection, so it can't write to the ledger.
+`mode=ro` SQLite connection, so it can't write to the ledger. Its two writes, the kill
+switch and a meeting call, go to the engine, which records them.
 
 | Endpoint | Returns |
 |---|---|
@@ -294,12 +299,22 @@ Read-only JSON on `http://127.0.0.1:8765/api` (loopback only, enforced), through
 | `GET /api/universe` | the members (class, cap, buyable, fractional) and the satellites |
 | `GET /api/screen` | the latest stock screen, the satellites and recent membership changes |
 | `GET/POST /api/kill-switch` | read, or engage/release the runtime dry run |
+| `GET/POST /api/meeting-call` | whether a meeting may be called now (and why not), or call one |
 
-The kill switch needs `Authorization: Bearer $OTTR_API_KEY`. An empty POST engages it:
+Both POSTs need `Authorization: Bearer $OTTR_API_KEY`. An empty POST to the kill switch
+engages it:
 
 ```bash
 curl -X POST -H "Authorization: Bearer $OTTR_API_KEY" http://127.0.0.1:8765/api/kill-switch
 curl -X POST -H "Authorization: Bearer $OTTR_API_KEY" -d '{"engaged": false}' http://127.0.0.1:8765/api/kill-switch
+```
+
+A meeting call needs `why` (what the council should weigh, at most 400 characters). It is
+held to [the watcher's limits](#the-desk-watcher): 200 when it is queued, 409 with code's
+reason when it is refused:
+
+```bash
+curl -X POST -H "Authorization: Bearer $OTTR_API_KEY" -d '{"why": "TLT broke its 50-day EMA"}' http://127.0.0.1:8765/api/meeting-call
 ```
 
 An optional `"by"` labels who asked in the audit log. The state is stored in the ledger,
@@ -370,8 +385,9 @@ are ESTIMATES, not tax advice. They replay the ledger's FIFO lots:
 
 `ottr chat` is a separate process that talks to you through slash commands. It connects
 outbound to Discord (no public URL or open port), reads everything through the API above,
-and keeps its own record in `data/chat.db`. It never opens the ledger, the API has no
-trade endpoint, and its only write is the kill switch, so **no chat command can trade**.
+and keeps its own record in `data/chat.db`. It never opens the ledger, and the API has no
+trade endpoint. Its only writes are the kill switch and the owner's meeting call, and a
+called meeting runs the full council and risk gate, so **no chat command can trade**.
 
 | Command | Who | What it does |
 |---|---|---|
@@ -379,14 +395,32 @@ trade endpoint, and its only write is the kill switch, so **no chat command can 
 | `/positions` | owner, allow-list | holdings with their marks, weights, unrealized P&L and distance to the stop |
 | `/meeting` | owner, allow-list | the latest council meeting: the chair's decision, each order's result, every analyst's stances |
 | `/screen` | owner, allow-list | the satellites, the latest screen's changes and the top of its ranking |
-| `/ask <question>` | owner, allow-list | one model call over the book, positions, the last meeting, fills, the satellites and health |
+| `/ask <question>` | owner, allow-list | answers from the book, positions, the last meeting, fills, the satellites and health, looking up more as needed; may propose a council meeting |
 | `/kill [reason]` | owner, allow-list | engages the kill switch at once (the safe direction) |
 | `/release` | owner only | releases it, after a button confirmation |
 
 Everyone else gets a private "only takes commands from its owner" reply, and the attempt is
 recorded. `/status`, `/positions`, `/meeting` and `/screen` are plain code, so they work
-when the models don't. `/ask` makes one model call at a time, at most `per_hour` in any
+when the models don't. `/ask` answers one question at a time, at most `per_hour` in any
 rolling hour, and stays quiet while a council meeting runs.
+
+### What /ask can look up, and the meeting button
+
+With Claude on the API (`[council] claude_backend = "api"`, the default), `/ask` starts
+from the same snapshot and can look up more: any meeting in full (and the packet the
+council saw), earlier meetings, more fills, the audit log, the equity curve, the screen,
+the universe, the watcher's conditions, full health, and whether a meeting may be called
+now. Each lookup is a fixed GET on the API, sent without the key, with its arguments
+checked by code: up to 8 per question. The footer says how many it made, and `data/chat.db`
+records each one.
+
+When the answer proposes a council meeting, it says why, and the owner gets a **Call a
+meeting** button (and **Not now**) under it for 10 minutes. Only the owner can press it,
+even under an allow-listed user's answer. The press calls `POST /api/meeting-call`, so the
+watcher's limits decide, and a refusal says which one. No button is shown when those
+limits already rule a call out. `[chat] lookups = false`, or Claude on the CLI backend,
+turns this off: `/ask` is then one model call over the snapshot, with no lookups and no
+button.
 
 ### Setting it up
 
@@ -398,8 +432,8 @@ rolling hour, and stays quiet while a council meeting runs.
 3. **Your IDs.** In Discord, **User Settings > Advanced > Developer Mode**, then right-click
    your name > **Copy User ID** (and optionally the server > **Copy Server ID**).
 4. **ottr/.env:** `DISCORD_BOT_TOKEN`, `CEO_DISCORD_ID`, optionally `DISCORD_GUILD_ID` and
-   `OTTR_CHAT_ALLOWED_IDS`. `OTTR_API_KEY` must be set too, or `/kill` and `/release` are
-   refused.
+   `OTTR_CHAT_ALLOWED_IDS`. `OTTR_API_KEY` must be set too, or `/kill`, `/release` and the
+   meeting button are refused.
 5. **Check, then run.** `ottr chat --check` validates all of this without connecting;
    `ottr service restart` starts the bot next to the engine when `[chat] enabled = true`.
 

@@ -283,3 +283,7 @@ effort = "low"
 per_hour = 20
 history_turns = 6
 timeout_sec = 180
+# With Claude on the API (council.claude_backend = "api"), /ask may call read-only lookups into
+# the desk's records and propose a council meeting, which only the owner can call with a button
+# (within the [watch] limits). false: one plain model call over the snapshot, as on the CLI.
+lookups = true

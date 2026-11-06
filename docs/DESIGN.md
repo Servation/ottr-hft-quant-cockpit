@@ -21,8 +21,11 @@ money.
 
 ## Principles
 
-1. **Models judge, code acts.** Models return schema-validated JSON and never call tools.
-   No model output can carry a dollar size, and no model can add a symbol.
+1. **Models judge, code acts.** Models return schema-validated JSON. No model output can
+   carry a dollar size, call a tool that changes anything, or add a symbol. The one model
+   that calls tools at all is /ask's in chat, and its tools are read-only lookups (fixed
+   GETs on the API, sent without its key). A meeting it proposes is only a field of its
+   answer: the owner presses a button, and code's limits decide.
 2. **Independence, then synthesis.** Analysts see one shared market packet and never see
    each other. The chair sees their reports anonymized as A/B/C.
 3. **Fail closed.** No quorum, a failed chair and fallback chair, stale or insane market data, an unknown
@@ -65,7 +68,8 @@ ottr/src/ottr/
   supervisor.py    restarts `ottr run` (and `ottr chat`) with backoff
   service.py       Windows Task Scheduler registration for the supervisor
   archive.py       verified copies of a book, at the cutover and after
-  chat/            `ottr chat`: the Discord slash-command bot; reads the API only
+  chat/            `ottr chat`: the Discord slash-command bot; reads the API, writes only the
+                   kill switch and the owner's meeting call
   cli.py           init | run | supervise | service | chat | meeting | status | check | resume
                    | data | screen | tax | archive
 ```
@@ -125,11 +129,16 @@ and what is worth watching depends on what the desk holds and just decided.
   (Claude, Opus) reviews what changed. It returns validated JSON: whether to call a
   meeting now, and up to 8 conditions (a level broken or a percent moved).
 - **Code's role:** it checks the conditions every minute and decides whether a call may
-  run (in session, away from the close and the schedule, 45 minutes apart, 4 a day).
+  run (in session, away from the close and the schedule, 45 minutes apart, 4 a day, one
+  waiting at a time).
+- **The owner's call:** the owner can call one from chat too (the button under an /ask
+  answer that proposes one, `POST /api/meeting-call`). Code treats it as the watcher's: the
+  same limits and the same 4 a day, the same audit entries and Discord posts.
 - **The meeting:** a called meeting is an ordinary meeting whose packet starts with why it
-  was called.
+  was called and by whom.
 
-The watcher can't trade, size or add a symbol: models judge, code acts.
+The watcher can't trade, size or add a symbol: models judge, code acts. Nor can a called
+meeting skip anything: it runs the full council and risk gate, and may do nothing.
 
 **Make-ups** use the same machinery, with code as the caller.
 - **When one is held:** a scheduled meeting failed (no prices, an error) or ended without
@@ -289,9 +298,13 @@ stays exact and a corrected rule applies to all history at once.
   (and `/kill` in chat). It's persisted, and the API can't release a dry run that config
   imposes.
 - **Discord chat.** `ottr chat` is a slash-command bot the supervisor runs as a second
-  child. /status, /positions, /meeting and /screen are plain code over the API; /ask is
-  one model call with a rolling-hour budget. /kill and /release are its only write, so no
-  chat command can trade. Alerts stay on the webhook, so they arrive when the bot is down.
+  child. /status, /positions, /meeting and /screen are plain code over the API; /ask is a
+  model answer with a rolling-hour budget. On the Claude API it starts from a snapshot of
+  the desk and can make up to 8 read-only lookups (a tool loop code owns: fixed GETs,
+  arguments checked, the last turn with tools off), and it can propose a council meeting,
+  which only the owner can call, with a button. Its writes are /kill and /release and that
+  meeting call, so no chat command can trade. Alerts stay on the webhook, so they arrive
+  when the bot is down.
 - **Archive.** `ottr archive` makes a verified copy of any book version (SQLite backup
   API, integrity check, config, logs, a note with the commit), and with `--retire` sets
   the original aside for a new one.

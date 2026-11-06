@@ -87,6 +87,11 @@ def test_code_decides_whether_a_call_may_run(cfg):
     assert watcher.call_blocked(cfg, mt, OPEN, st, None, None, False) == "today's 4 called meetings are used"
     st.called = [{"ts": OPEN - 86400 + i, "ran": True} for i in range(4)]          # yesterday's don't count
     assert watcher.call_blocked(cfg, mt, OPEN, st, None, None, False) is None
+    st.pending = {"ts": OPEN - 5, "by": "owner", "why": "x"}                       # one waits at a time
+    assert watcher.call_blocked(cfg, mt, OPEN, st, None, None, False) == \
+        "a meeting called by the owner is about to start"
+    st.pending["ts"] = OPEN - watcher.PENDING_FRESH_SEC - 1                       # lost to a restart: replaceable
+    assert watcher.call_blocked(cfg, mt, OPEN, st, None, None, False) is None
 
 
 # -- through the engine ----------------------------------------------------------------------
@@ -177,6 +182,26 @@ async def test_the_council_loop_wakes_for_a_call(cfg, store, ledger):
     assert eng.watch_state().pending is None
 
 
+async def test_the_owner_calls_a_meeting_like_the_watcher(cfg, store, ledger):
+    eng, rig, model = await rigged(cfg, store, [ModelError("no review in this test")])
+    assert eng.call_meeting(watcher.OWNER, "TLT broke its 50-day EMA", via="discord") is None
+    assert drain(eng.alerts) == ["**Meeting called** (by the owner, from chat): TLT broke its 50-day EMA"]
+    # The watcher can't stack a second call on it, nor can the owner.
+    assert eng.request_meeting("watcher", "SPY slid") is False
+    assert eng.call_meeting(watcher.OWNER, "again") == "a meeting called by the owner is about to start"
+    assert drain(eng.alerts)[0].startswith("**The watcher asked for a meeting, but no meeting**: a meeting "
+                                           "called by the owner is about to start")
+    eng._call.clear()
+    await eng._called_meeting()
+    await asyncio.gather(eng._review_task, return_exceptions=True)
+    posts = drain(eng.alerts)
+    assert any(p.startswith("**Council m-") and "\nCalled by the owner: TLT broke its 50-day EMA" in p for p in posts)
+    (ran,) = eng.watch_state().called_on(OPEN)
+    assert ran["by"] == "owner" and ran["ran"] is True      # it counts against the same daily limit
+    assert eng.call_meeting(watcher.OWNER, "and again").startswith("the last meeting began 0 minutes ago")
+    assert drain(eng.alerts)[-1].startswith("**The owner asked for a meeting, but no meeting**: the last")
+
+
 async def test_a_failed_review_is_remembered_and_closed_markets_are_left_alone(cfg, store, ledger):
     eng, rig, model = await rigged(cfg, store, [ModelError("claude: timed out")])
     with pytest.raises(ModelError):
@@ -216,6 +241,14 @@ def test_the_discord_messages():
     live = format_event("meeting_live", {"phase": "analysts", "id": "m-1", "started_at": 0, "called": "TLT broke",
                                          "analysts": [], "chair": {"name": "claude", "status": "waiting"}})
     assert live.splitlines()[1] == "Called by the watcher: TLT broke"
+    live = format_event("meeting_live", {"phase": "analysts", "id": "m-1", "started_at": 0, "called": "TLT broke",
+                                         "called_by": "owner", "analysts": [],
+                                         "chair": {"name": "claude", "status": "waiting"}})
+    assert live.splitlines()[1] == "Called by the owner: TLT broke"
+    assert format_event("meeting_called", {"by": "owner", "why": "TLT broke"}) == \
+        "**Meeting called** (by the owner, from chat): TLT broke"
+    assert format_event("meeting_call_refused", {"by": "owner", "why": "x", "blocked": "the market is closed"}) \
+        .startswith("**The owner asked for a meeting, but no meeting**: the market is closed")
 
 
 def test_the_config_limits(cfg, tmp_path):

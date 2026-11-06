@@ -236,6 +236,28 @@ async def test_a_make_up_without_models_is_retried_after_the_gap(cfg, store, led
     assert len(eng.watch_state().called_on(rig.clock.time())) == 2
 
 
+async def test_a_call_stranded_by_a_restart_does_not_hold_the_make_up(cfg, store, ledger):
+    """A queued call is kept in the watch state, but the council loop's wake-up for it
+    lives in memory, so after a restart nothing runs it. A fresh one makes the make-up wait
+    (it runs first); one older than PENDING_FRESH_SEC is replaced by the make-up's call."""
+    eleven = et(*DAY, 11)
+    eng, rig = await rigged(cfg, store, now=eleven)
+    store.set_state(NEXT_MEETING, NEXT)
+    eng._hold_makeup(SLOT, MISSED)
+    st = eng.watch_state()
+    st.pending = {"ts": eleven - 30, "by": "watcher", "why": "a gap down"}
+    eng._save_watch(st)
+    await eng._makeup_check()
+    assert eng.watch_state().makeup["waiting"] == "a meeting called by the watcher is about to start"
+    assert eng.watch_state().pending["by"] == "watcher"
+
+    rig.at(eleven + watcher.PENDING_FRESH_SEC)                 # nothing ran it: a restart lost it
+    await eng._makeup_check()
+    st = eng.watch_state()
+    assert st.pending["by"] == "makeup" and st.pending["slot"] == SLOT
+    assert st.makeup["tries"] == 1 and st.makeup["waiting"] == ""
+
+
 async def test_a_slot_the_engine_was_down_through_is_made_up_while_the_session_lasts(cfg, store, ledger):
     eng, rig = await rigged(cfg, store, now=et(*DAY, 11))
     store.set_state(NEXT_MEETING, SLOT)                                  # the engine slept through 10:15

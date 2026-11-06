@@ -120,6 +120,7 @@ class Chat:
     per_hour: int = 20                 # /ask model calls in any rolling hour
     history_turns: int = 6             # earlier /ask exchanges in the channel replayed into the prompt
     timeout_sec: float = 180.0         # Discord keeps a deferred reply open for 15 min
+    lookups: bool = True               # /ask may call read-only lookups and propose a meeting (Claude API only)
 
 
 class ConfigError(ValueError):

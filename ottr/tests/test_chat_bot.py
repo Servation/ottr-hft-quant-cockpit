@@ -4,8 +4,9 @@ discord.py glue tests with fake interactions: no gateway connection, no real mod
 Covers the registered command set and options, the owner check that runs before every
 command, deferral before slow work, ephemeral refusals, splitting long answers across
 follow-ups, the /release confirmation buttons (and their timeout), the error handler,
-command-sync bookkeeping, and the `ottr chat` process: exit codes, the single-instance
-lock and a clean stop through the stop file.
+the "Call a meeting" button under an /ask answer that proposes one (owner only, and its
+timeout), command-sync bookkeeping, and the `ottr chat` process: exit codes, the
+single-instance lock and a clean stop through the stop file.
 """
 
 import asyncio
@@ -18,12 +19,12 @@ from discord import app_commands
 
 from ottr.chat import EXIT_CONFIG
 from ottr.chat import bot as chatbot
-from ottr.chat.bot import COMMANDS, Handlers, OttrBot, ReleaseView, build_tree, sync_commands
+from ottr.chat.bot import COMMANDS, Handlers, MeetingView, OttrBot, ReleaseView, build_tree, sync_commands
 from ottr.chat.log import ChatLog
-from ottr.chat.service import OWNER_ONLY, STRANGER, ChatService
+from ottr.chat.service import MEETING_OWNER_ONLY, OWNER_ONLY, STRANGER, ChatService, Outcome
 from ottr.control import request_stop
 from ottr.ledger.store import _FileLock
-from tests.fakes import CHAT_KEY, FakeEngineApi, RecordingModel
+from tests.fakes import CHAT_KEY, FakeEngineApi, RecordingModel, ScriptedTools, asks, replies
 
 OWNER, FRIEND, STRANGER_ID = 111111111111111111, 222222222222222222, 333333333333333333
 
@@ -52,13 +53,28 @@ class FakeResponse:
         self.events.append(("edit", content, view))
 
 
-class FakeFollowup:
+class FakeMessage:
+    """A sent follow-up, as followup.send(wait=True) returns it: records its edits."""
+
     def __init__(self, events):
         self.events = events
 
-    async def send(self, content, *, ephemeral=False, **kw):
+    async def edit(self, *, content=None, view=None, **kw):
+        self.events.append(("edit_followup", content, view))
+
+
+class FakeFollowup:
+    def __init__(self, events):
+        self.events, self.views = events, []
+
+    async def send(self, content, *, ephemeral=False, view=None, wait=False, **kw):
         assert len(content) <= 2000
+        # Without wait=True Discord returns nothing, and a view's timeout couldn't remove itself.
+        assert view is None or wait, "a follow-up with a view needs wait=True"
         self.events.append(("followup", content, ephemeral))
+        if view is not None:
+            self.views.append(view)
+        return FakeMessage(self.events) if wait else None
 
 
 class FakeInteraction:
@@ -228,6 +244,115 @@ async def test_release_with_nothing_engaged_says_so(rig):
     it = FakeInteraction()
     await rig.h.release(it)
     assert it.events[0][0] == "send" and "already on" in it.events[0][1] and it.events[0][3] is None
+
+
+# -- the meeting button under /ask --------------------------------------------------------
+@pytest.fixture
+async def tools_rig(chat_cfg, tmp_path):
+    """/ask on the tool loop, its model scripted."""
+    engine_api = FakeEngineApi()
+    tools = ScriptedTools()
+    svc = ChatService(chat_cfg, engine_api.client(), RecordingModel(), ChatLog(tmp_path / "chat.db"), tools=tools)
+    yield SimpleNamespace(api=engine_api, tools=tools, svc=svc, h=Handlers(svc))
+    await svc.api.aclose()
+    svc.log.close()
+
+
+def proposing(rig, reason="TLT broke its 50-day EMA"):
+    rig.tools.turns = [asks(("get_council", {})), replies("TLT broke support; worth a meeting.", True, reason)]
+
+
+async def test_a_proposal_puts_the_button_on_the_answer(tools_rig):
+    proposing(tools_rig)
+    it = FakeInteraction()
+    await tools_rig.h.ask(it, "anything urgent?")
+    assert it.kinds() == ["defer", "followup"] and it.events[1][2] is False        # public
+    assert "**Proposed: a council meeting.**" in it.events[1][1] and "| 1 lookup |" in it.events[1][1]
+    (view,) = it.followup.views
+    assert isinstance(view, MeetingView) and view.why == "TLT broke its 50-day EMA"
+    assert [c.label for c in view.children] == ["Call a meeting", "Not now"]
+    assert view.timeout == 600.0 and view.message is not None and view.origin is None
+    assert tools_rig.api.writes() == []                                           # proposing wrote nothing
+
+
+async def test_the_button_goes_on_the_last_message_of_a_long_answer(tools_rig):
+    it = FakeInteraction()
+    await it.response.defer(thinking=True)
+    await tools_rig.h.send(it, Outcome("\n\n".join("word " * 300 for _ in range(4)), meeting_why="why"))
+    followups = [e for e in it.events if e[0] == "followup"]
+    assert len(followups) >= 2 and len(it.followup.views) == 1
+    # On a first response (nothing deferred) it rides on the response itself.
+    first = FakeInteraction()
+    await tools_rig.h.send(first, Outcome("short", meeting_why="why"))
+    ((kind, _, _, view),) = first.events
+    assert kind == "send" and isinstance(view, MeetingView) and view.origin is first
+
+
+async def test_no_proposal_no_button(tools_rig):
+    tools_rig.tools.turns = [replies("All quiet.")]
+    it = FakeInteraction()
+    await tools_rig.h.ask(it, "anything urgent?")
+    assert it.followup.views == [] and "Proposed" not in it.events[1][1]
+
+
+async def test_only_the_owner_can_press_it(tools_rig):
+    proposing(tools_rig)
+    it = FakeInteraction(FRIEND, "pal")                     # a friend asked: they see the proposal
+    await tools_rig.h.ask(it, "should we meet?")
+    (view,) = it.followup.views
+    for who in (FRIEND, STRANGER_ID):
+        press = FakeInteraction(who, "someone")
+        assert await view.interaction_check(press) is False
+        assert press.events == [("send", MEETING_OWNER_ONLY, True, None)]
+    assert tools_rig.api.writes() == []
+    assert [r["detail"] for r in tools_rig.svc.log.recent(2)] == ["owner only", "owner only"]
+    assert await view.interaction_check(FakeInteraction(OWNER)) is True
+
+
+async def test_the_owners_press_calls_the_meeting(tools_rig):
+    proposing(tools_rig)
+    it = FakeInteraction(FRIEND, "pal")
+    await tools_rig.h.ask(it, "should we meet?")
+    view = it.followup.views[0]
+    press = FakeInteraction(OWNER, "Jeff")
+    await view.children[0].callback(press)
+    assert press.kinds() == ["edit", "followup"] and press.events[0] == ("edit", None, None)  # buttons gone
+    text, ephemeral = press.events[1][1], press.events[1][2]
+    assert text.startswith("**Council meeting called** by Jeff: TLT broke its 50-day EMA") and ephemeral is False
+    ((method, path, headers, body),) = [r for r in tools_rig.api.requests if r[0] == "POST"]
+    assert (path, headers["authorization"], body["why"]) == ("/api/meeting-call", f"Bearer {CHAT_KEY}",
+                                                             "TLT broke its 50-day EMA")
+    assert view.is_finished()                               # stopped: no timeout edit later
+
+
+async def test_a_refused_press_says_codes_reason(tools_rig):
+    proposing(tools_rig)
+    it = FakeInteraction()
+    await tools_rig.h.ask(it, "should we meet?")
+    tools_rig.api.call_state.update(allowed=False, blocked="the market is closed")   # it closed meanwhile
+    press = FakeInteraction()
+    await it.followup.views[0].children[0].callback(press)
+    assert press.events[1][1].startswith("**No meeting**: the market is closed.")
+    assert tools_rig.svc.log.recent(1)[0]["status"] == "refused"
+
+
+async def test_not_now_and_the_timeout_call_nothing(tools_rig):
+    proposing(tools_rig)
+    it = FakeInteraction()
+    await tools_rig.h.ask(it, "should we meet?")
+    view = it.followup.views[0]
+    press = FakeInteraction()
+    await view.children[1].callback(press)
+    assert press.events == [("edit", None, None), ("followup", "No meeting called.", True)]
+    assert tools_rig.svc.log.recent(1)[0]["detail"] == "not now"
+    # Another proposal, left alone until it times out: the buttons go away, and that's all.
+    proposing(tools_rig)
+    it = FakeInteraction()
+    await tools_rig.h.ask(it, "and now?")
+    await it.followup.views[0].on_timeout()
+    assert it.events[-1] == ("edit_followup", None, None)
+    assert tools_rig.svc.log.recent(1)[0]["detail"] == "no answer within 10 minutes"
+    assert tools_rig.api.writes() == []
 
 
 # -- errors --------------------------------------------------------------------------------
