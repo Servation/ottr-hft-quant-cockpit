@@ -7,7 +7,7 @@ rationale: [`../docs/DESIGN.md`](../docs/DESIGN.md).
   - 16 core ETFs: stocks, bonds and cash, commodities, real estate.
   - Up to 6 single stocks: satellites a weekly code screener picks (40% of equity at most).
   - SGOV holds idle cash.
-- **Council:** Claude, GPT (Codex CLI) and Gemini (Antigravity CLI) each give a stance per
+- **Council:** Claude (Claude API), GPT (Codex CLI) and Gemini (Antigravity CLI) each give a stance per
   asset as validated JSON at 10:15 and 15:15 New York time on trading days. A Claude
   chair decides on anonymized reports, and GPT stands in if the chair fails. The chair
   never gives dollar sizes.
@@ -46,7 +46,8 @@ and real environment variables take precedence:
 | `APCA_API_KEY_ID`, `APCA_API_SECRET_KEY` | Alpaca market data (a free paper account; OTTR never sends Alpaca an order) |
 | `ALPHAVANTAGE_API_KEY` | earnings dates (one call a day); without it no single stock can be bought |
 | `SEC_USER_AGENT` | your name and email for the SEC (the screener's company lists and profiles) |
-| `CLAUDE_CODE_OAUTH_TOKEN` | Claude's own long-lived sign-in for the engine (recommended, see [Model sign-in](#model-sign-in)) |
+| `CLAUDE_API_KEY` | Claude for the council, the watcher and `/ask`, through the Claude API (billed per token; see [Model sign-in](#model-sign-in)) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | only with `claude_backend = "cli"`: Claude's own long-lived CLI sign-in for the engine |
 | `DISCORD_WEBHOOK_URL` | where meetings, fills, risk events, screens and alarms are posted (optional) |
 | `OTTR_API_KEY` | 16+ chars; enables `POST /api/kill-switch` (the GETs need no key) |
 | `OTTR_DRY_RUN=1` | kill switch from config: record "would fill" verdicts, never fill |
@@ -58,22 +59,36 @@ estimates.
 
 ### Model sign-in
 
-The models run through their CLIs, signed in under your Windows profile: `claude`,
-`codex` and `agy`. By default the engine shares the claude CLI's interactive sign-in, so
-signing out of Claude Code on this PC signs the engine out too. That happened on
-2026-10-23: the chair failed and a meeting abstained.
+Claude (an analyst, the chair, the desk watcher and `/ask`) runs through the Claude API
+with `CLAUDE_API_KEY`, on the model `council.claude_model` names (`claude-opus-5-5`).
+There's no CLI to sign in or out, and every call logs its token counts in `engine.log`. It
+bills per token to the key's Console account: at two meetings and about 14 watcher reviews
+a trading day, expect roughly $30 to $60 a month. GPT and Gemini run through their CLIs,
+`codex` and `agy`, signed in under your Windows profile.
 
-Give the engine its own Claude sign-in instead. It uses your Claude subscription, so there
-is no per-token bill:
+Set up the key:
+1. In the [Claude Console](https://console.anthropic.com), add credits under Billing, then
+   create a key under API keys.
+2. Put it in `ottr/.env` as `CLAUDE_API_KEY=...`.
+3. Check it: `ottr data --check` ends with a Claude API line (a model lookup, no tokens).
+4. Restart the engine: `ottr service stop`, then `ottr service start`.
+
+If Opus declines a request on policy grounds, the API answers it with a fallback model in
+the same call; the log names the model that answered.
+
+To go back to the `claude` CLI and your subscription, set `claude_backend = "cli"` under
+`[council]` in config.toml. Then give the engine its own CLI sign-in, so signing out of
+Claude Code on this PC doesn't sign the engine out (that happened on 2026-10-23: the chair
+failed and a meeting abstained):
 1. In a terminal, run `claude setup-token`. It opens a browser sign-in and prints a token
    that lasts about a year.
 2. Put it in `ottr/.env` as `CLAUDE_CODE_OAUTH_TOKEN=...`.
-3. Restart the engine: `ottr service stop`, then `ottr service start`.
+3. Restart the engine.
 
-The engine then signs in with the token, whatever your own Claude Code sign-in is doing.
 When a model can't sign in, the watch alarm on Discord says how to fix it:
+- A rejected or missing API key, or no credit left: make a new key (or add credit) and restart.
 - A signed-out CLI: sign it back in from a terminal on this PC.
-- A rejected token (expired or revoked): make a new one and replace it.
+- A rejected CLI token (expired or revoked): make a new one and replace it.
 
 A meeting survives one provider being down:
 - An analyst that fails drops out. Two of the three are enough.
@@ -88,7 +103,7 @@ A meeting survives one provider being down:
 | `ottr run` | yes (holds the lock) | the engine (see [The trading day](#the-trading-day)) |
 | `ottr supervise` | no (its child does) | runs `ottr run` (and `ottr chat` when it's set up), restarts each with backoff |
 | `ottr init [--no-seed]` | yes | opens the book once, then loads the calendar, bars, events feeds and the first screen |
-| `ottr data --check [--symbols A,B]` | no | checks Alpaca, FRED, Alpha Vantage, the SEC and corporate actions with your keys |
+| `ottr data --check [--symbols A,B]` | no | checks Alpaca, FRED, Alpha Vantage, the SEC, corporate actions and the Claude API with your keys |
 | `ottr screen [--top N]` | no | runs the stock screener now and shows what it would change (a few minutes) |
 | `ottr tax [--year Y] [--detail]` | no | tax ESTIMATES: gains by term, wash sales, dividends, estimated tax, after tax |
 | `ottr watch` | no | asks the desk watcher now what it would watch for and whether it would call a meeting (a scratch copy) |
@@ -147,8 +162,8 @@ moving the checkout or recreating the venv.
 At your logon, and every 5 minutes after (a keepalive that does nothing while it's
 already running), the task starts `pythonw -m ottr.cli supervise` as you, with no console
 window:
-- It runs as you because the codex and agy CLIs are signed in under your profile (and
-  claude, unless it has its own token: see [Model sign-in](#model-sign-in)).
+- It runs as you because the codex and agy CLIs are signed in under your profile (Claude
+  uses the API key: see [Model sign-in](#model-sign-in)).
 - It starts at **logon, not boot**: turn on Windows automatic sign-in if the PC has to
   recover from a reboot on its own.
 - Keep the PC awake from 9:00 to 16:30 on trading days.

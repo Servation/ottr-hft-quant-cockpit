@@ -170,13 +170,14 @@ def registry_path() -> Optional[str]:
 
 
 def preflight(analysts: List[str], webhook: Optional[str], path: Optional[str] = None,
-              claude_token: bool = True) -> List[str]:
-    """Warnings about things that would make the scheduled engine misbehave. `claude_token`:
-    the claude CLI has its own long-lived token (CLAUDE_CODE_OAUTH_TOKEN)."""
+              claude_backend: str = "api", claude_key: bool = True, claude_token: bool = True) -> List[str]:
+    """Warnings about things that would make the scheduled engine misbehave. Claude goes
+    through the API (`claude_key`: CLAUDE_API_KEY is set) or the CLI (`claude_token`:
+    the claude CLI has its own long-lived token, CLAUDE_CODE_OAUTH_TOKEN)."""
     from ottr.council.models import CodexCLI
     warns = []
     path = path if path is not None else registry_path()
-    exes = {"claude": "claude", "gemini": "agy"}
+    exes = {"gemini": "agy"} if claude_backend == "api" else {"claude": "claude", "gemini": "agy"}
     for name in analysts:
         if name == "gpt":
             if not CodexCLI._find():
@@ -184,7 +185,10 @@ def preflight(analysts: List[str], webhook: Optional[str], path: Optional[str] =
         elif name in exes and path is not None and not shutil.which(exes[name], path=path):
             warns.append(f"`{exes[name]}` is not on your user/system PATH (registry), so the scheduled "
                          f"engine won't find it: the {name} analyst would drop out")
-    if "claude" in analysts and not claude_token:
+    if "claude" in analysts and claude_backend == "api" and not claude_key:
+        warns.append("CLAUDE_API_KEY is not set (ottr/.env): every Claude call (analyst, chair, watcher, "
+                     "/ask) will fail until it is (see Model sign-in in ottr/README.md)")
+    if "claude" in analysts and claude_backend == "cli" and not claude_token:
         warns.append("CLAUDE_CODE_OAUTH_TOKEN is not set (ottr/.env): the engine shares this PC's Claude Code "
                      "sign-in, so signing out of Claude Code signs the engine out too (`claude setup-token`, "
                      "see ottr/README.md)")

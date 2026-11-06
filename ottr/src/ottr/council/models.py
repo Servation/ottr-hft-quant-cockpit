@@ -1,11 +1,15 @@
 """
-Model adapters: one async `complete(prompt)` per provider, all via their local CLIs.
+Model adapters: one async `complete(prompt)` per provider.
 
-What it does: runs Claude (`claude -p`), GPT (`codex exec`) and Gemini (`agy`) as
-subprocesses, always passing the prompt on stdin, and returns raw text; `ask_json` extracts + validates JSON with one repair
-retry. Why CLIs: they use the user's existing subscriptions (no API keys in this repo)
-and the three share one tiny interface, so tests can swap in a fake. `make_adapter` builds
-one by name; the council passes its own effort, `ottr chat` a lower one so replies are quick.
+What it does: Claude goes through the Claude API (`ClaudeAPI`, the default) or the
+`claude -p` CLI (`ClaudeCLI`, `council.claude_backend = "cli"`); GPT (`codex exec`) and
+Gemini (`agy`) run as CLI subprocesses with the prompt on stdin. Each returns raw text;
+`ask_json` extracts + validates JSON with one repair retry. Why the API for Claude: no CLI
+sign-in to expire or be signed out (the 2026-10-23 abstained meeting), a pinned model id,
+and token counts in the log; it bills per token to the key's Console account. GPT and
+Gemini stay on their CLIs and the user's subscriptions. All adapters share one tiny
+interface, so tests swap in a fake. `make_adapter` builds one by name; the council passes
+its own effort, `ottr chat` a lower one so replies are quick.
 """
 
 import asyncio
@@ -15,7 +19,9 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Tuple
+
+import anthropic
 
 from ottr.config import Council as CouncilConfig
 from ottr.proc import NO_WINDOW, kill_tree
@@ -134,6 +140,124 @@ class ClaudeCLI(ModelAdapter):
         return _normalize(out)
 
 
+# OTTR's Claude API key, from ottr/.env (loaded into the environment at start-up) and handed
+# to the SDK explicitly. Not the SDK's default ANTHROPIC_API_KEY: every model CLI the engine
+# runs inherits its environment, and the claude CLI bills a key under that name instead of
+# the subscription, so going back to claude_backend = "cli" would quietly keep paying per
+# token. A key under that name elsewhere on this PC is ignored for the same reason.
+API_KEY_ENV = "CLAUDE_API_KEY"
+
+
+def _sdk() -> "anthropic.AsyncAnthropic":
+    return anthropic.AsyncAnthropic(api_key=os.environ.get(API_KEY_ENV))
+# On a policy refusal the API re-runs the same request, inside the same call, on a model it
+# picks by the refusal's category, so a false positive costs a meeting nothing.
+FALLBACK_BETA = "server-side-fallback-2026-07-01"
+# Room for the model's thinking plus the JSON reply. Streaming keeps a long answer from
+# tripping the SDK's guard against non-streaming requests that may run past 10 minutes.
+API_MAX_TOKENS = 32000
+KEY_FIX = (f"make a new key in the Claude Console (console.anthropic.com > API keys), put it in "
+           f"ottr/.env as {API_KEY_ENV}=..., then restart the engine")
+
+
+def api_message(e: Exception) -> str:
+    """A Claude API failure in a line an alarm can carry: what went wrong and the fix.
+    Never the key itself: the SDK's errors don't contain it, and we only use status codes
+    and the API's own message."""
+    if isinstance(e, anthropic.AuthenticationError):
+        return f"the {API_KEY_ENV} in ottr/.env was rejected (revoked, expired or mistyped): {KEY_FIX}"
+    if isinstance(e, anthropic.PermissionDeniedError):
+        return "HTTP 403: the API key may not use this model or workspace"
+    if isinstance(e, anthropic.NotFoundError):
+        return "HTTP 404: model not found (check council.claude_model in config.toml)"
+    if isinstance(e, anthropic.RateLimitError):
+        return "HTTP 429: rate limited, still after the SDK's retries"
+    if isinstance(e, anthropic.APIStatusError):
+        # The API's own words ("Overloaded"), not the SDK's "Error code: 529 - {...}" wrapper.
+        body = e.body if isinstance(e.body, dict) else {}
+        err = body.get("error") if isinstance(body.get("error"), dict) else body
+        text = " ".join(str(err.get("message") or e.message).split())[:300]
+        if "credit balance" in text.lower():
+            text += " (add credits in the Claude Console under Billing)"
+        return f"HTTP {e.status_code}: {text}"
+    if isinstance(e, anthropic.APITimeoutError):
+        return "the request timed out"
+    if isinstance(e, anthropic.APIConnectionError):
+        return "can't reach the API (network or DNS)"
+    return type(e).__name__
+
+
+class ClaudeAPI(ModelAdapter):
+    """Claude through the Messages API, streamed. Thinking is always on for Opus 5.5;
+    `effort` sets how hard it thinks (its default would be medium, so it is always sent)."""
+
+    name = "claude"
+
+    def __init__(self, model: str = "claude-opus-5-5", effort: str = "high",
+                 client: Optional[Callable[[], Any]] = None) -> None:
+        # `client` builds the AsyncAnthropic for one call; tests hand in one on a mock
+        # transport. A fresh client per call: calls are minutes apart and each `async with`
+        # closes its connections, so nothing outlives the event loop it was made on.
+        self.model, self.effort = model, effort
+        self._client = client
+
+    def locate(self) -> Optional[str]:
+        return f"the Claude API ({API_KEY_ENV} set)" if os.environ.get(API_KEY_ENV) else None
+
+    async def complete(self, prompt: str, timeout: float = 240.0) -> str:
+        check_prompt(self.name, prompt)
+        if self._client is None and not os.environ.get(API_KEY_ENV):
+            # Checked here: without credentials the SDK raises a bare TypeError mid-request.
+            raise ModelError(f"claude api: {API_KEY_ENV} is not set: {KEY_FIX}")
+        try:
+            # The SDK retries connection errors, 429 and 5xx itself; the outer timeout caps
+            # the whole call, retries included, like the CLIs' timeout does.
+            msg = await asyncio.wait_for(self._ask(prompt, timeout), timeout)
+        except asyncio.TimeoutError:
+            raise ModelError(f"claude api: timed out after {timeout:.0f}s") from None
+        except anthropic.AnthropicError as e:
+            raise ModelError(f"claude api: {api_message(e)}") from None
+        u = msg.usage
+        logger.info("claude api %s (effort %s): %s input, %s output tokens%s", msg.model, self.effort,
+                    u.input_tokens, u.output_tokens,
+                    f" (answered by the fallback; {self.model} declined)" if msg.model != self.model else "")
+        if msg.stop_reason == "refusal":
+            why = getattr(getattr(msg, "stop_details", None), "category", None)
+            raise ModelError(f"claude api: declined to answer (refusal{f': {why}' if why else ''})")
+        if msg.stop_reason == "max_tokens":
+            raise ModelError(f"claude api: the reply was cut off at {API_MAX_TOKENS} tokens")
+        text = "".join(b.text for b in msg.content if b.type == "text")
+        if not text.strip():
+            raise ModelError(f"claude api: empty reply (stop reason {msg.stop_reason})")
+        return _normalize(text)
+
+    async def _ask(self, prompt: str, timeout: float) -> Any:
+        async with (self._client or _sdk)() as client:
+            async with client.beta.messages.stream(
+                model=self.model,
+                max_tokens=API_MAX_TOKENS,
+                output_config={"effort": self.effort},
+                messages=[{"role": "user", "content": prompt}],
+                betas=[FALLBACK_BETA],
+                fallbacks="default",
+                timeout=timeout,
+            ) as stream:
+                return await stream.get_final_message()
+
+
+async def check_claude_api(model: str, client: Optional[Callable[[], Any]] = None) -> Tuple[bool, str]:
+    """Whether the key in the environment may use `model`: a Models API lookup, which
+    spends no tokens. For `ottr data --check`."""
+    if client is None and not os.environ.get(API_KEY_ENV):
+        return False, f"{API_KEY_ENV} is not set: {KEY_FIX}"
+    try:
+        async with (client or _sdk)() as c:
+            m = await c.models.retrieve(model, timeout=20.0)
+    except anthropic.AnthropicError as e:
+        return False, api_message(e)
+    return True, f"key accepted; {m.id} ({m.display_name}) is available"
+
+
 class CodexCLI(ModelAdapter):
     name = "gpt"
 
@@ -233,7 +357,8 @@ def make_adapter(name: str, council: CouncilConfig, effort: Optional[str] = None
     """The adapter for provider `name` ("claude" | "gpt" | "gemini") with the council's model
     choices. `effort` overrides the council's reasoning effort (chat runs lower)."""
     if name == "claude":
-        return ClaudeCLI(model=council.claude_model, effort=effort or council.reasoning_effort)
+        cls = ClaudeAPI if council.claude_backend == "api" else ClaudeCLI
+        return cls(model=council.claude_model, effort=effort or council.reasoning_effort)
     if name == "gpt":
         return CodexCLI(effort=effort or council.reasoning_effort)
     if name == "gemini":

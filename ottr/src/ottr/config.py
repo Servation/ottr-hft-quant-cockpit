@@ -53,7 +53,8 @@ class Council:
     chair_fallback: str = "gpt"            # chairs a meeting the chair fails ("" = abstain instead)
     min_analysts: int = 2
     timeout_sec: float = 300.0
-    claude_model: str = "opus"
+    claude_backend: str = "api"            # api (CLAUDE_API_KEY, per token) | cli (`claude -p`, subscription)
+    claude_model: str = "claude-opus-5-5"  # a full model id: the API takes no aliases such as "opus"
     gemini_model: str = "gemini-3.8-flash-high"
     reasoning_effort: str = "high"
 
@@ -265,6 +266,13 @@ def _validate_shared(cfg) -> None:
     if fb not in ("", "claude", "gpt", "gemini") or fb == cfg.council.chair:
         raise ConfigError(f"council.chair_fallback must be \"\" or claude, gpt or gemini other than "
                           f"the chair, got {fb!r}")
+    c = cfg.council
+    if c.claude_backend not in ("api", "cli"):
+        raise ConfigError(f"council.claude_backend must be api or cli, got {c.claude_backend!r}")
+    if c.claude_backend == "api" and not c.claude_model.startswith("claude-"):
+        # Caught here, not as a 404 at the first meeting.
+        raise ConfigError(f"council.claude_model must be a full model id such as claude-opus-5-5 for the "
+                          f"API (aliases like \"opus\" only work with the CLI), got {c.claude_model!r}")
 
 
 REQUIRED_FEES = ("sec", "taf", "cat")   # the pass-through fees every US equity fill can owe

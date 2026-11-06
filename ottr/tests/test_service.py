@@ -166,7 +166,7 @@ def test_task_name_is_validated_before_it_reaches_a_shell():
 def test_preflight_warns_about_missing_clis_and_webhook(tmp_path, monkeypatch):
     from ottr.council import models
     monkeypatch.setattr(models.CodexCLI, "_find", staticmethod(lambda: None))
-    warns = service.preflight(["claude", "gpt", "gemini"], webhook=None, path=str(tmp_path))
+    warns = service.preflight(["claude", "gpt", "gemini"], webhook=None, path=str(tmp_path), claude_backend="cli")
     assert any("`claude` is not on your user/system PATH" in w for w in warns)
     assert any("`agy`" in w for w in warns)
     assert any("codex CLI not found" in w for w in warns)
@@ -175,11 +175,25 @@ def test_preflight_warns_about_missing_clis_and_webhook(tmp_path, monkeypatch):
         fake_executable(tmp_path, name)
     monkeypatch.setattr(models.CodexCLI, "_find", staticmethod(lambda: "codex.exe"))
     monkeypatch.setenv("PATHEXT", ".EXE")
-    assert service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path)) == []
+    assert service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path),
+                             claude_backend="cli") == []
     (warn,) = service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path),
-                                claude_token=False)
+                                claude_backend="cli", claude_token=False)
     assert warn.startswith("CLAUDE_CODE_OAUTH_TOKEN is not set") and "claude setup-token" in warn
-    assert service.preflight(["gpt", "gemini"], webhook="https://x", path=str(tmp_path), claude_token=False) == []
+    assert service.preflight(["gpt", "gemini"], webhook="https://x", path=str(tmp_path), claude_backend="cli",
+                             claude_token=False) == []
+
+
+def test_preflight_on_the_claude_api_wants_a_key_not_the_cli(tmp_path, monkeypatch):
+    from ottr.council import models
+    monkeypatch.setattr(models.CodexCLI, "_find", staticmethod(lambda: "codex.exe"))
+    monkeypatch.setenv("PATHEXT", ".EXE")
+    fake_executable(tmp_path, "agy")   # no claude CLI on the PATH: the API doesn't need one
+    assert service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path),
+                             claude_backend="api", claude_key=True, claude_token=False) == []
+    (warn,) = service.preflight(["claude", "gpt", "gemini"], webhook="https://x", path=str(tmp_path),
+                                claude_backend="api", claude_key=False)
+    assert warn.startswith("CLAUDE_API_KEY is not set (ottr/.env)")
 
 
 def fake_executable(folder, name):
