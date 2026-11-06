@@ -1,17 +1,24 @@
 """
 Notification tests: alarm reconciliation (raise, resolve, remind, flap damping), the
-event and alarm token buckets, keyed coalescing, ordered delivery, and the Discord
-transport's 429 handling without leaking the webhook token into logs.
+event and alarm token buckets, keyed coalescing, ordered delivery, holding posts through
+a Discord outage (retry in order, the outage header, the "sent late" note, a bounded
+shutdown), and the Discord transport's answers (delivered, refused, unreachable) without
+leaking the webhook token into logs.
 """
 
+import asyncio
+import json
 import logging
+import time
 
 import httpx
 
 from ottr.config import Alerts as Limits
 from ottr.engine.progress import MeetingProgress
 from ottr.health import Alarm
-from ottr.notify import Alerts, DiscordWebhook, TokenBucket, format_event
+from ottr.notify import LIMIT, Alerts, DiscordWebhook, TokenBucket, format_event
+
+FAST_RETRY = (0.01, 0.02)
 
 
 class Clock:
@@ -25,7 +32,7 @@ class Clock:
 def drained(alerts):
     out = []
     while not alerts.queue.empty():
-        out.append(alerts.queue.get_nowait())
+        out.append(alerts.queue.get_nowait().text)
         alerts.queue.task_done()
     return out
 
@@ -145,18 +152,98 @@ def test_token_bucket_refills():
     assert b.take(1.0) and not b.take(1.0)
 
 
-async def test_sender_delivers_in_order_and_counts_failures():
+async def test_sender_delivers_in_order_and_drops_a_refused_post():
     got = []
 
     async def send(text):
         got.append(text)
-        return text != "bad"
+        return text != "bad"  # False: Discord refused it for good, so it isn't retried
 
-    a = Alerts(send, Limits())
+    a = Alerts(send, Limits(), retry_sec=FAST_RETRY)
     async with a.running():
         for t in ("one", "bad", "three"):
             a._enqueue(t)
     assert got == ["one", "bad", "three"] and a.posted == 2 and a.failed == 1
+
+
+async def test_an_unreachable_post_is_retried_and_nothing_overtakes_it():
+    got, misses = [], {"two": 2}
+
+    async def send(text):
+        got.append(text)
+        if misses.get(text):
+            misses[text] -= 1
+            return None  # Discord not reached
+        return True
+
+    a = Alerts(send, Limits(), retry_sec=FAST_RETRY)
+    async with a.running():
+        for t in ("one", "two", "three"):
+            a._enqueue(t)
+    # A short blip: no header, no "sent late" note, nothing lost or reordered.
+    assert got == ["one", "two", "two", "two", "three"] and a.posted == 3 and a.failed == 0
+
+
+async def test_an_alarm_raised_while_discord_is_down_still_reaches_it():
+    # 2026-11-06: the raises posted during a DNS outage were dropped; only "Resolved" landed.
+    got, down = [], [True]
+
+    async def send(text):
+        if down[0]:
+            return None
+        got.append(text)
+        return True
+
+    a = Alerts(send, Limits(), retry_sec=FAST_RETRY)
+    async with a.running():
+        a.sync_alarms({A.key: A})
+        await asyncio.sleep(0.05)
+        down[0] = False
+        a.sync_alarms({})
+    assert [m[:10] for m in got] == ["**ALARM** ", "**Resolved"]
+
+
+async def test_a_long_outage_is_announced_and_held_posts_say_when_they_happened():
+    clock, got, down = Clock(), [], [True]
+    t0 = int(clock.t)
+
+    async def send(text):
+        if down[0]:
+            return None
+        got.append(text)
+        return True
+
+    a = Alerts(send, Limits(), clock=clock, retry_sec=FAST_RETRY)
+    async with a.running():
+        a._enqueue("**ALARM** (critical): market task failing")
+        a._enqueue("x" * 5000)
+        await asyncio.sleep(0.05)  # the first post fails and waits at the head of the queue
+        clock.t += 3 * 3600
+        a._enqueue("**Resolved**: market task failing")
+        down[0] = False
+    assert got[0] == (f"**Discord was unreachable** for 3.0h (from <t:{t0}:f>). "
+                      "3 held-back notification(s) follow.")
+    assert got[1] == f"**ALARM** (critical): market task failing\n(sent late: this happened <t:{t0}:f>)"
+    # A long post is clipped before the note, so Discord's limit can't cut the note off.
+    assert len(got[2]) == LIMIT and got[2].endswith(f"(sent late: this happened <t:{t0}:f>)")
+    assert got[3] == "**Resolved**: market task failing"  # it happened just now: no note
+    assert a.posted == 4 and a.failed == 0
+
+
+async def test_shutdown_while_discord_is_down_is_bounded(caplog):
+    caplog.set_level(logging.WARNING)
+
+    async def send(text):
+        return None
+
+    a = Alerts(send, Limits(), retry_sec=(5.0, 60.0))
+    t = time.monotonic()
+    async with a.running(flush_timeout=0.2):
+        a._enqueue("one")
+        a._enqueue("two")
+        await asyncio.sleep(0.05)  # "one" is waiting out its backoff
+    assert time.monotonic() - t < 2.0
+    assert "2 notification(s) not delivered before shutdown" in caplog.text
 
 
 def test_every_event_kind_formats():
@@ -207,15 +294,62 @@ async def test_webhook_retries_once_on_429():
 
 async def test_webhook_failure_never_logs_the_token(caplog):
     caplog.set_level(logging.WARNING)
-    assert not await DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(
-        lambda r: httpx.Response(404)))("hi")
+    assert await DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(
+        lambda r: httpx.Response(404)))("hi") is False
 
     def boom(req):
         raise httpx.ConnectError(f"cannot connect to {req.url}")
 
-    assert not await DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(boom))("hi")
+    assert await DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(boom))("hi") is None
     assert "HTTP 404" in caplog.text and "ConnectError" in caplog.text
     assert "SECRET-TOKEN" not in caplog.text
+
+
+async def test_webhook_says_whether_a_failed_post_is_worth_retrying():
+    def raises(exc):
+        def handler(req):
+            raise exc("boom")
+        return handler
+
+    def status(code, **kw):
+        return lambda req: httpx.Response(code, **kw)
+
+    cases = [
+        (status(204), True),
+        (status(400), False),  # a malformed post: refused for good
+        (status(404), False),  # the webhook was deleted
+        (status(401), False),
+        (status(500), None),   # Discord's side: try again
+        (status(503), None),
+        (status(429, json={"retry_after": 0.01}), None),  # still limited after the one wait
+        (status(429, json={"retry_after": 600}), None),   # too long to wait inline
+        (raises(httpx.ConnectError), None),               # DNS down, the 2026-11-06 outage
+        (raises(httpx.ReadTimeout), None),
+        (raises(httpx.RemoteProtocolError), None),
+        (raises(httpx.UnsupportedProtocol), False),       # a bad URL: no retry can fix it
+    ]
+    for handler, want in cases:
+        got = await DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(handler))("hi")
+        assert got is want, (handler, got)
+
+
+async def test_held_posts_reach_a_real_webhook_after_an_outage():
+    # The real transport end to end: a webhook that fails to connect, then answers.
+    seen, up = [], [False]
+
+    def handler(req):
+        if not up[0]:
+            raise httpx.ConnectError("getaddrinfo failed")
+        seen.append(json.loads(req.read())["content"])
+        return httpx.Response(204)
+
+    hook = DiscordWebhook(SECRET_URL, transport=httpx.MockTransport(handler))
+    a = Alerts(hook, Limits(), retry_sec=FAST_RETRY)
+    async with a.running():
+        a.sync_alarms({A.key: A})
+        await asyncio.sleep(0.05)
+        up[0] = True
+    assert seen == [f"**ALARM** (critical): {A.message}"] and a.posted == 1
 
 
 async def test_webhook_truncates_to_discord_limit():
