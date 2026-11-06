@@ -268,8 +268,10 @@ stays exact and a corrected rule applies to all history at once.
 
   An alarm needs 5 minutes clear to resolve.
 - **Notifications.** Discord webhook posts are queued and rate-limited, with alarms on a
-  separate budget. Each council meeting gets one live message; screens and corporate
-  actions get a digest.
+  separate budget. A post Discord can't be reached for waits at the head of the queue and
+  is retried with backoff, so an outage delays posts instead of losing them; only a post
+  Discord refuses (a deleted webhook) is dropped. Each council meeting gets one live
+  message; screens and corporate actions get a digest.
 - **Kill switch.** Set with `OTTR_DRY_RUN=1`, in config, or via `POST /api/kill-switch`
   (and `/kill` in chat). It's persisted, and the API can't release a dry run that config
   imposes.

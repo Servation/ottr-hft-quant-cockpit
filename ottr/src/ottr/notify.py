@@ -3,15 +3,29 @@ Notifications: Discord webhook posts for events (meetings, fills, risk) and alar
 rate-limited and non-blocking.
 
 What it does: `Alerts` formats each event, passes it through a token bucket and queues
-it; one background sender posts to DISCORD_WEBHOOK_URL. Alarms are level-triggered: the
-watchdog hands over the full set of active alarms every tick and `sync_alarms` reconciles
-what the user has been told with the truth, so a lost post is retried and a flapping
-alarm posts at most once per `alarm_repeat_sec` (with a flap count) instead of every tick.
+it; one background sender posts to DISCORD_WEBHOOK_URL, in order. Alarms are
+level-triggered: the watchdog hands over the full set of active alarms every tick and
+`sync_alarms` reconciles what the user has been told with the truth, so a raise the
+budget defers (or a full queue refuses) is posted on a later tick while the alarm lasts,
+and a flapping alarm posts at most once per `alarm_repeat_sec` (with a flap count)
+instead of every tick.
+
+Outages: a post Discord can't be reached for (the host's network down, a timeout, a 5xx
+or a 429 too long to wait out) stays at the head of the queue and is retried with backoff
+until it lands, so an outage delays notifications instead of losing them. After one
+longer than LATE_SEC a header says how long Discord was unreachable, and each held post
+says when it happened. Only a post Discord refuses for good (another 4xx: a deleted
+webhook) is dropped, and so is an event that finds the queue (QUEUE_MAX) full. Held posts
+live in memory: a restart loses them, and the engine re-raises the alarms that persist.
+On 2026-11-06 a 5h DNS outage lost every alarm raised during it, because a failed post
+used to be dropped.
 
 Live messages (`Alerts.live`): one message that is posted once and then edited in place as
 its subject changes, which is how a council meeting is shown while it runs. The post costs
 one event token; the edits run on their own sender, coalesced to the newest text and
-spaced `live_edit_sec` apart, so they never queue behind (or ahead of) an alarm.
+spaced `live_edit_sec` apart, so they never queue behind (or ahead of) an alarm. They are
+not held through an outage: a view that can't be posted is skipped, and the meeting's
+summary post goes through the queue like any other.
 
 Why a webhook even though `ottr chat` runs a bot: alerts must reach Discord when the bot
 is down, misconfigured or crash-looping, so the engine and supervisor post through a
@@ -38,6 +52,8 @@ logger = logging.getLogger(__name__)
 LIMIT = 1900          # Discord allows 2000 chars per message
 QUEUE_MAX = 200
 MAX_RETRY_AFTER = 30.0
+RETRY_SEC = (5.0, 60.0)  # first wait and cap of the backoff while Discord can't be reached
+LATE_SEC = 120.0         # a post held longer than this says when it happened
 # Supervised processes: "<name>_crash", "<name>_stable" and "<name>_gave_up" events.
 PROCESS_LABELS = {"engine": "Engine", "chat": "Chat bot"}
 LIVE_MAX = 3            # live messages tracked at once (meetings run one at a time)
@@ -46,7 +62,13 @@ LIVE_IDLE_SEC = 3600.0  # a live message nobody updates for this long is let go
 LIVE_GIVE_UP = 3        # consecutive failed edits before a live message is let go
 EM_DASH = "\u2014"
 
-Send = Callable[[str], Awaitable[bool]]
+# What a send returns: True when Discord took the post, False when it refused it for good
+# (retrying can't help), None when it couldn't be reached, so the sender tries again.
+Send = Callable[[str], Awaitable[Optional[bool]]]
+
+# Transport errors that say Discord wasn't reached (or didn't answer) this time. Others,
+# such as an unsupported URL scheme, are configuration problems a retry can't fix.
+_UNREACHABLE = (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError, httpx.ProxyError)
 
 
 class LiveTransport(Protocol):
@@ -251,22 +273,25 @@ def format_event(kind: str, d: dict) -> str:
 class DiscordWebhook:
     """Post to (and edit its own messages on) a Discord webhook. Never raises.
 
-    Calling it posts and returns whether the post landed. `create` posts with ?wait=true
-    and returns the new message's id; `edit` PATCHes that message
+    Calling it posts and returns a `Send` result: True when the post landed, False when
+    Discord refused it (a 4xx other than 429), None when Discord couldn't be reached (a
+    network error, a timeout, a 5xx, or a 429 too long to wait out here). `create` posts
+    with ?wait=true and returns the new message's id; `edit` PATCHes that message
     (/webhooks/{id}/{token}/messages/{message_id}). Query parameters on the URL (a
-    thread_id) are kept for both. Errors are logged by status code only: an httpx error
-    message embeds the URL, and the webhook URL contains its secret token.
+    thread_id) are kept for both. Errors are logged by status code or exception type only:
+    an httpx error message embeds the URL, and the webhook URL contains its secret token.
     """
 
     def __init__(self, url: str, transport: Optional[httpx.AsyncBaseTransport] = None,
                  timeout: float = 10.0) -> None:
         self.url, self.transport, self.timeout = url, transport, timeout
 
-    async def __call__(self, content: str) -> bool:
-        return await self._send("post", "POST", httpx.URL(self.url), content) is not None
+    async def __call__(self, content: str) -> Optional[bool]:
+        r, retry = await self._send("post", "POST", httpx.URL(self.url), content)
+        return True if r is not None else (None if retry else False)
 
     async def create(self, content: str) -> Optional[str]:
-        r = await self._send("post", "POST", httpx.URL(self.url).copy_merge_params({"wait": "true"}), content)
+        r, _ = await self._send("post", "POST", httpx.URL(self.url).copy_merge_params({"wait": "true"}), content)
         if r is None:
             return None
         try:
@@ -283,9 +308,12 @@ class DiscordWebhook:
             return False
         url = httpx.URL(self.url)
         url = url.copy_with(path=url.path.rstrip("/") + f"/messages/{message_id}")
-        return await self._send("edit", "PATCH", url, content) is not None
+        r, _ = await self._send("edit", "PATCH", url, content)
+        return r is not None
 
-    async def _send(self, what: str, method: str, url: httpx.URL, content: str) -> Optional[httpx.Response]:
+    async def _send(self, what: str, method: str, url: httpx.URL,
+                    content: str) -> Tuple[Optional[httpx.Response], bool]:
+        """(the response, False) when Discord took it, else (None, whether a retry can help)."""
         payload = {"content": content[:LIMIT], "allowed_mentions": {"parse": []}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as c:
@@ -297,12 +325,15 @@ class DiscordWebhook:
                             await asyncio.sleep(wait)
                             continue
                     if r.is_success:
-                        return r
+                        return r, False
                     logger.warning("discord webhook %s returned HTTP %s", what, r.status_code)
-                    return None
-        except httpx.HTTPError as e:
+                    return None, r.status_code == 429 or r.status_code >= 500
+        except _UNREACHABLE as e:
             logger.warning("discord webhook %s unreachable (%s)", what, type(e).__name__)
-        return None
+            return None, True
+        except httpx.HTTPError as e:
+            logger.warning("discord webhook %s failed (%s)", what, type(e).__name__)
+        return None, False
 
 
 def _retry_after(r: httpx.Response) -> Optional[float]:
@@ -349,6 +380,13 @@ class _Told:
     message: str = ""
 
 
+@dataclass(frozen=True)
+class _Post:
+    """One queued notification and when it was queued, for the "sent late" note."""
+    text: str
+    ts: float
+
+
 @dataclass
 class _Live:
     """One live message: the newest text wanted, and what Discord shows now."""
@@ -369,9 +407,13 @@ class Alerts:
     """
 
     def __init__(self, send: Optional[Send], limits: AlertLimits = AlertLimits(),
-                 clock: Callable[[], float] = time.time, live: Optional[LiveTransport] = None) -> None:
+                 clock: Callable[[], float] = time.time, live: Optional[LiveTransport] = None,
+                 retry_sec: Tuple[float, float] = RETRY_SEC) -> None:
         self.send, self.limits, self.clock = send, limits, clock
         self.live_transport = live
+        self.retry_sec = retry_sec
+        self._down_since: Optional[float] = None  # first failed post of an ongoing outage
+        self._head: Optional[_Post] = None        # the post being delivered (or retried)
         now = clock()
         self.events_bucket = TokenBucket(limits.burst, limits.per_hour, now)
         self.alarm_bucket = TokenBucket(limits.burst, limits.per_hour, now)
@@ -537,33 +579,72 @@ class Alerts:
     # -- delivery --------------------------------------------------------------------------
     def _enqueue(self, text: str) -> bool:
         try:
-            self.queue.put_nowait(text)
+            self.queue.put_nowait(_Post(text, self.clock()))
             return True
         except asyncio.QueueFull:
             logger.warning("notification queue full; dropping: %s", text[:120])
             return False
 
     async def run(self) -> None:
-        """Sender loop: one post at a time, in order."""
+        """Sender loop: one post at a time, in order (see `_deliver`)."""
         while True:
-            text = await self.queue.get()
+            post = await self.queue.get()
+            self._head = post
             try:
-                ok = await self.send(text) if self.send else False
-                if ok:
-                    self.posted += 1
-                else:
-                    self.failed += 1
+                await self._deliver(post)
             except Exception:  # the transport should never raise; keep the loop alive anyway
                 self.failed += 1
                 logger.warning("notification send crashed", exc_info=True)
             finally:
+                self._head = None
                 self.queue.task_done()
+
+    async def _deliver(self, post: _Post) -> None:
+        """Post one notification. While Discord can't be reached it stays at the head of the
+        queue and is retried with backoff (callers only enqueue, so nothing waits on it), and
+        nothing queued behind it overtakes it. Once the outage has lasted LATE_SEC, the first
+        post to land is a header saying so, then the held posts follow."""
+        if self.send is None:
+            self.failed += 1
+            return
+        delay, cap = self.retry_sec
+        while True:
+            now, since = self.clock(), self._down_since
+            header = since is not None and now - since >= LATE_SEC
+            ok = await self.send(self._outage_header(since, now) if header else self._late(post, now))
+            if ok is None:
+                # A timeout can hide a post that did land, so the retry may repeat it: a
+                # duplicate alarm is better than a lost one.
+                if self._down_since is None:
+                    self._down_since = now
+                await asyncio.sleep(delay)
+                delay = min(cap, delay * 2)
+                continue
+            if self._down_since is not None:
+                logger.info("discord webhook answered again after %s", fmt_age(now - self._down_since))
+                self._down_since = None
+            self.posted, self.failed = self.posted + bool(ok), self.failed + (not ok)
+            if not header:
+                return  # posted, or refused for good (a retry can't help): dropped
+
+    def _outage_header(self, since: float, now: float) -> str:
+        n = self.queue.qsize() + 1  # the post at the head and the ones held behind it
+        return (f"**Discord was unreachable** for {fmt_age(now - since)} (from <t:{int(since)}:f>). "
+                f"{n} held-back notification(s) follow.")
+
+    @staticmethod
+    def _late(post: _Post, now: float) -> str:
+        if now - post.ts < LATE_SEC:
+            return post.text
+        note = f"\n(sent late: this happened <t:{int(post.ts)}:f>)"  # Discord shows it in local time
+        return post.text[:LIMIT - len(note)] + note  # clipped here, so the webhook's cut can't drop it
 
     async def flush(self, timeout: float = 15.0) -> None:
         try:
             await asyncio.wait_for(self.queue.join(), timeout=timeout)
         except asyncio.TimeoutError:
-            logger.warning("%d notification(s) not delivered before shutdown", self.queue.qsize())
+            n = self.queue.qsize() + (self._head is not None)
+            logger.warning("%d notification(s) not delivered before shutdown", n)
 
     async def _flush_live(self, timeout: float) -> None:
         # Let final states (a meeting that just ended or was interrupted) reach Discord; a

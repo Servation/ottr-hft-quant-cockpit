@@ -198,6 +198,11 @@ and resolve, a reminder every 6h while an alarm stays active, and at most one po
 alarm per 30 min while it flaps. Events and alarms have separate budgets, so a burst of
 fills can't crowd out an alarm. Every raise and clear is also in the audit log.
 
+When Discord can't be reached (this PC's network is down, or Discord is), posts wait in
+order and go out once it answers. After an outage of more than 2 minutes, a post first
+says how long Discord was unreachable, and each held post says when it happened. Posts
+still waiting are lost on a restart; the engine re-raises the alarms that persist.
+
 The engine can't report its own death. Restarts are covered by the supervisor, and by
 the next start (it posts that the previous run didn't shut down cleanly). A machine that
 is simply off shows up as exit code 3 from `ottr status`.
