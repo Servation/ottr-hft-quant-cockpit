@@ -500,9 +500,10 @@ class Engine:
         mid, ts, status, raw = row
         rec, now = json.loads(raw), snap.as_of
         d = rec.get("decision") or {}
-        called = (rec.get("called") or {}).get("why")
+        called = rec.get("called") or {}
+        how = "a make-up" if called.get("by") == watcher.MAKEUP else "called"
         lines = [f"Last meeting {mid} at {_et(ts)} ET ({(now - ts) / 60:.0f} minutes ago), {status}"
-                 + (f"; it was called: {called}" if called else "") + "."]
+                 + (f"; it was {how}: {called['why']}" if called.get("why") else "") + "."]
         if d.get("summary"):
             lines.append(f"Chair: {d['summary']}")
         for key, st, verdict in self.store.conn.execute(
@@ -564,9 +565,10 @@ class Engine:
             self.request_meeting("watcher", reply["why"])
         return out
 
-    def request_meeting(self, by: str, why: str) -> bool:
-        """Ask the council loop for a meeting now. Refused (and said so) when code's limits
-        don't allow one; True when it was queued."""
+    def request_meeting(self, by: str, why: str, slot: Optional[float] = None) -> bool:
+        """Ask the council loop for a meeting now: for the watcher, a met condition, or a
+        make-up (`by` watcher.MAKEUP) for the scheduled meeting at `slot`. Refused (and said
+        so) when code's limits don't allow one; True when it was queued."""
         now = self.clock.time()
         st = self.watch_state()
         blocked = self._call_blocked(st, now)
@@ -575,7 +577,7 @@ class Engine:
             self.store.audit("meeting_call_refused", by=by, why=why, blocked=blocked)
             self.alerts.event("meeting_call_refused", {"by": by, "why": why, "blocked": blocked})
             return False
-        st.pending = {"ts": now, "by": by, "why": why}
+        st.pending = {"ts": now, "by": by, "why": why, **({"slot": slot} if slot is not None else {})}
         self._save_watch(st)
         self.store.audit("meeting_called", by=by, why=why)
         self.alerts.event("meeting_called", {"by": by, "why": why})
@@ -703,7 +705,7 @@ class Engine:
             self._publish(stale)
         self._awaiting_orders.clear()
         prog = MeetingProgress(new_meeting_id(), list(self.council.analysts), self.council.chair.name)
-        prog.called = (called or {}).get("why")
+        prog.called, prog.called_by = (called or {}).get("why"), (called or {}).get("by")
         self.meeting_started, self.progress = prog.started, prog
         self._publish(prog)
         try:
@@ -770,7 +772,11 @@ class Engine:
         if all(v.price is None for v in snap.assets.values()):
             raise MarketDataError("no price for any asset")
         context = snap.packet() + "\n\n" + self.book_context(snap)
-        if called:
+        if called and called.get("by") == watcher.MAKEUP:
+            context = (f"WHY THIS MEETING: a make-up, called by code at {_et(snap.as_of, '%H:%M')} ET: "
+                       f"{called['why']}. It stands in for that scheduled meeting: decide as you would have "
+                       "then, on what you see now.\n\n" + context)
+        elif called:
             context = (f"WHY THIS MEETING: called at {_et(snap.as_of, '%H:%M')} ET, outside the schedule, by the "
                        f"desk watcher: {called['why']} Weigh whether that changes anything; doing nothing is "
                        "a fine answer.\n\n" + context)
@@ -780,7 +786,8 @@ class Engine:
                                      universe=sorted(traded), blocked=self.buy_blocks(snap.as_of))
         rec["context"] = context
         if called:
-            rec["called"] = {"by": called.get("by"), "why": called.get("why")}
+            rec["called"] = {"by": called.get("by"), "why": called.get("why"),
+                             **({"slot": called["slot"]} if called.get("slot") is not None else {})}
         with self.store.tx() as c:
             c.execute("INSERT INTO meetings(id,ts,status,packet,record) VALUES(?,?,?,?,?)",
                       (rec["id"], snap.as_of, rec["status"], context, dumps(rec)))
@@ -806,7 +813,8 @@ class Engine:
         self.alerts.event("meeting", {"id": rec["id"], "status": rec["status"],
                                       "summary": (rec["decision"] or {}).get("summary", ""),
                                       "trades": rec["trades"], "dropped": rec["dropped"],
-                                      "called": (called or {}).get("why"), "chair": rec.get("chair")})
+                                      "called": (called or {}).get("why"), "called_by": (called or {}).get("by"),
+                                      "chair": rec.get("chair")})
         return rec
 
     def next_meeting(self, after: float) -> float:
@@ -827,6 +835,10 @@ class Engine:
                 continue
             if now < due:
                 try:
+                    await self._makeup_check()       # may queue a call, which wakes the wait below
+                except Exception:  # a make-up must never take the schedule down with it
+                    logger.exception("make-up check failed")
+                try:
                     await asyncio.wait_for(self._call.wait(), timeout=min(due - now, 60))
                 except asyncio.TimeoutError:
                     continue
@@ -839,20 +851,112 @@ class Engine:
                 logger.warning("no council slot ahead in the calendar (%s); retrying in a minute", e)
                 await asyncio.sleep(60)
                 continue
-            if now - due > MEETING_GRACE_SEC or not self.market.calendar.state_at(now).is_open:
+            open_now = self.market.calendar.state_at(now).is_open
+            if now - due > MEETING_GRACE_SEC or not open_now:
                 # The engine was down (or asleep) through the slot: a late meeting would trade
-                # into the close or a closed market, so wait for the next one instead.
+                # into the close or a closed market, so wait for the next one instead, or
+                # make it up within the call limits while today's session lasts.
                 logger.warning("skipped the council slot of %s ET: it passed while the engine was down",
                                _et(due, "%Y-%m-%d %H:%M"))
                 self.store.audit("meeting_skipped", slot=due)
+                if open_now and trade_day(now) == trade_day(due):
+                    self._hold_makeup(due, f"the engine was down through the {_et(due, '%H:%M')} ET meeting")
                 continue
+            await self._scheduled_meeting(due)
+
+    async def _scheduled_meeting(self, slot: float) -> None:
+        """The meeting for the scheduled `slot`. One that fails, or ends without a decision
+        (too few analysts, no chair), is held for a make-up; one that decides settles any
+        make-up still held."""
+        failed: Optional[str] = None
+        try:
+            rec = await self.meeting(execute=True)
+            self._beat("council", rec["status"] == "ok", rec["status"])
+            if rec["status"] != "ok":
+                failed = f"ended without a decision ({rec['status']})"
+        except Exception as e:
+            logger.exception("meeting failed")
+            self._beat("council", False, f"{type(e).__name__}: {e}")
+            failed = f"failed ({e if isinstance(e, MarketDataError) else f'{type(e).__name__}: {e}'})"
+        if failed:
+            self._hold_makeup(slot, f"the {_et(slot, '%H:%M')} ET meeting {failed}")
+        else:
+            self._makeup_settled(rec["id"])
+        self._after_meeting()
+
+    # -- make-ups ----------------------------------------------------------------------------
+    def _hold_makeup(self, slot: float, why: str) -> None:
+        """Hold a make-up for the scheduled meeting at `slot`, which didn't happen. A newer
+        one replaces an older one: one make-up stands in for the day's missed meetings."""
+        if not self.cfg.schedule.make_up_missed:
+            return
+        why, now = " ".join(why.split())[:300], self.clock.time()
+        st = self.watch_state()
+        st.makeup = {"slot": slot, "why": why, "since": now, "tries": 0, "tried_ts": None, "waiting": ""}
+        gone = self._makeup_gone(st, now)
+        if gone:   # the 15:15 meeting, say: one post saying so, not "held" then "dropped"
+            self._drop_makeup(st, gone)
+            return
+        self._save_watch(st)
+        self.store.audit("makeup_held", slot=slot, why=why)
+        logger.warning("make-up held: %s", why)
+        self.alerts.event("makeup_held", {"why": why})
+
+    def _makeup_gone(self, st: watcher.WatchState, now: float) -> Optional[str]:
+        """Why the held make-up can't run today, or None (also while the session is unknown)."""
+        try:
+            mt = self.market.calendar.state_at(now)
+        except (MarketDataError, CalendarError):
+            return None
+        return watcher.makeup_expired(self.cfg, mt, now, st, self.store.get_state(NEXT_MEETING))
+
+    def _drop_makeup(self, st: watcher.WatchState, reason: str) -> None:
+        m, st.makeup = st.makeup, None
+        self._save_watch(st)
+        self.store.audit("makeup_dropped", slot=m["slot"], why=m["why"], reason=reason, tries=m.get("tries", 0))
+        logger.warning("make-up dropped: %s; %s", m["why"], reason)
+        self.alerts.event("makeup_dropped", {"why": m["why"], "reason": reason})
+
+    def _makeup_settled(self, meeting_id: str) -> None:
+        """A meeting decided: it stands in for the held make-up, if any (a make-up, a
+        scheduled meeting or one the watcher called)."""
+        st = self.watch_state()
+        if st.makeup is None:
+            return
+        m, st.makeup = st.makeup, None
+        self._save_watch(st)
+        self.store.audit("makeup_done", slot=m["slot"], why=m["why"], meeting=meeting_id, tries=m.get("tries", 0))
+        logger.info("make-up done: meeting %s stands in for the %s ET meeting", meeting_id, _et(m["slot"], "%H:%M"))
+
+    async def _makeup_check(self) -> None:
+        """Every minute the council loop waits: call the held make-up once code's limits
+        allow and live prices answer again, or drop it when it can't run today. Prices are
+        checked first because they are what failed on 2026-11-06 and cost nothing to ask;
+        models can't be checked without a call, so a make-up that fails on them is retried
+        `watch.min_gap_min` later, each try counted against the daily limit like any call."""
+        st = self.watch_state()
+        m = st.makeup
+        if m is None or st.pending is not None:
+            return
+        now = self.clock.time()
+        gone = self._makeup_gone(st, now)
+        if gone:
+            self._drop_makeup(st, gone)
+            return
+        wait = self._call_blocked(st, now) or watcher.makeup_spaced(self.cfg, now, m)
+        if wait is None:
             try:
-                rec = await self.meeting(execute=True)
-                self._beat("council", rec["status"] == "ok", rec["status"])
-            except Exception as e:
-                logger.exception("meeting failed")
-                self._beat("council", False, f"{type(e).__name__}: {e}")
-            self._after_meeting()
+                wait = None if await self.market.live_quotes() else "no live prices yet"
+            except MarketDataError as e:
+                wait = f"no live prices yet ({' '.join(str(e).split())[:160]})"
+        if wait is not None:
+            if m.get("waiting") != wait:                    # written when it changes, not every minute
+                m["waiting"] = wait
+                self._save_watch(st)
+            return
+        m.update(tries=m.get("tries", 0) + 1, tried_ts=now, waiting="")
+        self._save_watch(st)
+        self.request_meeting(watcher.MAKEUP, m["why"], slot=m["slot"])
 
     async def _called_meeting(self) -> None:
         """Run the pending call, if code's limits still allow it (time has passed since it
@@ -873,6 +977,8 @@ class Engine:
         try:
             rec = await self.meeting(execute=True, called=call)
             self._beat("council", rec["status"] == "ok", f"called: {rec['status']}")
+            if rec["status"] == "ok":
+                self._makeup_settled(rec["id"])
         except Exception as e:
             logger.exception("called meeting failed")
             self._beat("council", False, f"called: {type(e).__name__}: {e}")

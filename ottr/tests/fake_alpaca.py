@@ -44,6 +44,7 @@ class FakeAlpaca:
         self.reset_in = 2.0
         self.clock_says_open = None          # force /v2/clock's is_open (to fake a disagreement)
         self.actions: Dict[str, List[dict]] = {}   # corporate actions: Alpaca array name -> rows
+        self.offline: Optional[str] = None   # every request fails to connect with this (a DNS outage)
 
     # -- scripting helpers ---------------------------------------------------------------
     def add_asset(self, symbol: str, fractionable: bool = True, tradable: bool = True, name: str = "",
@@ -89,6 +90,8 @@ class FakeAlpaca:
 
     def handle(self, req: httpx.Request) -> httpx.Response:
         self.requests.append(req)
+        if self.offline is not None:
+            raise httpx.ConnectError(self.offline, request=req)
         if req.method != "GET":
             return httpx.Response(405, json={"message": "fake: only GET is modeled"})
         if req.headers.get("APCA-API-KEY-ID") != CREDS.key_id or req.headers.get("APCA-API-SECRET-KEY") != CREDS.secret:

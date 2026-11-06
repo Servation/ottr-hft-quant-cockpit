@@ -263,10 +263,13 @@ async def cmd_status(cfg, args) -> int:
         nxt = store.get_state("next_meeting_at")
         if nxt:
             print(f"next council meeting: {_et(nxt)}")
+        from ottr.engine.engine import WATCH_STATE
+        from ottr.engine.watcher import WatchState
+        st = WatchState.from_dict(store.get_state(WATCH_STATE))
+        if st.makeup:
+            m = st.makeup
+            print(f"make-up pending: {m['why']}" + (f" (waiting: {m['waiting']})" if m.get("waiting") else ""))
         if cfg.watch.enabled:
-            from ottr.engine.engine import WATCH_STATE
-            from ottr.engine.watcher import WatchState
-            st = WatchState.from_dict(store.get_state(WATCH_STATE))
             conds = ", ".join(t.describe() for t in st.triggers) or "no conditions set"
             print(f"watcher: {conds}; {len(st.called_on(time.time()))} of {cfg.watch.max_called_per_day} "
                   "called meetings used today")
