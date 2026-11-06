@@ -288,7 +288,7 @@ def quotes_seen(store, symbols, samples=30, usable=30, day=FRIDAY):
 def drain(alerts):
     out = []
     while not alerts.queue.empty():
-        out.append(alerts.queue.get_nowait())
+        out.append(alerts.queue.get_nowait().text)
     return out
 
 
