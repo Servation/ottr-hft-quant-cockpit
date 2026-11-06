@@ -53,8 +53,8 @@ class MeetingProgress:
         self.status: Optional[str] = None      # the meeting record's status ("ok", "abstain: ...")
         self.executing = False                 # trades were handed to the executor
         self.note: Optional[str] = None        # why it was aborted, or left orders undecided
-        self.called: Optional[str] = None      # why it was called outside the schedule (None: scheduled)
-        self.called_by: Optional[str] = None   # who called it: watcher, condition or owner
+        self.called: Optional[str] = None      # why it was called (None: scheduled)
+        self.called_by: Optional[str] = None   # who called it: watcher, condition, owner or makeup
 
     @property
     def final(self) -> bool:

@@ -476,7 +476,7 @@ async def get_council(request: web.Request) -> web.Response:
                "running_sec": round(now - started, 1) if started is not None else None,
                "progress": progress,
                "meeting_times_et": list(ctx.cfg.schedule.meeting_times), "timeout_sec": ctx.cfg.council.timeout_sec,
-               "next_meeting_at": nxt, "watch": watch,
+               "next_meeting_at": nxt, "watch": watch, "makeup": st.makeup,
                "last_meeting": dict(zip(("id", "ts", "status"), last)) if last else None})
 
 

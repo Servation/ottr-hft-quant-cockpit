@@ -129,6 +129,9 @@ def council_line(c: Optional[dict]) -> str:
     last = c.get("last_meeting")
     tail = f" | last {when(last['ts'])} ({last['status']})" if last else " | no meeting yet"
     line = f"Council: next meeting {when(c.get('next_meeting_at'))}{tail}"
+    m = c.get("makeup")
+    if m:
+        line += f"\nMake-up pending: {m.get('why')}" + (f" (waiting: {m['waiting']})" if m.get("waiting") else "")
     w = c.get("watch") or {}
     if w.get("enabled"):
         conds = [x["condition"] for x in w.get("conditions") or []]

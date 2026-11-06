@@ -133,7 +133,9 @@ closes, DST).
 - **09:30 open:** quotes arrive; stops wait until 09:35, because the opening prints are
   noise. A holding that gapped through its stop overnight is sold at the bid.
 - **10:15 and 15:15 meetings:** on an early close the later one moves to 45 minutes
-  before the close. BUYs stop 10 minutes before the close.
+  before the close. BUYs stop 10 minutes before the close. A meeting that fails, or that
+  the engine was down through, is made up the same day (see
+  [Make-up meetings](#make-up-meetings)).
 - **In between, the watcher:** after every meeting and every 30 minutes, Claude reviews
   what changed and may call a meeting (see [The desk watcher](#the-desk-watcher)).
 - **15:45 sweep:** cash above 5% of equity buys SGOV; a BUY short of cash sells SGOV first.
@@ -144,7 +146,8 @@ closes, DST).
 
 Engine tasks: market 60s, jobs 60s (fees, sweep, events feeds, deferred retries), risk 60s
 in session, equity 15 min in session and once per close, council by the schedule (and
-when the watcher calls one), watch 60s in session, the screen weekly, watchdog 60s.
+when the watcher or a make-up calls one), watch 60s in session, the screen weekly,
+watchdog 60s.
 
 ## Running unattended
 
@@ -221,8 +224,8 @@ meeting and answers two questions:
 - never while a meeting runs, and one call waiting at a time.
 
 The owner can call a meeting too, with the button under an `/ask` answer that proposes one
-([Discord chat](#discord-chat)). The same limits apply, and the owner's calls and the
-watcher's share the 4 a day.
+([Discord chat](#discord-chat)). The same limits apply, and the owner's calls, the
+watcher's and [make-ups](#make-up-meetings) share the 4 a day.
 
 A condition that is unpriced, more than 25% from the price, or already met is dropped and
 said so.
@@ -234,6 +237,28 @@ and why), and when a call is refused (and why). `/status`, `ottr status` and `GE
 what it is watching. `ottr watch` asks it what it would do right now, changing nothing.
 `[watch]` in config.toml holds every limit, the model and how often it reviews
 (`enabled = false` turns it off).
+
+### Make-up meetings
+
+A scheduled meeting can fail: with no live prices (on 2026-11-06 the router's DNS was
+down from 08:42 to 13:54 ET, so the 10:15 meeting failed on "no price for any asset"), or
+with too few models answering (the meeting abstains). The engine can also be down through
+one. Either way code holds a make-up and calls it the same day:
+- **when live prices answer again**, checked every minute;
+- **within the called-meeting limits above:** 45 minutes from any meeting, none in the last
+  45 minutes, and it counts toward the 4 a day. A make-up that fails again (the models
+  still down) is retried 45 minutes later.
+
+A make-up's packet says which meeting it stands in for. It is dropped when the session
+ends, the close is too near, today's calls are used up, or the next scheduled meeting is
+less than 45 minutes away (that meeting then stands in for it). So in practice only the
+10:15 meeting can be made up: 15:15 is already 45 minutes before the close. Any meeting
+that decides settles a held make-up.
+
+Discord posts **Meeting missed** when one is held, **Make-up meeting called** when it
+runs, and **No make-up meeting** (and why) when it is dropped. `ottr status`, `/status` and
+`GET /api/council` show a pending one and what it is waiting for.
+`make_up_missed = false` under `[schedule]` turns make-ups off.
 
 ## Watching a council meeting
 

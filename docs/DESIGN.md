@@ -140,6 +140,19 @@ and what is worth watching depends on what the desk holds and just decided.
 The watcher can't trade, size or add a symbol: models judge, code acts. Nor can a called
 meeting skip anything: it runs the full council and risk gate, and may do nothing.
 
+**Make-ups** use the same machinery, with code as the caller.
+- **When one is held:** a scheduled meeting failed (no prices, an error) or ended without
+  a decision (too few analysts, no chair), or the engine was down through it.
+- **When it is called:** once live prices answer again (checked every minute; this is
+  what failed on 2026-11-06) and `call_blocked` allows it. Models can't be checked without
+  a call, so a make-up that fails on them is retried after the gap.
+- **When it is dropped:** when it can't run that day (`makeup_expired`), including when
+  the next scheduled meeting is less than the gap away. That meeting then stands in for it.
+
+Each try counts toward the daily limit, so an outage can't turn into a stream of
+meetings. The held make-up is part of the watcher's persisted state (`WatchState.makeup`),
+so it survives an engine restart.
+
 ### From Intent to fill
 
 The executor drains one priority queue. Protective exits (stop, de-risk, trim, corporate

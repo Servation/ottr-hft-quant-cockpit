@@ -332,6 +332,9 @@ class Caps:
 class Schedule:
     meeting_times: Tuple[str, ...] = ("10:15", "15:15")
     min_before_close_min: int = 45
+    # A scheduled meeting that fails (no prices, no models) or that the engine was down
+    # through is made up the same day once prices answer, within the [watch] call limits.
+    make_up_missed: bool = True
 
 
 @dataclass(frozen=True)
@@ -603,6 +606,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("schedule.meeting_times must be distinct and in order")
     if not 0 <= cfg.schedule.min_before_close_min <= 120:
         raise ConfigError("schedule.min_before_close_min must be in 0..120")
+    if not isinstance(cfg.schedule.make_up_missed, bool):   # "false" in quotes would read as on
+        raise ConfigError("schedule.make_up_missed must be true or false")
     missing_fees = [f for f in REQUIRED_FEES if f not in cfg.fees.fees]
     if missing_fees:
         raise ConfigError(f"fees: no [[fees.rate]] for {missing_fees}: a missing fee would silently be $0")

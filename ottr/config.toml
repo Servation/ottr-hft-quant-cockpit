@@ -215,6 +215,9 @@ qualified_dividend_classes = ["equity_etf", "stock"]   # the rest count as ordin
 [schedule]
 meeting_times = ["10:15", "15:15"]   # New York time, trading days only
 min_before_close_min = 45            # on early closes a later slot moves back to this
+make_up_missed = true                # a slot that fails (no prices, no models) or that the engine
+                                     # was down through is made up the same day once prices answer,
+                                     # within the [watch] limits (counts as a called meeting)
 
 [data]
 feed = "iex"               # live quotes: iex (free) or sip (paid)
