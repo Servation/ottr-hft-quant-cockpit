@@ -79,7 +79,7 @@ class Grade:
 
 
 def model_label(info: Optional[Mapping[str, Any]]) -> str:
-    """'claude-opus-5-5/high' from a record's {model, effort}; NOT_RECORDED without one."""
+    """'claude-fable-5-2/xhigh' from a record's {model, effort}; NOT_RECORDED without one."""
     if not info or not info.get("model"):
         return NOT_RECORDED
     return f"{info['model']}/{info['effort']}" if info.get("effort") else str(info["model"])

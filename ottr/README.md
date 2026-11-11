@@ -391,7 +391,7 @@ kept in the ledger. `[screen]` in config.toml holds every threshold.
 edge, and whether a model change helped. Every analyst stance and every trade the chair
 kept is graded by the asset's total return from the meeting day's adjusted close to the
 close 1 and 5 sessions later, and by that return minus SPY's. Rows are split by analyst,
-model and effort (`claude-opus-5-5/high`), and stance: a model change shows as a new row
+model and effort (`claude-fable-5-2/xhigh`), and stance: a model change shows as a new row
 beside the old one. Meetings recorded before the record kept the model show as
 `not recorded`.
 

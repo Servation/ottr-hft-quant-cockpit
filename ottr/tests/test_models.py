@@ -252,13 +252,23 @@ async def test_claude_api_logs_tokens_and_says_when_the_fallback_answered(caplog
 async def test_claude_api_identity_names_the_model_that_answered():
     """The meeting record (and so the scorecard) credits the model that wrote the answer:
     the refusal fallback's, when it stood in."""
-    c = ClaudeAPI(model="claude-opus-5-5", effort="high", client=sdk(lambda request: streamed("ok")))
-    assert c.identity() == {"model": "claude-opus-5-5", "effort": "high"}       # before any call
+    c = ClaudeAPI(model="claude-fable-5-2", effort="xhigh",
+                  client=sdk(lambda request: streamed("ok", model="claude-fable-5-2")))
+    assert c.identity() == {"model": "claude-fable-5-2", "effort": "xhigh"}      # before any call
     await c.complete("hi")
-    assert c.identity() == {"model": "claude-opus-5-5", "effort": "high"}
+    assert c.identity() == {"model": "claude-fable-5-2", "effort": "xhigh"}
     c._client = sdk(lambda request: streamed("ok", model="claude-opus-4-8"))
     await c.complete("hi")
-    assert c.identity() == {"model": "claude-opus-4-8", "effort": "high"}
+    assert c.identity() == {"model": "claude-opus-4-8", "effort": "xhigh"}
+
+
+def test_identity_reports_the_effort_each_council_adapter_runs_at():
+    """`claude_effort` gives Claude its own effort as analyst and chair; GPT keeps the
+    shared one, and the record must say which each really ran at."""
+    c = Council(claude_backend="api", claude_model="claude-fable-5-2", claude_effort="xhigh", reasoning_effort="high")
+    assert make_adapter("claude", c).identity() == {"model": "claude-fable-5-2", "effort": "xhigh"}
+    assert make_adapter("gpt", c).identity() == {"model": None, "effort": "high"}    # named once codex answers
+    assert make_adapter("claude", c, effort="low").identity()["effort"] == "low"     # the watcher's override
 
 
 # What `codex exec` printed to stderr on 2026-11-11 (v0.166), with a prompt that tries to
