@@ -54,9 +54,16 @@ class Council:
     min_analysts: int = 2
     timeout_sec: float = 300.0
     claude_backend: str = "api"            # api (CLAUDE_API_KEY, per token) | cli (`claude -p`, subscription)
-    claude_model: str = "claude-opus-5-5"  # a full model id: the API takes no aliases such as "opus"
+    claude_model: str = "claude-fable-5-2"  # a full model id: the API takes no aliases such as "opus"
+    claude_effort: str = ""                # Claude's own effort as analyst and chair; "" = reasoning_effort
     gemini_model: str = "gemini-3.8-flash-high"
     reasoning_effort: str = "high"
+
+    def effort_for(self, model: str) -> str:
+        """The effort `model` runs at in the council. Claude has its own setting because
+        effort levels aren't comparable across providers: raising Claude's shouldn't slow
+        GPT down too. (agy takes Gemini's from the model name.)"""
+        return (self.claude_effort if model == "claude" else "") or self.reasoning_effort
 
 
 @dataclass(frozen=True)
@@ -65,7 +72,7 @@ class Watch:
     meetings, sets conditions for code to watch, and may call a meeting."""
     enabled: bool = True
     model: str = "claude"                  # claude | gpt | gemini (claude runs council.claude_model)
-    effort: str = ""                       # "" = the council's reasoning effort
+    effort: str = ""                       # "" = what that model runs at in the council
     check_every_min: float = 30.0          # a review this often in session (and after every meeting)
     max_triggers: int = 8
     max_called_per_day: int = 4
@@ -272,8 +279,15 @@ def _validate_shared(cfg) -> None:
         raise ConfigError(f"council.claude_backend must be api or cli, got {c.claude_backend!r}")
     if c.claude_backend == "api" and not c.claude_model.startswith("claude-"):
         # Caught here, not as a 404 at the first meeting.
-        raise ConfigError(f"council.claude_model must be a full model id such as claude-opus-5-5 for the "
+        raise ConfigError(f"council.claude_model must be a full model id such as claude-fable-5-2 for the "
                           f"API (aliases like \"opus\" only work with the CLI), got {c.claude_model!r}")
+    # Caught here, not as a failed call at every meeting. Gemini isn't checked: agy takes its
+    # effort from the model name.
+    for name in sorted({*c.analysts, c.chair, c.chair_fallback} & {"claude", "gpt"}):
+        if c.effort_for(name) not in MODEL_EFFORTS[name]:
+            key = "claude_effort" if name == "claude" and c.claude_effort else "reasoning_effort"
+            raise ConfigError(f"council.{key} for {name} must be one of {MODEL_EFFORTS[name]}, "
+                              f"got {c.effort_for(name)!r}")
 
 
 REQUIRED_FEES = ("sec", "taf", "cat")   # the pass-through fees every US equity fill can owe
@@ -631,6 +645,8 @@ def _validate(cfg: Config) -> None:
     w = cfg.watch
     if w.model not in ("claude", "gpt", "gemini"):
         raise ConfigError(f"watch.model must be claude, gpt or gemini, got {w.model!r}")
+    if w.effort and w.effort not in MODEL_EFFORTS[w.model]:
+        raise ConfigError(f"watch.effort for {w.model} must be \"\" or one of {MODEL_EFFORTS[w.model]}, got {w.effort!r}")
     if not 5 <= w.check_every_min <= 240 or not 0 <= w.max_triggers <= 20:
         raise ConfigError("watch: check_every_min in 5..240 and max_triggers in 0..20")
     if not 0 <= w.max_called_per_day <= 10 or not 15 <= w.min_gap_min <= 240 or not 30 <= w.timeout_sec <= 900:

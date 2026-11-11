@@ -60,11 +60,24 @@ estimates.
 ### Model sign-in
 
 Claude (an analyst, the chair, the desk watcher and `/ask`) runs through the Claude API
-with `CLAUDE_API_KEY`, on the model `council.claude_model` names (`claude-opus-5-5`).
-There's no CLI to sign in or out, and every call logs its token counts in `engine.log`. It
-bills per token to the key's Console account: at two meetings and about 14 watcher reviews
-a trading day, expect roughly $30 to $60 a month. GPT and Gemini run through their CLIs,
-`codex` and `agy`, signed in under your Windows profile.
+with `CLAUDE_API_KEY`, on the model `council.claude_model` names (`claude-fable-5-2`).
+There's no CLI to sign in or out, and every call logs its token counts in `engine.log`.
+GPT and Gemini run through their CLIs, `codex` and `agy`, signed in under your Windows
+profile.
+
+Claude's effort is set per job, because each level costs time and tokens:
+- **The council** (analyst and chair) runs at `council.claude_effort` (`xhigh`). It is
+  Claude's own setting: `council.reasoning_effort` is GPT's, so raising one doesn't slow
+  the other. Measured on 2026-11-11: the analyst took 71s and the chair 154s, against the
+  300s `council.timeout_sec`. If the log shows the chair timing out and GPT standing in,
+  lower `claude_effort` to `high` or raise the timeout.
+- **The watcher** runs at `watch.effort` (`high`): a review every 30 minutes is a triage
+  call.
+- **`/ask`** runs at `chat.effort` (`low`), so replies stay quick.
+
+It bills per token to the key's Console account. A meeting costs about $1 and a watcher
+review about 8 cents, so at two meetings and about 15 reviews a trading day, expect
+roughly $60 to $80 a month.
 
 Set up the key:
 1. In the [Claude Console](https://console.anthropic.com), add credits under Billing, then
@@ -73,8 +86,8 @@ Set up the key:
 3. Check it: `ottr data --check` ends with a Claude API line (a model lookup, no tokens).
 4. Restart the engine: `ottr service stop`, then `ottr service start`.
 
-If Opus declines a request on policy grounds, the API answers it with a fallback model in
-the same call; the log names the model that answered.
+If the model declines a request on policy grounds, the API answers it with a fallback model
+in the same call; the log names the model that answered.
 
 To go back to the `claude` CLI and your subscription, set `claude_backend = "cli"` under
 `[council]` in config.toml. Then give the engine its own CLI sign-in, so signing out of
@@ -213,7 +226,7 @@ is simply off shows up as exit code 3 from `ottr status`.
 
 ## The desk watcher
 
-Between the scheduled meetings, Claude (the council's `claude_model`, Opus) watches the desk.
+Between the scheduled meetings, Claude (the council's `claude_model`) watches the desk.
 After every meeting, and every 30 minutes in session, it reads what changed since the last
 meeting and answers two questions:
 - **Call a meeting now?** It answers yes only when something material changed that the last

@@ -161,8 +161,8 @@ def sdk(handler):
         http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)))
 
 
-def streamed(text, stop="end_turn", model="claude-opus-5-5"):
-    """A Messages API stream as Opus 5.5 sends it: a thinking block (its text omitted, the
+def streamed(text, stop="end_turn", model="claude-fable-5-2"):
+    """A Messages API stream as Fable 5.2 sends it: a thinking block (its text omitted, the
     default), then the reply text, then the stop reason and usage."""
     msg = {"id": "msg_test", "type": "message", "role": "assistant", "model": model, "content": [],
            "stop_reason": None, "stop_sequence": None, "usage": {"input_tokens": 1234, "output_tokens": 1}}
@@ -194,13 +194,13 @@ async def test_claude_api_sends_the_prompt_with_the_model_effort_and_refusal_fal
         return streamed('{"assets": []}')
 
     prompt = "packet line\n" * 2000
-    reply = await ClaudeAPI(model="claude-opus-5-5", effort="high", client=sdk(handler)).complete(prompt)
+    reply = await ClaudeAPI(model="claude-fable-5-2", effort="high", client=sdk(handler)).complete(prompt)
     assert reply == '{"assets": []}'
     (req,) = seen
     body = json.loads(req.content)
     assert req.url.path == "/v1/messages" and FALLBACK_BETA in req.headers["anthropic-beta"]
-    assert body["model"] == "claude-opus-5-5" and body["stream"] is True
-    assert body["output_config"] == {"effort": "high"}       # Opus 5.5 would default to medium
+    assert body["model"] == "claude-fable-5-2" and body["stream"] is True
+    assert body["output_config"] == {"effort": "high"}       # always sent: the default differs by model
     assert body["fallbacks"] == "default" and "thinking" not in body
     assert body["messages"] == [{"role": "user", "content": prompt}]
     assert body["max_tokens"] == models.API_MAX_TOKENS
@@ -246,7 +246,7 @@ async def test_claude_api_logs_tokens_and_says_when_the_fallback_answered(caplog
     out = await ClaudeAPI(client=sdk(lambda request: streamed("ok", model="claude-opus-4-8"))).complete("hi")
     assert out == "ok"
     assert "claude api claude-opus-4-8 (effort high): 1234 input, 567 output tokens" in caplog.text
-    assert "answered by the fallback; claude-opus-5-5 declined" in caplog.text
+    assert "answered by the fallback; claude-fable-5-2 declined" in caplog.text
 
 
 async def test_claude_api_identity_names_the_model_that_answered():
@@ -339,11 +339,21 @@ async def test_claude_api_timeout_caps_the_whole_call():
 
 
 def test_make_adapter_follows_the_claude_backend():
-    api = make_adapter("claude", Council(claude_backend="api", claude_model="claude-opus-5-5", reasoning_effort="high"))
-    assert isinstance(api, ClaudeAPI) and (api.model, api.effort) == ("claude-opus-5-5", "high")
+    api = make_adapter("claude", Council(claude_backend="api", claude_model="claude-fable-5-2", reasoning_effort="high"))
+    assert isinstance(api, ClaudeAPI) and (api.model, api.effort) == ("claude-fable-5-2", "high")
     cli = make_adapter("claude", Council(claude_backend="cli", claude_model="opus"), effort="low")
     assert isinstance(cli, ClaudeCLI) and (cli.model, cli.effort) == ("opus", "low")
     assert isinstance(make_adapter("claude", Council()), ClaudeAPI)   # the default
+
+
+def test_make_adapter_gives_claude_its_own_effort_and_an_override_still_wins():
+    council = Council(claude_effort="xhigh", reasoning_effort="medium")
+    assert make_adapter("claude", council).effort == "xhigh"
+    assert make_adapter("gpt", council).effort == "medium"            # the shared one: Claude's is its own
+    assert make_adapter("claude", council, effort="high").effort == "high"   # the watcher, chat
+    assert make_adapter("claude", Council(reasoning_effort="medium")).effort == "medium"   # unset: the shared one
+    cli = make_adapter("claude", Council(claude_backend="cli", claude_model="opus", claude_effort="xhigh"))
+    assert isinstance(cli, ClaudeCLI) and cli.effort == "xhigh"
 
 
 async def test_check_claude_api_looks_the_model_up_without_spending_tokens(monkeypatch):
@@ -351,15 +361,15 @@ async def test_check_claude_api_looks_the_model_up_without_spending_tokens(monke
 
     def ok(request):
         seen.append(request)
-        return httpx2.Response(200, json={"type": "model", "id": "claude-opus-5-5", "display_name": "Claude Opus 5.5",
+        return httpx2.Response(200, json={"type": "model", "id": "claude-fable-5-2", "display_name": "Claude Fable 5.2",
                                           "created_at": "2026-09-01T00:00:00Z"})
-    assert await check_claude_api("claude-opus-5-5", client=sdk(ok)) == (
-        True, "key accepted; claude-opus-5-5 (Claude Opus 5.5) is available")
-    assert [(r.method, r.url.path) for r in seen] == [("GET", "/v1/models/claude-opus-5-5")]
-    bad = await check_claude_api("claude-opus-5-5", client=sdk(lambda r: api_error(401, "authentication_error", "no")))
+    assert await check_claude_api("claude-fable-5-2", client=sdk(ok)) == (
+        True, "key accepted; claude-fable-5-2 (Claude Fable 5.2) is available")
+    assert [(r.method, r.url.path) for r in seen] == [("GET", "/v1/models/claude-fable-5-2")]
+    bad = await check_claude_api("claude-fable-5-2", client=sdk(lambda r: api_error(401, "authentication_error", "no")))
     assert bad[0] is False and "was rejected" in bad[1]
     monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
-    assert (await check_claude_api("claude-opus-5-5"))[1].startswith("CLAUDE_API_KEY is not set")
+    assert (await check_claude_api("claude-fable-5-2"))[1].startswith("CLAUDE_API_KEY is not set")
 
 
 @pytest.mark.live

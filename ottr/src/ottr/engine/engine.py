@@ -696,8 +696,12 @@ class Engine:
             for s, av in snap.assets.items() if av.asset_class and s != u.cash_symbol))
         caps = ", ".join(f"{c} {p:.0f}%" for c, p in sorted(cfg.caps.by_class.items()))
         over = ", ".join(f"{s} {p:.0f}%" for s, p in sorted(cfg.caps.by_symbol.items()))
-        lines.append(f"  Caps (% of equity): {caps}" + (f"; overrides {over}" if over else "") +
-                     f"; {u.cash_symbol} uncapped")
+        # "Per position" is spelled out because the council read "bond_etf 25%" as a limit on
+        # all bonds together (2026-11-10: "bond_etf exposure is about 39%, above the 25% class
+        # cap") and held back BUYs and trimmed a holding to get under a limit that doesn't exist.
+        lines.append(f"  Caps PER POSITION (% of equity; the most ONE holding may be, by its class. A class's "
+                     f"total has no cap; only gross exposure and the stock sleeve do): {caps}" +
+                     (f"; overrides {over}" if over else "") + f"; {u.cash_symbol} uncapped")
         blocked = self.buy_blocks(now)
         if blocked:
             lines.append("  BUYS BLOCKED (code drops these): " + "; ".join(f"{s} ({why})" for s, why in sorted(blocked.items())))

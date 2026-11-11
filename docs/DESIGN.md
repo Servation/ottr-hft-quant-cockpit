@@ -140,7 +140,7 @@ The schedule meets twice a day whatever happens. A desk that holds for days to w
 mostly needs only that, but a break, a gap or a shock in between deserves a look sooner,
 and what is worth watching depends on what the desk holds and just decided.
 - **Its role:** after every meeting, and every 30 minutes in session, a watcher model
-  (Claude, Opus) reviews what changed. It returns validated JSON: whether to call a
+  (Claude) reviews what changed. It returns validated JSON: whether to call a
   meeting now, and up to 8 conditions (a level broken or a percent moved).
 - **Code's role:** it checks the conditions every minute and decides whether a call may
   run (in session, away from the close and the schedule, 45 minutes apart, 4 a day, one

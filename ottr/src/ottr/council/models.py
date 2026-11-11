@@ -8,8 +8,9 @@ Gemini (`agy`) run as CLI subprocesses with the prompt on stdin. Each returns ra
 sign-in to expire or be signed out (the 2026-10-23 abstained meeting), a pinned model id,
 and token counts in the log; it bills per token to the key's Console account. GPT and
 Gemini stay on their CLIs and the user's subscriptions. All adapters share one tiny
-interface, so tests swap in a fake. `make_adapter` builds one by name; the council passes
-its own effort, `ottr chat` a lower one so replies are quick.
+interface, so tests swap in a fake. `make_adapter` builds one by name at the effort
+that model runs at in the council (`Council.effort_for`); the watcher and `ottr chat` pass
+lower ones, so reviews stay cheap and replies quick.
 """
 
 import asyncio
@@ -163,9 +164,11 @@ def _sdk() -> "anthropic.AsyncAnthropic":
 # On a policy refusal the API re-runs the same request, inside the same call, on a model it
 # picks by the refusal's category, so a false positive costs a meeting nothing.
 FALLBACK_BETA = "server-side-fallback-2026-07-01"
-# Room for the model's thinking plus the JSON reply. Streaming keeps a long answer from
-# tripping the SDK's guard against non-streaming requests that may run past 10 minutes.
-API_MAX_TOKENS = 32000
+# Room for the model's thinking plus the JSON reply: thinking counts toward this limit, and
+# at xhigh effort it is most of the output, so a tight limit would cut an analyst off before
+# its answer. Streaming keeps a long answer from tripping the SDK's guard against
+# non-streaming requests that may run past 10 minutes.
+API_MAX_TOKENS = 64000
 KEY_FIX = (f"make a new key in the Claude Console (console.anthropic.com > API keys), put it in "
            f"ottr/.env as {API_KEY_ENV}=..., then restart the engine")
 
@@ -198,12 +201,13 @@ def api_message(e: Exception) -> str:
 
 
 class ClaudeAPI(ModelAdapter):
-    """Claude through the Messages API, streamed. Thinking is always on for Opus 5.5;
-    `effort` sets how hard it thinks (its default would be medium, so it is always sent)."""
+    """Claude through the Messages API, streamed. Thinking is always on for Fable 5.2 (and
+    Opus 5.5); `effort` sets how hard it thinks. It is always sent, because the default
+    differs by model (high on Fable 5.2, medium on Opus 5.5)."""
 
     name = "claude"
 
-    def __init__(self, model: str = "claude-opus-5-5", effort: str = "high",
+    def __init__(self, model: str = "claude-fable-5-2", effort: str = "high",
                  client: Optional[Callable[[], Any]] = None) -> None:
         # `client` builds the AsyncAnthropic for one call; tests hand in one on a mock
         # transport. A fresh client per call: calls are minutes apart and each `async with`
@@ -385,12 +389,13 @@ def agy_response(rc: int, out: str, err: str) -> str:
 
 def make_adapter(name: str, council: CouncilConfig, effort: Optional[str] = None) -> ModelAdapter:
     """The adapter for provider `name` ("claude" | "gpt" | "gemini") with the council's model
-    choices. `effort` overrides the council's reasoning effort (chat runs lower)."""
+    choices. `effort` overrides the effort that model runs at in the council (the watcher
+    and chat run lower)."""
     if name == "claude":
         cls = ClaudeAPI if council.claude_backend == "api" else ClaudeCLI
-        return cls(model=council.claude_model, effort=effort or council.reasoning_effort)
+        return cls(model=council.claude_model, effort=effort or council.effort_for(name))
     if name == "gpt":
-        return CodexCLI(effort=effort or council.reasoning_effort)
+        return CodexCLI(effort=effort or council.effort_for(name))
     if name == "gemini":
         return GeminiCLI(model=council.gemini_model, effort=effort)
     raise ValueError(f"unknown model {name!r} (expected claude, gpt or gemini)")
