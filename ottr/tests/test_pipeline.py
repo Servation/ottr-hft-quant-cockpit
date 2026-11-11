@@ -64,6 +64,15 @@ async def test_meeting_executes_a_code_sized_buy(cfg, store, ledger, rig):
     assert "The US market is OPEN" in packet and "DESK BOOK (paper; margin_1x" in packet
 
 
+async def test_the_packet_says_caps_are_per_position_not_per_class(cfg, store, ledger, rig):
+    """The council once read "bond_etf 25%" as a cap on all bonds together and stopped adding
+    to them at 39%; code only ever capped each position."""
+    rec = await engine(cfg, store, rig, buy_council(cfg, "TLT")).meeting(execute=False)
+    line = next(ln for ln in rec["context"].splitlines() if "Caps" in ln)
+    assert line.startswith("  Caps PER POSITION (% of equity; the most ONE holding may be, by its class.")
+    assert "A class's total has no cap" in line and "bond_etf 25%" in line and "SGOV uncapped" in line
+
+
 async def test_a_buy_no_analyst_supports_is_dropped(cfg, store, ledger, rig):
     u = list(cfg.core)
     chair = {"summary": "s", "trades": [{"action": "BUY", "asset": "GLD", "conviction": 0.9, "reasoning": "vibes"}]}
