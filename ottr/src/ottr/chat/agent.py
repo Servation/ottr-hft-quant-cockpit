@@ -207,7 +207,7 @@ class _ClaudeSession:
 class ClaudeTools:
     """Claude for /ask's tool loop: one non-streamed Messages API call per turn (answers are
     short, so a stream buys nothing, and the server validates each tool input in full).
-    Thinking is always on for Opus 5.5; `effort` sets how hard (chat runs low)."""
+    Thinking is always on for Fable 5.2 (and Opus 5.5); `effort` sets how hard (chat runs low)."""
 
     name = "claude"
 
