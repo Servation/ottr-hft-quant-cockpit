@@ -156,10 +156,10 @@ class Council:
         except ModelError as e:
             logger.warning("analyst %s dropped: %s", name, e)
             _emit(observe, "analyst_dropped", name=name, error=str(e), latency=time.time() - t0)
-            return name, None, str(e), time.time() - t0
+            return name, None, str(e), time.time() - t0, None
         # Reported as each analyst finishes, not when the slowest one does.
         _emit(observe, "analyst_done", name=name, report=rep, latency=time.time() - t0)
-        return name, rep, None, time.time() - t0
+        return name, rep, None, time.time() - t0, adapter.identity()
 
     async def run(self, context: str, held: Set[str], meeting_id: Optional[str] = None,
                   observe: Optional[Observer] = None, universe: Optional[List[str]] = None,
@@ -171,11 +171,13 @@ class Council:
         _emit(observe, "analysts_started", analysts=list(self.analysts))
         results = await asyncio.gather(*(self._analyst(n, a, context, observe, universe)
                                          for n, a in self.analysts.items()))
-        reports = {n: r for n, r, _, _ in results if r is not None}
+        reports = {n: r for n, r, _, _, _ in results if r is not None}
         rec: Dict[str, Any] = {
             "id": mid, "started": time.time(), "analysts": reports,
-            "errors": {n: e for n, _, e, _ in results if e},
-            "latency": {n: round(dt, 1) for n, _, _, dt in results},
+            # Which model (and effort) wrote each report: the scorecard grades by it.
+            "models": {n: who for n, r, _, _, who in results if r is not None},
+            "errors": {n: e for n, _, e, _, _ in results if e},
+            "latency": {n: round(dt, 1) for n, _, _, dt, _ in results},
             "tally": None, "labels": {}, "decision": None, "trades": [], "dropped": [],
             "status": "ok",
         }
@@ -213,6 +215,9 @@ class Council:
                 rec["status"] = f"abstain: chair failed ({e}); fallback {self.fallback.name} failed too ({e2})"
                 _emit(observe, "chair_failed", error=str(e2), latency=time.time() - t0)
                 return rec
+            rec["chair"].update(self.fallback.identity())
+        else:
+            rec["chair"].update(self.chair.identity())
         rec["latency"]["chair"] = round(time.time() - t0, 1)
         kept, dropped = enforce_rules(decision, reports, held, blocked)
         rec.update(decision=decision, trades=kept,

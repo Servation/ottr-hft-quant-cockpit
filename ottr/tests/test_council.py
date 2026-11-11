@@ -105,7 +105,35 @@ async def test_a_chair_that_works_is_recorded_and_the_fallback_never_asked():
     chair = ScriptedModel("claude", [{"summary": "s", "trades": []}])
     fallback = ScriptedModel("gpt", [])
     rec = await Council(_analysts(), chair, U, fallback=fallback).run("ctx", held=set())
-    assert rec["status"] == "ok" and rec["chair"] == {"name": "claude"} and fallback.prompts == []
+    assert rec["status"] == "ok" and rec["chair"]["name"] == "claude" and fallback.prompts == []
+    assert "replaced" not in rec["chair"]
+
+
+def _as(model: ScriptedModel, name: str, effort=None) -> ScriptedModel:
+    model.model, model.effort = name, effort
+    return model
+
+
+async def test_the_record_names_each_reports_model_and_the_chairs():
+    """The scorecard splits every analyst's results by the model behind them, so a model
+    change shows as a before and an after: the record keeps who wrote each report."""
+    analysts = _analysts()
+    _as(analysts["claude"], "claude-fable-5-2", "xhigh")
+    _as(analysts["gemini"], "gemini-3.8-flash-high")
+    analysts["gpt"] = ScriptedModel("gpt", [ModelError("codex exit 1: down")])
+    chair = _as(ScriptedModel("claude", [{"summary": "s", "trades": []}]), "claude-opus-5-5", "high")
+    rec = await Council(analysts, chair, U).run("ctx", held=set())
+    assert rec["models"] == {"claude": {"model": "claude-fable-5-2", "effort": "xhigh"},
+                             "gemini": {"model": "gemini-3.8-flash-high", "effort": None}}   # gpt dropped out
+    assert rec["chair"] == {"name": "claude", "model": "claude-opus-5-5", "effort": "high"}
+
+
+async def test_a_fallback_chair_is_recorded_with_its_own_model():
+    chair = _as(ScriptedModel("claude", [ModelError(SIGNED_OUT)]), "claude-opus-5-5", "high")
+    fallback = _as(ScriptedModel("gpt", [{"summary": "s", "trades": []}]), "gpt-6.1-sol", "high")
+    rec = await Council(_analysts(), chair, U, fallback=fallback).run("ctx", held=set())
+    assert (rec["chair"]["name"], rec["chair"]["replaced"]) == ("gpt", "claude")
+    assert (rec["chair"]["model"], rec["chair"]["effort"]) == ("gpt-6.1-sol", "high")
 
 
 async def test_both_chairs_failing_abstains_with_both_reasons():

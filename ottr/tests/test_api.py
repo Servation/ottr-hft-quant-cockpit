@@ -168,6 +168,18 @@ async def test_meetings_show_every_analyst_stance_and_the_gate_result(api):
     await get(s, "/api/meetings/bad%20id%27", status=400)
 
 
+async def test_scorecard_grades_nothing_before_its_closes_are_in(api):
+    eng, s, rec = api
+    d = await get(s, "/api/scorecard")
+    assert d["meetings"] == 1 and d["trades"] == 1 and d["horizons"] == [1, 5] and d["benchmark"] == "SPY"
+    assert d["stances"] == 3 * len(rec["analysts"]["claude"]["assets"])
+    assert d["as_of"] < "2026-10-21"         # the meeting's own close isn't in yet
+    buy = [r for r in d["analysts"] if (r["who"], r["action"]) == ("claude", "BUY")]
+    assert [r["horizon"] for r in buy] == [1, 5]
+    assert all(r["pending"] == 1 and r["graded"] == 0 and r["mean_return"] is None for r in buy)
+    assert {r["who"] for r in d["chair"]} == {rec["chair"]["name"]}
+
+
 async def test_audit_filters_by_kind(api):
     _, s, _ = api
     d = await get(s, "/api/audit?kind=meeting")

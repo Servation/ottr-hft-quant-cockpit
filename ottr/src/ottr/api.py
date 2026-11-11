@@ -38,6 +38,7 @@ from aiohttp import web
 
 from ottr import health
 from ottr.config import Config
+from ottr.council import scorecard
 from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.engine.engine import WATCH_STATE
@@ -70,6 +71,7 @@ ENDPOINTS = [
     "GET  /api/meetings         council meetings with analyst stances (?limit=&before=<ts>)",
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
+    "GET  /api/scorecard        each analyst's stances (by model) and the chair's trades graded at +1 and +5 sessions",
     "GET  /api/council          a running meeting's progress, the next and the last meeting, what the watcher watches",
     "GET  /api/universe         the members the desk trades: class, cap, buyable, fractional; the satellites",
     "GET  /api/screen           the latest stock screen (counts, changes, the top of the ranking), recent changes",
@@ -409,6 +411,7 @@ def _meeting_view(ctx: ApiContext, mid: str, ts: float, status: str, record: str
            "dissent_notes": d.get("dissent_notes"), "trades": rec.get("trades", []),
            "dropped": rec.get("dropped", []), "errors": rec.get("errors", {}),
            "latency": rec.get("latency", {}), "tally": rec.get("tally"), "chair": rec.get("chair"),
+           "models": rec.get("models"),
            "analysts": analysts, "orders": orders}
     if full:
         out["decision"] = rec.get("decision")
@@ -452,6 +455,11 @@ async def get_audit(request: web.Request) -> web.Response:
     with ctx.reader.snapshot():
         rows = ctx.reader.audits(kind, since=since, limit=limit)
     return ok({"audit": rows})
+
+
+async def get_scorecard(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    return ok(scorecard.scorecard(ctx.reader))   # one snapshot: closes from one refresh
 
 
 async def get_council(request: web.Request) -> web.Response:
@@ -606,6 +614,7 @@ def create_app(ctx: ApiContext) -> web.Application:
     app.router.add_get("/api/meetings/{id}", get_meeting)
     app.router.add_get("/api/audit", get_audit)
     app.router.add_get("/api/council", get_council)
+    app.router.add_get("/api/scorecard", get_scorecard)
     app.router.add_get("/api/universe", get_universe)
     app.router.add_get("/api/screen", get_screen)
     app.router.add_get("/api/kill-switch", get_kill)

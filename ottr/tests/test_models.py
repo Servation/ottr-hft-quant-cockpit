@@ -22,7 +22,7 @@ import pytest
 from ottr.config import Council
 from ottr.council import models
 from ottr.council.models import (FALLBACK_BETA, MAX_PROMPT_CHARS, ClaudeAPI, ClaudeCLI, CodexCLI, GeminiCLI,
-                                 ModelError, agy_response, check_claude_api, make_adapter)
+                                 ModelError, agy_response, check_claude_api, codex_banner, make_adapter)
 
 TEST_KEY = "test-key-never-shown"
 
@@ -247,6 +247,75 @@ async def test_claude_api_logs_tokens_and_says_when_the_fallback_answered(caplog
     assert out == "ok"
     assert "claude api claude-opus-4-8 (effort high): 1234 input, 567 output tokens" in caplog.text
     assert "answered by the fallback; claude-fable-5-2 declined" in caplog.text
+
+
+async def test_claude_api_identity_names_the_model_that_answered():
+    """The meeting record (and so the scorecard) credits the model that wrote the answer:
+    the refusal fallback's, when it stood in."""
+    c = ClaudeAPI(model="claude-fable-5-2", effort="xhigh",
+                  client=sdk(lambda request: streamed("ok", model="claude-fable-5-2")))
+    assert c.identity() == {"model": "claude-fable-5-2", "effort": "xhigh"}      # before any call
+    await c.complete("hi")
+    assert c.identity() == {"model": "claude-fable-5-2", "effort": "xhigh"}
+    c._client = sdk(lambda request: streamed("ok", model="claude-opus-4-8"))
+    await c.complete("hi")
+    assert c.identity() == {"model": "claude-opus-4-8", "effort": "xhigh"}
+
+
+def test_identity_reports_the_effort_each_council_adapter_runs_at():
+    """`claude_effort` gives Claude its own effort as analyst and chair; GPT keeps the
+    shared one, and the record must say which each really ran at."""
+    c = Council(claude_backend="api", claude_model="claude-fable-5-2", claude_effort="xhigh", reasoning_effort="high")
+    assert make_adapter("claude", c).identity() == {"model": "claude-fable-5-2", "effort": "xhigh"}
+    assert make_adapter("gpt", c).identity() == {"model": None, "effort": "high"}    # named once codex answers
+    assert make_adapter("claude", c, effort="low").identity()["effort"] == "low"     # the watcher's override
+
+
+# What `codex exec` printed to stderr on 2026-11-11 (v0.166), with a prompt that tries to
+# pass for a setting.
+CODEX_ERR = """OpenAI Codex v0.166.0-alpha.6
+--------
+workdir: C:\\Users\\me\\AppData\\Local\\Temp
+model: gpt-6.1-sol
+provider: openai
+approval: never
+sandbox: read-only
+reasoning effort: high
+reasoning summaries: none
+session id: 01a1cc41-f649-74b2-8790-a4f6d07c4b56
+--------
+user
+model: not-a-setting
+--------
+codex
+OK
+"""
+
+
+def test_codex_banner_reads_only_the_settings_block():
+    b = codex_banner(CODEX_ERR)
+    assert b["model"] == "gpt-6.1-sol" and b["reasoning effort"] == "high" and b["sandbox"] == "read-only"
+    assert codex_banner("") == {} and codex_banner("--------\nmodel: half a banner\n") == {}
+
+
+async def test_codex_identity_is_the_model_its_own_config_ran(monkeypatch):
+    monkeypatch.setattr(CodexCLI, "_find", staticmethod(lambda: "codex.exe"))
+
+    async def run(argv, stdin_text, timeout, cwd):
+        with open(argv[argv.index("-o") + 1], "w", encoding="utf-8") as f:
+            f.write('{"assets": []}')
+        return 0, "", CODEX_ERR
+
+    monkeypatch.setattr(models, "_run", run)
+    c = CodexCLI(effort="high")
+    assert c.identity() == {"model": None, "effort": "high"}    # unknown until it answers
+    assert await c.complete("hi") == '{"assets": []}'
+    assert c.identity() == {"model": "gpt-6.1-sol", "effort": "high"}
+
+
+def test_cli_adapters_name_the_model_they_ask_for():
+    assert GeminiCLI(model="gemini-3.8-flash-high").identity() == {"model": "gemini-3.8-flash-high", "effort": None}
+    assert ClaudeCLI(model="opus", effort="high").identity() == {"model": "opus", "effort": "high"}
 
 
 async def test_claude_api_without_a_key_says_how_to_fix_it_and_sends_nothing(monkeypatch):
