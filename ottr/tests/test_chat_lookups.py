@@ -402,7 +402,7 @@ def sdk(handler):
         http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx2.MockTransport(handler)))
 
 
-def message(content, stop, usage=None, model="claude-opus-5-5"):
+def message(content, stop, usage=None, model="claude-fable-5-2"):
     return httpx2.Response(200, json={
         "id": "msg_test", "type": "message", "role": "assistant", "model": model, "content": content,
         "stop_reason": stop, "stop_sequence": None,
@@ -426,17 +426,17 @@ async def test_claude_tools_on_the_messages_api(lookups):
                        {"input_tokens": 3500, "output_tokens": 60, "cache_read_input_tokens": None,
                         "cache_creation_input_tokens": None})
 
-    model = ClaudeTools("claude-opus-5-5", "low", client=sdk(handler))
+    model = ClaudeTools("claude-fable-5-2", "low", client=sdk(handler))
     ans = await agent.answer(model, lookups, "SYSTEM", "what do we hold?", timeout=30)
     assert ans.text == "TLT is the only holding." and ans.tokens == (6500, 110, 2500, 400) and ans.rounds == 2
     b1, b2 = (json.loads(r.content) for r in seen)
     assert seen[0].url.path == "/v1/messages" and seen[0].headers["authorization"] == f"Bearer {TEST_KEY}"
     assert FALLBACK_BETA in seen[0].headers["anthropic-beta"]
-    assert (b1["model"], b1["max_tokens"], b1["system"]) == ("claude-opus-5-5", agent.ASK_MAX_TOKENS, "SYSTEM")
+    assert (b1["model"], b1["max_tokens"], b1["system"]) == ("claude-fable-5-2", agent.ASK_MAX_TOKENS, "SYSTEM")
     assert b1["tools"] == TOOLS and b1["tool_choice"] == {"type": "auto"}
     assert b1["output_config"] == {"effort": "low", "format": {"type": "json_schema", "schema": ANSWER_SCHEMA}}
     assert b1["cache_control"] == {"type": "ephemeral"} and b1["fallbacks"] == "default"
-    assert "thinking" not in b1                              # always on for Opus 5.5; effort sets how hard
+    assert "thinking" not in b1                              # always on; effort sets how hard
     # The second turn: the assistant's content as it came (thinking signature and all), then
     # the lookup's result for its tool_use id.
     user, assistant, results = b2["messages"]
@@ -458,7 +458,7 @@ async def test_claude_tools_last_turn_turns_tools_off(lookups, monkeypatch):
         return message([{"type": "text", "text": '{"answer": "ok", "propose_meeting": false, '
                                                  '"meeting_reason": ""}'}], "end_turn")
 
-    await agent.answer(ClaudeTools("claude-opus-5-5", "low", client=sdk(handler)), lookups, "S", "q", timeout=30)
+    await agent.answer(ClaudeTools("claude-fable-5-2", "low", client=sdk(handler)), lookups, "S", "q", timeout=30)
     assert [b["tool_choice"] for b in seen] == [{"type": "auto"}, {"type": "none"}]
     assert seen[1]["tools"] == TOOLS                         # still declared: the history holds a tool_use
 
@@ -469,7 +469,7 @@ async def test_claude_tools_errors_never_show_the_key(lookups):
                                                                      "message": "invalid x-api-key"}})
 
     with pytest.raises(ModelError) as e:
-        await agent.answer(ClaudeTools("claude-opus-5-5", "low", client=sdk(unauthorized)), lookups, "S", "q",
+        await agent.answer(ClaudeTools("claude-fable-5-2", "low", client=sdk(unauthorized)), lookups, "S", "q",
                            timeout=30)
     assert str(e.value).startswith("claude api:") and TEST_KEY not in str(e.value)
 
@@ -477,11 +477,11 @@ async def test_claude_tools_errors_never_show_the_key(lookups):
         return message([], "refusal")
 
     with pytest.raises(ModelError, match="declined to answer"):
-        await agent.answer(ClaudeTools("claude-opus-5-5", "low", client=sdk(refused)), lookups, "S", "q",
+        await agent.answer(ClaudeTools("claude-fable-5-2", "low", client=sdk(refused)), lookups, "S", "q",
                            timeout=30)
 
     def cut(request):
         return message([{"type": "text", "text": '{"answer": "trunc'}], "max_tokens")
 
     with pytest.raises(ModelError, match="cut off at 16000 tokens"):
-        await agent.answer(ClaudeTools("claude-opus-5-5", "low", client=sdk(cut)), lookups, "S", "q", timeout=30)
+        await agent.answer(ClaudeTools("claude-fable-5-2", "low", client=sdk(cut)), lookups, "S", "q", timeout=30)

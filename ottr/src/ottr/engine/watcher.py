@@ -4,7 +4,7 @@ when something has changed enough to look again before the schedule would.
 
 What it does:
 - After every meeting, and every `watch.check_every_min` in session, the watcher model
-  (Claude; the council's `claude_model`, Opus) reads what changed since the last meeting
+  (Claude; the council's `claude_model`) reads what changed since the last meeting
   and answers with validated JSON: whether to call a meeting now, and up to
   `watch.max_triggers` conditions to watch until the next one. A condition is an asset
   trading below or above a level, or moving more than some percent from where it was

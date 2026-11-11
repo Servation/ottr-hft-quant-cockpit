@@ -34,6 +34,15 @@ def test_the_shipped_config_is_valid(tmp_path):
     assert c.events.earnings_horizon == "6month" and {"VIXCLS", "DGS10", "BAMLH0A0HYM2"} <= set(c.events.macro)
 
 
+def test_claude_has_its_own_council_effort_and_the_watcher_and_chat_run_below_it(tmp_path):
+    c = load(data_dir=tmp_path)
+    assert (c.council.claude_model, c.council.effort_for("claude")) == ("claude-fable-5-2", "xhigh")
+    assert c.council.effort_for("gpt") == "high"          # Claude's xhigh doesn't slow GPT down
+    assert (c.watch.effort, c.chat.effort) == ("high", "low")
+    shared = variant(tmp_path, ('claude_effort = "xhigh"', 'claude_effort = ""'))
+    assert shared.council.effort_for("claude") == shared.council.effort_for("gpt") == "high"
+
+
 def test_caps_resolve_override_then_class_and_cash_is_uncapped(tmp_path):
     c = load(data_dir=tmp_path)
     assert c.cap_pct("SPY") == 25.0            # class cap
@@ -81,7 +90,12 @@ def test_env_overrides_and_secrets_stay_out_of_repr(tmp_path, monkeypatch):
     ([('chair_fallback = "gpt"', 'chair_fallback = "claude"')], "council.chair_fallback"),   # the chair itself
     ([('chair_fallback = "gpt"', 'chair_fallback = "llama"')], "council.chair_fallback"),
     ([('claude_backend = "api"', 'claude_backend = "http"')], "council.claude_backend"),
-    ([('claude_model = "claude-opus-5-5"', 'claude_model = "opus"')], "full model id"),   # an alias, on the API
+    ([('claude_model = "claude-fable-5-2"', 'claude_model = "opus"')], "full model id"),   # an alias, on the API
+    ([('claude_effort = "xhigh"', 'claude_effort = "ultra"')], "council.claude_effort for claude"),
+    ([('reasoning_effort = "high"', 'reasoning_effort = "max"')], "council.reasoning_effort for gpt"),   # not a codex level
+    ([('claude_effort = "xhigh"', 'claude_effort = ""'),                 # then Claude runs the shared one too
+      ('reasoning_effort = "high"', 'reasoning_effort = "minimal"')], "council.reasoning_effort for claude"),
+    ([('effort = "high"                  # ""', 'effort = "minimal"               # ""')], "watch.effort for claude"),
     ([('earnings_horizon = "6month"', 'earnings_horizon = "1year"')], "events.earnings_horizon"),
     ([("max_age_hours = 72", "max_age_hours = 24")], "events.max_age_hours"),    # stale between refreshes
     ([('VIXCLS = "VIX', 'vixcls = "VIX')], "events.macro.vixcls"),

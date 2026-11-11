@@ -625,7 +625,7 @@ async def cmd_archive(cfg, args) -> int:
 def watch_report(out: dict, cfg) -> str:
     """`ottr watch`: what the watcher would decide now."""
     model = cfg.watch.model
-    if model == "claude":   # a full id (claude-opus-5-5) names itself; a CLI alias (opus) doesn't
+    if model == "claude":   # a full id (claude-fable-5-2) names itself; a CLI alias (opus) doesn't
         cm = cfg.council.claude_model
         model = cm if cm.startswith("claude") else f"claude ({cm})"
     lines = [f"Watcher ({model}): call a meeting now? {'YES' if out['call_meeting'] else 'no'}",
