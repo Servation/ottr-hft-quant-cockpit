@@ -141,19 +141,19 @@ def asks(*calls) -> Step:
     """A turn that asks for lookups: (name, args) pairs."""
     tcs = [ToolCall(f"toolu_{next(_ids)}", name, args) for name, args in calls]
     content = [{"type": "tool_use", "id": c.id, "name": c.name, "input": c.input} for c in tcs]
-    return Step(content, "tool_use", tcs, "", model="claude-opus-5-5", tokens=(1000, 40, 800, 300))
+    return Step(content, "tool_use", tcs, "", model="claude-fable-5-2", tokens=(1000, 40, 800, 300))
 
 
 def replies(answer, propose=False, reason="") -> Step:
     text = json.dumps({"answer": answer, "propose_meeting": propose, "meeting_reason": reason})
-    return Step([{"type": "text", "text": text}], "end_turn", [], text, model="claude-opus-5-5",
+    return Step([{"type": "text", "text": text}], "end_turn", [], text, model="claude-fable-5-2",
                 tokens=(1200, 90, 1000, 500))
 
 
 class ScriptedTools:
     """A ToolModel that plays back turns and records what each request carried."""
 
-    name, model = "claude", "claude-opus-5-5"
+    name, model = "claude", "claude-fable-5-2"
 
     def __init__(self, *turns):
         self.turns, self.requests, self.sessions = list(turns), [], 0

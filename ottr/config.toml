@@ -238,17 +238,19 @@ chair_fallback = "gpt"     # chairs when the chair fails (signed out, timed out,
 min_analysts = 2
 timeout_sec = 300
 claude_backend = "api"     # api: the Claude API with CLAUDE_API_KEY (per token) | cli: `claude -p` (subscription)
-claude_model = "claude-opus-5-5"   # a full model id (the CLI takes it too)
+claude_model = "claude-fable-5-2"  # a full model id (the CLI takes it too)
+claude_effort = "xhigh"    # Claude's own effort as analyst and chair; "" = reasoning_effort
 gemini_model = "gemini-3.8-flash-high"
-reasoning_effort = "high"
+reasoning_effort = "high"  # GPT's effort, and Claude's when claude_effort is ""; agy reads Gemini's from the model name
 
 [watch]
 # The desk watcher (ottr/engine/watcher.py): between meetings, Claude reviews what changed and
 # sets conditions for code to check every minute; it may call a meeting outside the schedule.
 # It can't trade: a called meeting runs the same council and risk checks. Limits are code.
 enabled = true
-model = "claude"                 # claude (runs council.claude_model, Opus) | gpt | gemini
-effort = ""                      # "" = the council's reasoning effort
+model = "claude"                 # claude (runs council.claude_model) | gpt | gemini
+effort = "high"                  # "" = what that model runs at in the council. A review every 30
+                                 # minutes is a triage call, so it stays below the council's xhigh
 check_every_min = 30             # a review this often in session, and after every meeting
 max_triggers = 8                 # conditions it may set (a level broken, or a % move)
 max_called_per_day = 4

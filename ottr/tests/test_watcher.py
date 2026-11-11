@@ -229,7 +229,7 @@ async def test_the_api_chat_and_cli_show_the_watcher(cfg, store, ledger):
     assert "Watcher: watching SPY moving 2% from $" in render.council_line(c)
     assert "0 of 4 called meetings used today" in render.council_line(c)
     text = watch_report(out, cfg)
-    assert text.startswith("Watcher (claude-opus-5-5): call a meeting now? no\n  why: nothing material changed")
+    assert text.startswith("Watcher (claude-fable-5-2): call a meeting now? no\n  why: nothing material changed")
     assert "(a review by hand changes nothing and calls no meeting)" in text
 
 
