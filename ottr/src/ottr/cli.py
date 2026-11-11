@@ -11,6 +11,7 @@
   ottr meeting [--execute]                 one council meeting now (propose-only by default)
   ottr status [--json]                     read-only health + book; exit code says what's wrong
   ottr check                               replay the fill log and verify the books balance
+  ottr scorecard [--json]                  grade each analyst's stances and the chair's trades at +1 and +5 sessions
   ottr resume                              clear the drawdown halt and re-baseline the peak
 
 Read-only commands work while the engine runs. Writing commands need the writer lock,
@@ -38,6 +39,7 @@ from typing import Dict, Optional, Tuple
 from ottr import config as cfgmod
 from ottr import health
 from ottr.clock import SYSTEM, Clock
+from ottr.council import scorecard
 from ottr.engine.engine import Engine
 from ottr.engine.killswitch import KillSwitch
 from ottr.events.refresh import Sources
@@ -604,6 +606,21 @@ async def cmd_tax(cfg, args) -> int:
         store.close()
 
 
+async def cmd_scorecard(cfg, args) -> int:
+    """Read-only: how each analyst's calls (by model) and the chair's trades did since."""
+    try:
+        store = Store(_db(cfg), writer=False)
+    except FileNotFoundError as e:
+        print(e)
+        return 3
+    try:
+        sc = scorecard.scorecard(store)
+        print(json.dumps(sc, indent=2) if args.json else scorecard.report(sc))
+        return 0
+    finally:
+        store.close()
+
+
 async def cmd_archive(cfg, args) -> int:
     from ottr.archive import ArchiveError, archive
     try:
@@ -765,6 +782,9 @@ def main(argv=None) -> int:
     p.add_argument("--detail", action="store_true", help="list every disposition and wash sale")
     p = sub.add_parser("screen", help="run the stock screener now and show what it would change (changes nothing)")
     p.add_argument("--top", type=int, default=25, help="ranked stocks to show")
+    p = sub.add_parser("scorecard", help="grade each analyst's stances and the chair's trades at +1 and +5 "
+                                         "sessions, split by model (reads only)")
+    p.add_argument("--json", action="store_true", help="the same numbers as JSON")
     sub.add_parser("check")
     sub.add_parser("resume")
     args = ap.parse_args(argv)
@@ -786,7 +806,7 @@ def main(argv=None) -> int:
                    errors_to_stderr=args.cmd == "chat")
     fn = {"init": cmd_init, "run": cmd_run, "supervise": cmd_supervise, "service": cmd_service,
           "chat": cmd_chat, "data": cmd_data, "meeting": cmd_meeting, "status": cmd_status, "check": cmd_check,
-          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax, "archive": cmd_archive,
+          "resume": cmd_resume, "screen": cmd_screen, "tax": cmd_tax, "archive": cmd_archive, "scorecard": cmd_scorecard,
           "watch": cmd_watch}[args.cmd]
     try:
         return asyncio.run(fn(cfg, args))

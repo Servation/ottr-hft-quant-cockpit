@@ -19,7 +19,7 @@ import logging
 import os
 import shutil
 import tempfile
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import anthropic
 
@@ -49,6 +49,16 @@ class ModelAdapter:
     """Base interface. `name` is the provider id used in logs and the council record."""
 
     name = "model"
+    model: Optional[str] = None     # the model asked for, where the adapter names one
+    effort: Optional[str] = None    # the reasoning effort asked for (None: the model's own)
+    served: Optional[str] = None    # the model that answered the last call, where it says
+
+    def identity(self) -> Dict[str, Optional[str]]:
+        """{model, effort} behind the last answer, for the meeting record: the scorecard
+        splits every analyst's results by it, so a model change shows as a before and an
+        after. The model that answered beats the one asked for (the API's fallback may
+        answer instead; codex runs whatever model its own config names)."""
+        return {"model": self.served or self.model, "effort": self.effort}
 
     def locate(self) -> Optional[str]:
         """Path of the CLI this adapter runs, or None if it isn't installed."""
@@ -217,6 +227,7 @@ class ClaudeAPI(ModelAdapter):
             raise ModelError(f"claude api: timed out after {timeout:.0f}s") from None
         except anthropic.AnthropicError as e:
             raise ModelError(f"claude api: {api_message(e)}") from None
+        self.served = msg.model
         u = msg.usage
         logger.info("claude api %s (effort %s): %s input, %s output tokens%s", msg.model, self.effort,
                     u.input_tokens, u.output_tokens,
@@ -289,12 +300,31 @@ class CodexCLI(ModelAdapter):
                 text = f.read()
             if rc != 0 or not text.strip():
                 raise ModelError(f"codex exit {rc}: {cli_message(out, err, tail=True)}")
+            self.served = codex_banner(err).get("model")
             return _normalize(text)
         finally:
             try:
                 os.remove(out_path)
             except OSError:
                 pass
+
+
+def codex_banner(err: str) -> Dict[str, str]:
+    """The settings `codex exec` prints to stderr before the conversation (model, provider,
+    reasoning effort, ...), as {key: value}. Only the block between the first two
+    "--------" lines is read, so the echoed prompt can never pose as a setting."""
+    out: Dict[str, str] = {}
+    rules = 0
+    for line in err.splitlines():
+        if line.strip() == "--------":
+            rules += 1
+            if rules == 2:
+                break
+            continue
+        if rules == 1 and ": " in line:
+            k, v = line.split(": ", 1)
+            out[k.strip()] = v.strip()
+    return out if rules == 2 else {}
 
 
 class GeminiCLI(ModelAdapter):

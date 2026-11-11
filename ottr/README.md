@@ -106,6 +106,7 @@ A meeting survives one provider being down:
 | `ottr data --check [--symbols A,B]` | no | checks Alpaca, FRED, Alpha Vantage, the SEC, corporate actions and the Claude API with your keys |
 | `ottr screen [--top N]` | no | runs the stock screener now and shows what it would change (a few minutes) |
 | `ottr tax [--year Y] [--detail]` | no | tax ESTIMATES: gains by term, wash sales, dividends, estimated tax, after tax |
+| `ottr scorecard [--json]` | no | grades each analyst's stances (by model) and the chair's trades at +1 and +5 sessions (see [Scorecard](#scorecard)) |
 | `ottr watch` | no | asks the desk watcher now what it would watch for and whether it would call a meeting (a scratch copy) |
 | `ottr status [--json]` | no | health, the book (with after-tax equity), risk state, benchmarks, schedule |
 | `ottr check` | no | replays the ledger; exits 2 if the books don't balance |
@@ -298,6 +299,7 @@ switch and a meeting call, go to the engine, which records them.
 | `GET /api/council` | a running meeting's progress, the next and the last meeting |
 | `GET /api/universe` | the members (class, cap, buyable, fractional) and the satellites |
 | `GET /api/screen` | the latest stock screen, the satellites and recent membership changes |
+| `GET /api/scorecard` | the scorecard as JSON, the numbers `ottr scorecard` prints |
 | `GET/POST /api/kill-switch` | read, or engage/release the runtime dry run |
 | `GET/POST /api/meeting-call` | whether a meeting may be called now (and why not), or call one |
 
@@ -369,6 +371,23 @@ anything). It is deterministic code; no model can add a symbol.
 
 Each run goes to Discord as a digest, to `/screen`, `GET /api/screen` and `/ask`, and is
 kept in the ledger. `[screen]` in config.toml holds every threshold.
+
+## Scorecard
+
+`ottr scorecard` (and `GET /api/scorecard`) answers whether the council's calls have any
+edge, and whether a model change helped. Every analyst stance and every trade the chair
+kept is graded by the asset's total return from the meeting day's adjusted close to the
+close 1 and 5 sessions later, and by that return minus SPY's. Rows are split by analyst,
+model and effort (`claude-opus-5-5/high`), and stance: a model change shows as a new row
+beside the old one. Meetings recorded before the record kept the model show as
+`not recorded`.
+
+Read it with its evidence columns. The same asset is rated twice a session, so calls
+overlap: `n` counts graded calls, `indep` the calls on one asset whose windows don't
+overlap (the real evidence), `days` the distinct meeting days, and `+/-` a rough standard
+error of the excess over SPY. A mean inside its `+/-` is noise. A call whose target close
+isn't in yet is pending and counts nowhere, never as zero; one on a stock the desk stopped
+following has no price. Hit rate: a BUY rose, a SELL fell; HOLD has none.
 
 ## Tax estimates
 

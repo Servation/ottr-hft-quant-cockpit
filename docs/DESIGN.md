@@ -54,7 +54,8 @@ ottr/src/ottr/
                    profiles, corporate actions: fetched, sanity-checked, stored, read fail-closed
   universe/        membership (core ETFs from config, satellites from the DB), the weekly
                    stock screener: measures and score, membership rules, the run
-  council/         model adapters (Claude API; codex exec, agy over stdin), schemas, Council
+  council/         model adapters (Claude API; codex exec, agy over stdin), schemas, Council,
+                   the scorecard (each analyst's and the chair's calls graded, by model)
   risk/            gate (pre-trade checks and sizing), monitor (stops, trims, breaker,
                    corporate exits), Intent/Verdict types
   broker/          fee schedule (effective-dated), account model (buying power), SimBroker
@@ -71,7 +72,7 @@ ottr/src/ottr/
   chat/            `ottr chat`: the Discord slash-command bot; reads the API, writes only the
                    kill switch and the owner's meeting call
   cli.py           init | run | supervise | service | chat | meeting | status | check | resume
-                   | data | screen | tax | archive
+                   | data | screen | tax | archive | scorecard
 ```
 
 One engine process is the only writer. Read-only commands, the API and propose-only
@@ -119,6 +120,19 @@ Each equity point records which basis it used.
 Progress is reported through a callback that does no I/O, folded into one
 `MeetingProgress` state that `GET /api/council` serves and one Discord message shows,
 edited as the meeting moves. A slow reader or a Discord outage can't delay a meeting.
+
+### Grading the calls
+
+The record of every meeting keeps which model, at what effort, wrote each report and
+chaired (`models`, and `model`/`effort` on `chair`: the model that answered, which for the
+API can be its fallback and for codex is whatever its own config runs). The scorecard
+(`council/scorecard.py`, `ottr scorecard`, `GET /api/scorecard`) grades each stance and
+kept trade from the meeting day's adjusted close to the close 1 and 5 sessions later,
+against SPY, grouped by analyst, model and stance. It grades from the close, not the
+stance's raw intraday mid, so a dividend inside the window is never booked as a loss; the
+rest of the meeting day goes ungraded. A call not yet due is pending, never zero. Because
+each asset is rated twice a session, calls overlap, so every row also counts the
+non-overlapping windows its mean rests on and divides its standard error by that count.
 
 ### The watcher, between meetings
 
@@ -328,9 +342,11 @@ stays exact and a corrected rule applies to all history at once.
   view), then its conversion to US markets: Alpaca data and the NYSE calendar, the FIFO
   ledger and fees, the gate and SimBroker, events feeds, the engine switch, the risk
   monitor, corporate actions, the stock screener, tax estimates and the cutover tooling.
+  The per-model scorecard grades each analyst's stances and the chair's trades at +1 and
+  +5 sessions.
 - **Next:**
-  - **Measure:** a per-model scorecard grading each analyst's stances at +1 and +5
-    sessions, and grading the screener's picks against SPY before trusting the score more.
+  - **Measure:** grade the screener's picks against SPY before trusting the score more,
+    and let the scorecard accumulate before judging a model change on it.
   - **Phase 2, options:** the model gives direction, horizon and a structure type (long
     call or put, covered call, cash-secured put, verticals). Code picks expiry and strikes
     by DTE and delta rules and sizes by maximum loss, with contract fees, exercise and
