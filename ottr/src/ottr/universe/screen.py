@@ -30,9 +30,10 @@ Hard gates (a satellite failing one is demoted at once): enough history, no miss
 sessions lately (a halt, or a fresh listing), the price and liquidity floors, 60-session
 volatility inside the band, and a close above the 200-session average. Entry checks (a
 candidate must also pass them to be promoted, but a satellite isn't demoted for them): a
-positive 12-1 momentum, no flag, and a known report date more than the earnings blackout
-away. Why split them: a gate says the stock is no longer one the desk should hold; a
-check only says "not now".
+positive 12-1 momentum, no flag, and a next report known to be more than the earnings
+blackout away (a listed date, or the floor a recent report gives: `events/view.py`). Why
+split them: a gate says the stock is no longer one the desk should hold; a check only
+says "not now".
 """
 
 from __future__ import annotations
@@ -83,7 +84,8 @@ class Row:
     participation: Optional[float] = None
     rsi: Optional[float] = None
     regime: str = "UNKNOWN"
-    earnings_sessions: Optional[int] = None
+    earnings_sessions: Optional[int] = None   # to the next report; None = unknown
+    earnings_floor: bool = False              # no date listed yet: at least that many sessions
     quote_usable: Optional[float] = None      # share of sampled minutes the IEX quote was usable
     flags: Tuple[str, ...] = ()
     gate: str = ""                            # the first hard gate failed ("" = passed)
@@ -150,9 +152,11 @@ def _residual(days: Sequence[date], closes: Sequence[float], spy: Dict[date, flo
 
 
 def measure(cfg, symbol: str, daily: Sequence[Daily], spy: Sequence[Tuple[date, float]],
-            recent_sessions: Sequence[date], earnings_sessions: Optional[int], name: str = "") -> Row:
+            recent_sessions: Sequence[date], earnings_sessions: Optional[int], name: str = "",
+            earnings_floor: bool = False) -> Row:
     """One stock's Row. `daily`: its adjusted bars, oldest first. `spy`: SPY's adjusted
-    closes. `recent_sessions`: the last completed sessions (each must have a bar)."""
+    closes. `recent_sessions`: the last completed sessions (each must have a bar).
+    `earnings_sessions` and `earnings_floor`: its next report (`StoredEvents.next_report`)."""
     sc = cfg.screen
     days = [d for d, _, _ in daily]
     closes = [c for _, c, _ in daily]
@@ -174,7 +178,8 @@ def measure(cfg, symbol: str, daily: Sequence[Daily], spy: Sequence[Tuple[date, 
         participation=(dv / statistics.median(dollars[-PARTICIPATION_LONG:])
                        if dv and n >= PARTICIPATION_LONG and statistics.median(dollars[-PARTICIPATION_LONG:]) > 0
                        else None),
-        rsi=ind.rsi(closes, 14), regime=regime, earnings_sessions=earnings_sessions)
+        rsi=ind.rsi(closes, 14), regime=regime, earnings_sessions=earnings_sessions,
+        earnings_floor=earnings_floor and earnings_sessions is not None)
     return replace(row, flags=_flags(closes, row.rsi), gate=_gate(sc, row, set(days), recent_sessions, closes))
 
 

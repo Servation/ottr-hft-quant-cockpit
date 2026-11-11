@@ -17,8 +17,8 @@ from ottr.events.fred import Fred
 from ottr.events.refresh import (RETRY_SEC, Sources, company_profile, due, refresh_corporate_actions,
                                  refresh_due, refresh_earnings, refresh_macro, refresh_sec)
 from ottr.events.sec import Sec
-from ottr.events.view import (FEED_CORPORATE, FEED_EARNINGS, FEED_MACRO, FEED_SEC, StoredEvents,
-                              macro_readings, sessions_until)
+from ottr.events.view import (FEED_CORPORATE, FEED_EARNINGS, FEED_MACRO, FEED_SEC, MIN_QUARTER_DAYS, NextReport,
+                              StoredEvents, macro_readings, sessions_until)
 from ottr.market.alpaca import Alpaca
 from ottr.market.calendar import ET
 from ottr.market.http import RateLimiter
@@ -86,7 +86,8 @@ async def test_earnings_refresh_and_the_blackout_it_feeds(store):
     ev = events(store)
     assert ev.earnings_sessions("NVDA", NOW) == 4          # inside the blackout
     assert ev.earnings_sessions("AAPL", NOW) == 8
-    assert ev.earnings_sessions("MSFT", NOW) is None       # no upcoming date: unknown
+    assert ev.earnings_sessions("MSFT", NOW) is None       # no date on record at all: unknown
+    assert ev.next_report("AAPL", NOW) == NextReport(8)    # a listed date is exact, not a floor
     assert ev.earnings_sessions("SPY", NOW) is None        # an ETF has none (the gate doesn't ask)
 
 
@@ -121,6 +122,59 @@ async def test_a_stale_calendar_means_unknown(store):
     later = et(2026, 10, 24, 9, 1)                      # 72h and a minute on
     assert events(store).earnings_sessions("NVDA", later - 120) is not None
     assert events(store).earnings_sessions("NVDA", later) is None
+
+
+# -- the floor a recent report gives ---------------------------------------------------------------
+YESTERDAY = date(2026, 10, 20)
+FLOOR_DAY = date(2026, 12, 23)        # 12 weeks after the quarter that ended 2026-09-30
+
+
+async def reported_yesterday(store, tod="post-market", fiscal="2026-09-30", later=("AAPL", date(2026, 11, 2))):
+    """Two daily snapshots, as the engine takes them: yesterday's lists MSFT reporting
+    that day; today's, like Alpha Vantage's right after a report, has no MSFT date."""
+    f, av = av_with()
+    f.add("MSFT", YESTERDAY, tod, fiscal=fiscal)
+    assert (await refresh_earnings(store, av, "6month", YESTERDAY, NOW - 24 * H)).ok
+    _, av2 = av_with((later[0], later[1], "post-market"))
+    assert (await refresh_earnings(store, av2, "6month", TODAY, NOW)).ok
+
+
+async def test_a_stock_that_just_reported_has_a_floor_until_its_next_date_is_listed(store):
+    await reported_yesterday(store)
+    ev = events(store)
+    assert FLOOR_DAY == date(2026, 9, 30) + timedelta(days=MIN_QUARTER_DAYS)
+    assert ev.next_report("MSFT", NOW) == NextReport(sessions_until(CAL, TODAY, FLOOR_DAY), floor=True)
+    assert ev.earnings_sessions("MSFT", NOW) == 44            # 27 through November, 17 in December
+    # The floor runs out before the quarter can end: 6 sessions ahead it still clears the
+    # blackout, 5 ahead it says nothing the blackout doesn't, so the date is unknown again.
+    for day, expect in ((15, 6), (16, None)):
+        now = et(2026, 12, day, 9)
+        db.record_feed(store, FEED_EARNINGS, True, "test", now)
+        assert ev.earnings_sessions("MSFT", now) == expect
+    # Once Alpha Vantage lists the next date, that is the answer, floor or no floor.
+    now = et(2026, 12, 17, 9)
+    _, av = av_with(("MSFT", date(2027, 1, 27), ""))
+    await refresh_earnings(store, av, "6month", date(2026, 12, 17), now)
+    assert ev.next_report("MSFT", now) == NextReport(sessions_until(CAL, date(2026, 12, 17), date(2027, 1, 27)))
+
+
+@pytest.mark.parametrize("case", ["estimate", "late_filer", "no_fetch_since", "stale", "relisted"])
+async def test_a_last_report_the_desk_cant_vouch_for_leaves_the_date_unknown(store, case):
+    if case == "estimate":          # no time of day: Alpha Vantage's guess, which may just have slipped a week
+        await reported_yesterday(store, tod="")
+    elif case == "late_filer":      # a quarter that ended long ago: the next one is already over and due any day
+        await reported_yesterday(store, fiscal="2026-06-30")
+    elif case == "no_fetch_since":  # the only snapshot is from the report day itself: a postponement wouldn't show
+        f, av = av_with()
+        f.add("MSFT", YESTERDAY, "post-market")
+        await refresh_earnings(store, av, "6month", YESTERDAY, NOW - 24 * H)
+    elif case == "relisted":        # the report slipped and today's snapshot lists the new date: that date rules
+        await reported_yesterday(store, later=("MSFT", date(2026, 10, 27)))
+    else:
+        await reported_yesterday(store)
+    now = NOW + (73 * H if case == "stale" else 0)
+    r = events(store).next_report("MSFT", now)
+    assert r == (NextReport(4) if case == "relisted" else None)
 
 
 # -- corporate actions ---------------------------------------------------------------------------

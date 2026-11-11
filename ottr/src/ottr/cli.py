@@ -500,10 +500,12 @@ def screen_report(res, top: int) -> str:
     for r in res.ranked[:top]:
         def f(x, spec):
             return format(x, spec) if x is not None else "n/a"
+        # "21+": no date is listed yet, and the next report is at least that far off.
+        earn = f"{r.earnings_sessions}+" if r.earnings_floor else r.earnings_sessions
         lines.append(f"{r.rank:>4} {r.symbol:6} {r.score:>5.1f} {f(r.momentum_return and r.momentum_return * 100, '+5.0f')}% "
                      f"{f(r.residual, '6.2f')} {f(r.vol and r.vol * 100, '3.0f')}% "
                      f"{f(r.near_high and r.near_high * 100, '4.0f')}% {f(r.efficiency, '5.2f')} "
-                     f"{f(r.corr_spy, '5.2f')} {f(r.earnings_sessions, '>4')} "
+                     f"{f(r.corr_spy, '5.2f')} {f(earn, '>4')} "
                      f"{f(r.quote_usable and r.quote_usable * 100, '3.0f')}%  {', '.join(r.flags)}")
     if res.errors:
         lines.append("Errors: " + "; ".join(res.errors))

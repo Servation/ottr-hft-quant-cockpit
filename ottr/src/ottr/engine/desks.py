@@ -74,7 +74,8 @@ class Events(Protocol):
     is deliberately no default: a desk built without real events would trade blind."""
 
     def earnings_sessions(self, symbol: str, now: float) -> Optional[int]:
-        """Sessions to the next report; None when unknown (which blocks a stock's BUY)."""
+        """Sessions to the next report, or the fewest there can be when no date is listed
+        yet; None when unknown (which blocks a stock's BUY)."""
 
     def corp_action(self, symbol: str, now: float) -> Optional[str]:
         """What blocks a BUY (a pending action, or actions unknown), or None."""

@@ -7,11 +7,15 @@ Vantage gives it ("pre-market", "post-market", or "" for unknown).
 
 Why one call a day: the free key allows 25 requests a day, and the whole market's calendar
 is a single request. The desk only needs the next report per held or wanted stock; the
-gate blocks a single stock's BUY within 5 sessions of it, or when no date is known.
+gate blocks a single stock's BUY within 5 sessions of it, or when it is unknown.
 
 Why the 6-month horizon by default: a company that has just reported is next due about
-13 weeks later, right at the edge of a 3-month window. With 3 months it would drop out
-of the calendar (and so be blocked as "unknown") exactly when buying it is safest.
+13 weeks later, right at the edge of a 3-month window. The longer window isn't enough on
+its own, though: Alpha Vantage lists most dates only a few weeks ahead (on 2026-11-11,
+174 of the 2,974 companies with a report in the last three weeks had their next date
+listed), so `view.StoredEvents.next_report` takes a floor from the last report until the
+date appears. The time of day is what marks a date as confirmed: it only appears within
+about four weeks of the report, and dates without one are estimates that often move.
 
 Format facts (checked 2026-10-21 with the documented demo key): columns symbol, name,
 reportDate, fiscalDateEnding, estimate, currency, timeOfTheDay; share classes are written

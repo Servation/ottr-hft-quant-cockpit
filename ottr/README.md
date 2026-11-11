@@ -355,7 +355,7 @@ anything). It is deterministic code; no model can add a symbol.
     - 28 days after a demotion
     - no positive momentum
     - a warning flag
-    - a report within 5 sessions
+    - a report within 5 sessions, or a next report the desk can't place (see below)
   - A demoted stock that is held stays a member in "sunset" (SELL or HOLD only) until it is sold.
 - **Tradable on the free feed:** the desk sees only IEX's own book, where a thinly quoted
   stock can show a spread of several percent for hours. Every member's quote is sampled
@@ -366,6 +366,23 @@ anything). It is deterministic code; no model can add a symbol.
     its stop.
   - A candidate not measured yet waits a week, so a brand-new book's first screen adds
     no stocks until the next Saturday.
+
+- **Earnings:** a stock is promoted, and bought, only when its next report is known to
+  be more than 5 sessions away. The screener, the gate and the council packet all read
+  that from one place (`events/view.py`).
+  - A date on Alpha Vantage's calendar is used as it is.
+  - Alpha Vantage lists most dates only a few weeks ahead, so a stock that has just
+    reported has none. Its last report then gives a floor: the next one covers the
+    following quarter, which ends at least 12 weeks after the reported one, and no
+    company reports a quarter before it ends. The ranking shows a floor as `21+` and the
+    council packet as "earnings not listed yet, at least 21 sessions away".
+  - The floor only counts when the last report's date carried a time of day (Alpha
+    Vantage's mark of a confirmed date; without one it is an estimate that may just
+    have slipped a week) and the calendar has been fetched since that day.
+  - Anything else is unknown and blocks the BUY: no report on record, an estimate, a
+    floor within 5 sessions, or a calendar older than `events.max_age_hours`. So a stock
+    is open from the day after it reports until about a week before its next quarter
+    can end, and again once the next date is listed.
 
 Each run goes to Discord as a digest, to `/screen`, `GET /api/screen` and `/ask`, and is
 kept in the ledger. `[screen]` in config.toml holds every threshold.

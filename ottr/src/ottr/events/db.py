@@ -71,7 +71,8 @@ def macro_series(store: Store, series: str, since: Optional[date] = None) -> Lis
 
 # -- earnings ----------------------------------------------------------------------------
 def save_earnings(store: Store, dates: Iterable[EarningsDate], today: date, now: float) -> int:
-    """Replace every report date from `today` on with this snapshot. Returns rows stored."""
+    """Replace every report date from `today` on with this snapshot. Returns rows stored.
+    Dates before `today` stay: the last one is what the view's floor is taken from."""
     rows = {(d.symbol, d.day): d for d in dates if d.day >= today}
     with store.tx() as c:
         c.execute("DELETE FROM earnings WHERE day>=?", (today.isoformat(),))
@@ -86,6 +87,16 @@ def save_earnings(store: Store, dates: Iterable[EarningsDate], today: date, now:
 def next_earnings(store: Store, symbol: str, today: date) -> Optional[EarningsDate]:
     r = store.conn.execute("SELECT day,time_of_day,fiscal_end,estimate FROM earnings "
                            "WHERE symbol=? AND day>=? ORDER BY day LIMIT 1", (symbol, today.isoformat())).fetchone()
+    if r is None:
+        return None
+    return EarningsDate(symbol, date.fromisoformat(r[0]), r[1], date.fromisoformat(r[2]) if r[2] else None, r[3])
+
+
+def last_earnings(store: Store, symbol: str, today: date) -> Optional[EarningsDate]:
+    """The latest stored report date before `today`. A snapshot only replaces dates from
+    its own day on, so this is the date the calendar still listed on the day itself."""
+    r = store.conn.execute("SELECT day,time_of_day,fiscal_end,estimate FROM earnings "
+                           "WHERE symbol=? AND day<? ORDER BY day DESC LIMIT 1", (symbol, today.isoformat())).fetchone()
     if r is None:
         return None
     return EarningsDate(symbol, date.fromisoformat(r[0]), r[1], date.fromisoformat(r[2]) if r[2] else None, r[3])

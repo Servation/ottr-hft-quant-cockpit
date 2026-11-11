@@ -181,8 +181,27 @@ unknown, and capped:
 - SGOV uncapped (it is cash, outside gross exposure).
 
 Code buys only the gap to the target, clamped by `max_trade_usd`, 90% gross exposure and
-a 2% cash reserve; anything under $100 is dropped. Single stocks also need a known
-earnings date more than 5 sessions away.
+a 2% cash reserve; anything under $100 is dropped. Single stocks also need their next
+earnings report known to be more than 5 sessions away.
+
+**The next report.** One reader (`events/view.py`) answers for the gate, the screener
+and the council packet. A date on Alpha Vantage's calendar is exact. Most dates are only
+listed a few weeks ahead, so a stock that has just reported has none; its last report
+then gives a floor. The next report covers the following quarter, which can't end sooner
+than 12 weeks after the reported one, and a quarter isn't reported before it ends. The
+floor counts only when:
+- the last report's date carried a time of day, which Alpha Vantage adds once a date is
+  confirmed (a date without one is its estimate, and is listed again a week later when
+  it passes with no report);
+- the calendar has been fetched since that day, so a postponement would have shown;
+- it is still more than 5 sessions away.
+
+Otherwise the date is unknown and the BUY is blocked. The packet words a floor as "at
+least N sessions away", never as a date. Measured on the live calendar on 2026-11-11:
+right after a report only 174 of 2,974 companies had their next date listed; of dates a
+week or more past, 161 of 337 estimates had been listed again against 4 of 1,616 dates
+with a time; consecutive period ends were always 91 or 92 days apart, and no report
+came sooner than 8 days after its own period end.
 
 **The gate.**
 - **Any order:** a council decision older than 15 minutes is dropped. Every order needs

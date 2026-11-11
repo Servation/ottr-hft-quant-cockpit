@@ -4,7 +4,8 @@ the macro block for the council packet.
 
 What it does:
 - `StoredEvents` implements the desk's `Events` protocol from the database. The sessions
-  to a stock's next report come from the stored calendar and the trading calendar; a
+  to a stock's next report come from the stored calendar and the trading calendar (a
+  floor on them, when the calendar lists no date yet but the stock has just reported); a
   pending corporate action that blocks a BUY comes back as a one-line description.
 - `macro_readings` gives each configured FRED series' latest value, its change over a
   week and a month, and whether it has gone stale.
@@ -12,6 +13,14 @@ What it does:
 Why fail closed here: these readers are the last step before the gate. A feed that hasn't
 succeeded within `max_age` (or a symbol whose corporate actions were never fetched) says
 "unknown", which blocks the BUYs it guards. Missing data never reads as "nothing due".
+
+Why a floor from the last report: Alpha Vantage lists most report dates only a few weeks
+ahead, so for most of a quarter a stock that has just reported has no listed date. That
+isn't "unknown": the next report covers a quarter that hasn't ended yet, and no company
+reports a quarter before it ends. The floor is the earliest day that quarter can end (12
+weeks after the last one, the shortest fiscal quarter in use). It only counts when the
+last report is one we can vouch for; see `StoredEvents.next_report` for the conditions
+and the measurements behind them.
 """
 
 from __future__ import annotations
@@ -25,11 +34,27 @@ from ottr.events.fred import Observation
 from ottr.ledger.book import trade_day
 from ottr.ledger.store import Store
 from ottr.market.calendar import TradingCalendar
+from ottr.risk.gate import EARNINGS_BLACKOUT_SESSIONS
 
 FEED_MACRO = "macro"
 FEED_EARNINGS = "earnings"
 FEED_CORPORATE = "corporate_actions"
 FEED_SEC = "sec_lists"
+
+# The fewest days from one fiscal quarter's end to the next: 12 weeks (companies on a
+# 52-week year with a 16-week quarter have three of 12). Alpha Vantage rounds a period end
+# to the nearest month end, so the days between two it lists are 89 to 92; 84 leaves room
+# for that rounding. Measured on the live calendar (2026-11-11, 4,885 dates): every
+# pair of consecutive period ends was 91 or 92 days apart, and no report came less than 8
+# days after its own period end, so none came less than 99 days after the one before.
+MIN_QUARTER_DAYS = 84
+
+
+@dataclass(frozen=True)
+class NextReport:
+    """When a stock next reports, as far as the calendar can say."""
+    sessions: int            # sessions to the listed date, or the fewest there can be
+    floor: bool = False      # True: no date is listed yet; the report is at least `sessions` away
 
 
 def sessions_until(cal: TradingCalendar, today: date, day: date) -> int:
@@ -54,18 +79,44 @@ class StoredEvents:
     def from_config(cls, store: Store, calendar: Callable[[], TradingCalendar], cfg) -> "StoredEvents":
         return cls(store, calendar, cfg.events.max_age_hours * 3600)
 
-    def _fresh(self, name: str, now: float) -> bool:
-        f = db.feed(self.store, name)
-        return f is not None and f.ok_ts is not None and now - f.ok_ts <= self.max_age_sec
+    def next_report(self, symbol: str, now: float) -> Optional[NextReport]:
+        """`symbol`'s next report, or None when unknown.
+
+        A listed date gives the exact count. With no listed date, the last report gives a
+        floor: the next one covers the quarter after it, which can't end sooner than
+        MIN_QUARTER_DAYS after the reported one, and a quarter isn't reported before it
+        ends. The floor needs all of:
+        - a calendar fetched within `max_age` (as for a listed date);
+        - a last report whose date carried a time of day. Alpha Vantage adds the time once
+          a date is confirmed, a few weeks ahead; without one the date is its estimate,
+          and when an estimate passes with no report it lists a new one about a week
+          later. On the live calendar, of the dates a week or more past, 161 of 337
+          estimates had been listed again like that, against 4 of 1,616 with a time;
+        - a calendar fetched after that report's day, so the snapshot we hold had the
+          chance to list a postponed date and didn't;
+        - a floor still more than the blackout away. Closer than that, all it says is "not
+          yet", which is unknown again until the date is listed.
+        A stock with no report on record, or only an estimate, stays unknown.
+        """
+        f = db.feed(self.store, FEED_EARNINGS)
+        if f is None or f.ok_ts is None or now - f.ok_ts > self.max_age_sec:
+            return None
+        today, cal = trade_day(now), self.calendar()
+        nxt = db.next_earnings(self.store, symbol, today)
+        if nxt is not None:
+            return NextReport(sessions_until(cal, today, nxt.day))
+        last = db.last_earnings(self.store, symbol, today)
+        if last is None or not last.time_of_day or last.fiscal_end is None or trade_day(f.ok_ts) <= last.day:
+            return None
+        n = sessions_until(cal, today, last.fiscal_end + timedelta(days=MIN_QUARTER_DAYS))
+        return NextReport(n, floor=True) if n > EARNINGS_BLACKOUT_SESSIONS else None
 
     def earnings_sessions(self, symbol: str, now: float) -> Optional[int]:
-        """Sessions to `symbol`'s next report, or None when unknown (no date, or a stale
-        calendar)."""
-        if not self._fresh(FEED_EARNINGS, now):
-            return None
-        today = trade_day(now)
-        nxt = db.next_earnings(self.store, symbol, today)
-        return None if nxt is None else sessions_until(self.calendar(), today, nxt.day)
+        """Sessions to `symbol`'s next report (the fewest there can be, when no date is
+        listed yet), or None when unknown. The number the gate and the screener test
+        against the blackout; `next_report` also says which kind it is."""
+        r = self.next_report(symbol, now)
+        return None if r is None else r.sessions
 
     def corp_action(self, symbol: str, now: float) -> Optional[str]:
         """What blocks a BUY of `symbol` (a pending action, or actions unknown), or None."""
