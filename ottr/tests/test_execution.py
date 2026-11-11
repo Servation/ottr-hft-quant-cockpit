@@ -258,6 +258,26 @@ async def test_the_stored_events_gate_buys_until_actions_are_known(rig):
     assert (await rig.ex.process(sell("SPY", "s1", created=monday))).approved
 
 
+@pytest.mark.parametrize("tod,reason", [("post-market", "approved"), ("", "earnings_unknown")])
+async def test_a_stock_that_just_reported_can_be_bought_before_its_next_date_is_listed(rig, tod, reason):
+    """Alpha Vantage drops a company from its calendar once it reports and lists the next
+    date weeks later. A confirmed report (one with a time of day) is enough to know the
+    next is a quarter away; an estimate that merely passed is not."""
+    from ottr.events import db
+    from ottr.events.earnings import EarningsDate
+    from ottr.events.view import FEED_EARNINGS, StoredEvents
+    rig.desk.events = StoredEvents(rig.store, lambda: CAL, 72 * 3600)
+    db.save_corporate_actions(rig.store, [], ["NVDA"], date(2026, 8, 1), date(2027, 1, 1), OPEN)
+    yesterday, today = date(2026, 10, 20), date(2026, 10, 21)
+    db.save_earnings(rig.store, [EarningsDate("NVDA", yesterday, tod, date(2026, 9, 30))], yesterday, OPEN - 86400)
+    db.record_feed(rig.store, FEED_EARNINGS, True, "the report day's snapshot", OPEN - 86400)
+    v = await rig.ex.process(buy("NVDA", "b1"))
+    assert v.reason == "earnings_unknown"              # no snapshot since the report: it may have slipped
+    db.save_earnings(rig.store, [], today, OPEN)       # today's snapshot lists no NVDA date
+    db.record_feed(rig.store, FEED_EARNINGS, True, "today's snapshot", OPEN)
+    assert (await rig.ex.process(buy("NVDA", "b2"))).reason == reason
+
+
 async def test_stocks_are_capped_tighter_than_etfs(rig):
     rig.desk.events = Events({"NVDA": 30})
     rig.market.vol["NVDA"] = 0.05                      # would ask for a huge weight; stock cap is 8%

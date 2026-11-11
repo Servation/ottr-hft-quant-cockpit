@@ -323,6 +323,41 @@ async def test_the_weekly_screen_promotes_satellites_the_desk_then_trades_as_sto
     assert screen_report(res, 5).count("\n") > 5
 
 
+async def test_stocks_that_just_reported_are_promoted_and_buyable_before_their_next_date_is_listed(cfg, store, ledger):
+    """Earnings season as Alpha Vantage shows it: every stock reported on Thursday and the
+    calendar lists no next date for any of them yet. A confirmed report (it had a time of
+    day) is known to be a quarter from the next one; NVDA's was only an estimate that
+    passed, and SOON has no report on record, so those two stay unknown."""
+    eng, rig, _ = await screen_rig(cfg, store)
+    today = trade_day(SAT)
+    thursday = today - timedelta(days=2)
+    reports = [EarningsDate(s, thursday, "" if s == "NVDA" else "post-market", date(2026, 9, 30))
+               for s in [*STOCKS, "TWIN"] if s != "SOON"]
+    db.save_earnings(store, reports, thursday, SAT - 2 * 86400)     # Thursday's snapshot replaces the rig's dates
+    db.save_earnings(store, [], today, SAT)                         # today's lists none of these stocks
+    res = await eng.screen(apply=True)
+    promoted = [s for s, _ in res.decision.promote]
+    passed = dict(res.decision.passed)
+    assert len(promoted) == 6 and not {"NVDA", "SOON"} & set(promoted)
+    assert passed["NVDA"] == passed["SOON"] == "no known report date"
+    assert all(res.rows[s].earnings_floor and res.rows[s].earnings_sessions > 5 for s in promoted)
+    assert res.rows["NVDA"].earnings_sessions is None and not res.rows["NVDA"].earnings_floor
+    n = res.rows[promoted[0]].earnings_sessions
+    assert f" {n}+ " in screen_report(res, 5)                       # shown as a floor, not as a date
+    assert udb.last_screen(store)["result"]["rows"][promoted[0]]["earnings_floor"] is True
+
+    # The council is told the same thing the gate will decide.
+    no_corporate_actions(store, promoted, SAT)
+    assert not set(promoted) & set(eng.buy_blocks(SAT))
+    first, second = promoted[:2]
+    with store.tx() as c:                                           # the first one's date was only an estimate
+        c.execute("UPDATE earnings SET time_of_day='' WHERE symbol=?", (first,))
+    db.save_earnings(store, [EarningsDate(second, today + timedelta(days=3))], today, SAT)    # a date appears
+    blocks = eng.buy_blocks(SAT)
+    assert blocks[first] == "no confirmed earnings date" and blocks[second] == "earnings in 2 sessions"
+    assert not set(promoted[2:]) & set(blocks)
+
+
 async def test_a_satellite_that_fails_a_gate_is_sold_off_then_leaves(cfg, store, ledger):
     eng, rig, _ = await screen_rig(cfg, store)
     udb.promote(store, "DOWN", 50.0, "test", SAT - 30 * 86400)

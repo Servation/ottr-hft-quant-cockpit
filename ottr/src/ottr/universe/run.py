@@ -186,9 +186,10 @@ async def run_screen(cfg, store: Store, alpaca: Alpaca, sec: Optional[Sec], cal:
         raise ScreenError(f"only {len(spy)} sessions of SPY history to measure against")
     recent_sessions = [x.day for x in cal.completed_sessions(now, RECENT_SESSIONS)]
     events = StoredEvents.from_config(store, lambda: cal, cfg)
+    reports = {s: events.next_report(s, now) for s in sorted(set(pool) | (set(current) - set(unfit)))}
     rows = {s: measure(cfg, s, [(b.day, b.close, b.volume) for b in bars.get(s, [])], spy, recent_sessions,
-                       events.earnings_sessions(s, now), assets[s].name if s in assets else "")
-            for s in sorted(set(pool) | (set(current) - set(unfit)))}
+                       r.sessions if r else None, assets[s].name if s in assets else "", bool(r and r.floor))
+            for s, r in reports.items()}
     gapped = sum(1 for r in rows.values() if r.gate.startswith("no bar for"))
     if len(rows) >= 20 and gapped > len(rows) / 2:
         raise ScreenError(f"{gapped} of {len(rows)} stocks miss recent sessions: the bars look incomplete")

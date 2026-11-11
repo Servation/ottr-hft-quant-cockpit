@@ -4,7 +4,7 @@ Events and macro: what the US desk must know beyond prices, from four free sourc
 - `fred`: macro series (VIX, Treasury yields and curve, high-yield spread, Fed funds,
   breakeven inflation) from FRED's keyless CSV, as context for the council.
 - `earnings`: the earnings calendar from Alpha Vantage (one call a day). A single stock
-  with no known report date, or one within the blackout, gets no new BUY.
+  whose next report is unknown, or within the blackout, gets no new BUY.
 - `sec`: the SEC's ticker lists and company profiles, which tell an operating company from
   a fund, trust or SPAC (the screener's pool, PR 10).
 - `corporate`: corporate actions from Alpaca (dividends, splits, mergers, spin-offs...),

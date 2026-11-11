@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from ottr.events.view import MacroReading
+from ottr.events.view import MacroReading, NextReport
 from ottr.market import indicators as ind
 from ottr.market.calendar import ET, MarketTime, SessionState
 from ottr.market.types import BASIS_CLOSE, BASIS_DELAYED, Quote
@@ -48,6 +48,7 @@ class UsAssetView:
     vol: Optional[float] = None
     corr_spy: Optional[float] = None
     earnings_sessions: Optional[int] = None    # single stocks only
+    earnings_floor: bool = False               # no date listed yet: at least that many sessions
     corp_action: Optional[str] = None          # what blocks a BUY, if anything
     flags: Tuple[str, ...] = ()
 
@@ -115,7 +116,10 @@ def asset_line(v: UsAssetView) -> str:
     rets = " ".join(_pct(v.returns.get(n)) for n in RETURN_WINDOWS)
     events = []
     if v.asset_class == "stock":
+        # A floor is worded as one: "in N sessions" would give the council a date to plan
+        # around that nobody has announced.
         events.append("earnings date unknown" if v.earnings_sessions is None
+                      else f"earnings not listed yet, at least {v.earnings_sessions} sessions away" if v.earnings_floor
                       else f"earnings in {v.earnings_sessions} sessions")
     if v.corp_action:
         events.append(v.corp_action)
@@ -168,8 +172,11 @@ def _fix(x: Optional[float], decimals: int) -> str:
 # -- building ------------------------------------------------------------------------------
 def build_view(symbol: str, asset_class: Optional[str], price: Optional[Quote],
                closes: Sequence[Tuple[date, float]], spy: Sequence[Tuple[date, float]], data_cfg,
-               earnings_sessions: Optional[int] = None, corp_action: Optional[str] = None) -> UsAssetView:
-    """`closes` are adjusted daily closes through the last final session, oldest first."""
+               report: Optional[NextReport] = None, corp_action: Optional[str] = None) -> UsAssetView:
+    """`closes` are adjusted daily closes through the last final session, oldest first.
+    `report`: a stock's next earnings report (`StoredEvents.next_report`); None = unknown."""
+    if asset_class != "stock":
+        report = None
     cl = [c for _, c in closes]
     flags: List[str] = []
     if len(cl) < MIN_HISTORY:
@@ -199,7 +206,7 @@ def build_view(symbol: str, asset_class: Optional[str], price: Optional[Quote],
         er=er, regime=ind.regime(er, data_cfg.er_threshold),
         vol=ind.annualized_vol(cl, data_cfg.vol_sessions, ind.TRADING_DAYS) if len(cl) > data_cfg.vol_sessions else None,
         corr_spy=1.0 if symbol == BENCH and closes else ind.aligned_return_correlation(closes, spy, data_cfg.vol_sessions),
-        earnings_sessions=earnings_sessions if asset_class == "stock" else None,
+        earnings_sessions=report.sessions if report else None, earnings_floor=bool(report and report.floor),
         corp_action=corp_action, flags=tuple(flags))
 
 
@@ -229,7 +236,7 @@ def build_snapshot(cfg, now: float, mt: MarketTime, prices: Mapping[str, Quote],
     warnings: List[str] = []
     for sym, cls in members.items():
         views[sym] = build_view(sym, cls, prices.get(sym), closes.get(sym, ()), spy, cfg.data,
-                                events.earnings_sessions(sym, now) if events and cls == "stock" else None,
+                                events.next_report(sym, now) if events and cls == "stock" else None,
                                 events.corp_action(sym, now) if events else None)
         if prices.get(sym) is None:
             warnings.append(f"{sym} has no price")

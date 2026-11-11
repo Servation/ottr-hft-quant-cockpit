@@ -11,7 +11,7 @@ import pytest
 
 from ottr.clock import FakeClock
 from ottr.config import load
-from ottr.events.view import MacroReading
+from ottr.events.view import MacroReading, NextReport
 from ottr.ledger.book import Ledger
 from ottr.ledger.marks import mark
 from ottr.ledger.store import Store
@@ -19,6 +19,7 @@ from ottr.market import benchmarks as bm
 from ottr.market import history
 from ottr.market.alpaca import Alpaca
 from ottr.market.calendar import ET, TradingCalendar
+from ottr.market.packet import asset_line, build_view
 from ottr.market.http import RateLimiter
 from ottr.market.types import BASIS_CLOSE, BASIS_DELAYED, BASIS_LIVE, Bar, MarketDataError, Quote
 from ottr.market.service import MarketData
@@ -263,6 +264,20 @@ async def test_vol_and_regime_come_from_adjusted_closes(ucfg, store):
     assert await svc.vol_regime("NOPE") == (None, "UNKNOWN")
 
 
+@pytest.mark.parametrize("report,text", [
+    (None, "earnings date unknown"),
+    (NextReport(8), "earnings in 8 sessions"),
+    (NextReport(21, floor=True), "earnings not listed yet, at least 21 sessions away"),
+])
+def test_the_packet_words_a_floor_as_a_floor_not_a_date(ucfg, report, text):
+    """The council plans around what the packet says: "in 21 sessions" would be a date
+    nobody has announced."""
+    line = asset_line(build_view("NVDA", "stock", None, (), (), ucfg.data, report))
+    assert f"| {text} | FLAGS:" in line
+    etf = asset_line(build_view("SPY", "equity_etf", None, (), (), ucfg.data, report))
+    assert "| none | FLAGS:" in etf                 # earnings are a single stock's event
+
+
 async def test_the_council_packet(ucfg, store):
     f = fake_market(ucfg, WED_11)
     snaps_for(f, list(ucfg.universe.core) + list(ucfg.universe.reference))
@@ -273,7 +288,7 @@ async def test_the_council_packet(ucfg, store):
     clock.set(WED_11)
 
     class Events:
-        def earnings_sessions(self, s, now):
+        def next_report(self, s, now):
             return None
 
         def corp_action(self, s, now):

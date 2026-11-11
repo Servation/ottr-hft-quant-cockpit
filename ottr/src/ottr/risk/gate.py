@@ -10,7 +10,8 @@ symbol that left the universe can always be sold. A BUY must also:
 - be for an active member (not a sunset one being sold off);
 - not be in the session's last minutes, during the drawdown halt, during a cooldown,
   or after a risk action on the asset during the meeting;
-- for a single stock, have a known earnings date more than the blackout away;
+- for a single stock, be known to report more than the blackout away (a listed date,
+  or the floor its last report gives: `events/view.py`);
 - not have a corporate action pending that blocks BUYs, or unknown corporate actions;
 - fit its target (vol-target weight x conviction x regime, capped by class and symbol),
   the per-trade ceiling, gross exposure (the cash ETF doesn't count), the satellite
@@ -59,7 +60,7 @@ class GateContext:
     buying_power: Decimal
     cash_etf_value: float = 0.0          # held in the sweep ETF: can fund a BUY
     satellites_value: float = 0.0        # stocks held, sunset ones included
-    earnings_sessions: Optional[int] = None   # sessions to the next report; None = unknown
+    earnings_sessions: Optional[int] = None   # sessions to the next report (or a floor); None = unknown
     corp_action: Optional[str] = None         # what blocks a BUY (a pending action, or unknown)
     halted: bool = False
     cooldown_until: float = 0.0
