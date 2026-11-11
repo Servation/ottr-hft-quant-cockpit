@@ -158,12 +158,14 @@ async def test_a_stock_that_just_reported_has_a_floor_until_its_next_date_is_lis
     assert ev.next_report("MSFT", now) == NextReport(sessions_until(CAL, date(2026, 12, 17), date(2027, 1, 27)))
 
 
-@pytest.mark.parametrize("case", ["estimate", "late_filer", "no_fetch_since", "stale", "relisted"])
+@pytest.mark.parametrize("case", ["estimate", "late_filer", "no_period", "no_fetch_since", "stale", "relisted"])
 async def test_a_last_report_the_desk_cant_vouch_for_leaves_the_date_unknown(store, case):
     if case == "estimate":          # no time of day: Alpha Vantage's guess, which may just have slipped a week
         await reported_yesterday(store, tod="")
     elif case == "late_filer":      # a quarter that ended long ago: the next one is already over and due any day
         await reported_yesterday(store, fiscal="2026-06-30")
+    elif case == "no_period":       # the calendar didn't say which quarter was reported: nothing to count from
+        await reported_yesterday(store, fiscal="")
     elif case == "no_fetch_since":  # the only snapshot is from the report day itself: a postponement wouldn't show
         f, av = av_with()
         f.add("MSFT", YESTERDAY, "post-market")
