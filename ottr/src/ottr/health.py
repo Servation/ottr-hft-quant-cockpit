@@ -270,14 +270,20 @@ def evaluate(cfg: Config, store: Store, now: Optional[float] = None, *, inside_e
         if risk is not None and risk.healthy:
             held = set(Ledger(store).positions())
             blind = {a: since for a, since in (store.get_state("risk_blind") or {}).items() if a in held}
-            if blind:
+            # Only a holding blind for `blind_alarm_after_sec` raises it (`blind` itself, for
+            # status, has every one at once): a thin IEX book loses its quote for a minute
+            # or two many times a day, and RPRX raised and cleared this alarm 10 times on
+            # 2026-11-13, each a critical Discord post about nothing that lasted.
+            long_blind = {a: since for a, since in blind.items()
+                          if now - since >= cfg.engine.blind_alarm_after_sec}
+            if long_blind:
                 # One alarm for the set: a feed outage blinds every holding at once, and
                 # that is one problem to report, not one message per asset.
-                oldest = min(blind.values())
+                oldest = min(long_blind.values())
                 alarms.append(Alarm("risk:blind", CRITICAL,
-                                    f"risk monitor blind on {', '.join(sorted(blind))} for up to "
-                                    f"{fmt_age(now - oldest)}: no live quote, so trailing stops and "
-                                    "trims are not enforced"))
+                                    f"risk monitor blind on {', '.join(sorted(long_blind))} for up to "
+                                    f"{fmt_age(now - oldest)}: no live quote or recent trade, so trailing "
+                                    "stops and trims are not enforced"))
         alarms += feed_alarms(cfg, store, now, epoch)
         alarms += corporate_alarms(store, now)
 

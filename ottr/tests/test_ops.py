@@ -96,7 +96,7 @@ async def _hold_tlt(eng):
 async def test_risk_blind_is_persisted_and_cleared(eng, rig, store):
     await _hold_tlt(eng)
     p = rig.price("TLT")
-    rig.fake.add_quote("TLT", p * 0.97, p * 1.03, age=2)               # too wide to be a market
+    rig.fake.add_quote("TLT", p * 0.97, p * 1.03, age=2, trade_age=600)    # too wide, and no recent print
     rig.market._snaps_ts = 0
     await eng.risk_tick()
     since = store.get_state("risk_blind")["TLT"]
@@ -108,6 +108,37 @@ async def test_risk_blind_is_persisted_and_cleared(eng, rig, store):
     rig.market._snaps_ts = 0
     await eng.risk_tick()
     assert store.get_state("risk_blind") == {}
+
+
+async def test_a_thin_iex_book_that_still_trades_is_watched_not_blind(eng, rig, store, monkeypatch):
+    """RPRX, 2026-11-13: IEX quoted it 2-5% wide for minutes at a time while it kept printing
+    at the national price. The monitor watches the prints instead of going blind, and a print
+    under the stop sells it: deferred while the quote is unusable, filled at the first
+    usable bid."""
+    import ottr.engine.engine as engmod
+    await _hold_tlt(eng)
+    p = rig.price("TLT")
+    rig.fake.add_quote("TLT", p * 0.97, p * 1.03, age=2, last=p, trade_age=30)     # too wide, still trading
+    rig.market._snaps_ts = 0
+    res = await eng.risk_tick()
+    assert store.get_state("risk_blind") == {} and res.summary() == "all clear"
+    pos = eng.ledger.positions()["TLT"]
+    under = round(pos.high_water * (1 - pos.stop_pct) * 0.99, 2)
+    rig.fake.add_quote("TLT", under * 0.97, under * 1.03, age=2, last=under, trade_age=10)
+    rig.market._snaps_ts = 0
+    res = await eng.risk_tick()
+    assert [i.origin for i in res.intents] == ["stop"] and res.intents[0].reason.startswith(f"last trade {under:.2f}")
+    await eng.executor.drain()
+    assert store.conn.execute("SELECT status FROM orders WHERE origin='stop'").fetchone()[0] == "deferred"
+    assert "TLT" in eng.ledger.positions()
+    rig.fake.add_quote("TLT", under - 0.01, under + 0.01, age=2, last=under, trade_age=10)   # usable again
+    rig.market._snaps_ts = 0
+    monkeypatch.setattr(engmod, "DEFERRED_RETRY_SEC", 0.0)
+    assert "1 deferred order(s) retried" in await eng.jobs_tick()
+    await eng.executor.drain()
+    assert "TLT" not in eng.ledger.positions()
+    assert float(store.conn.execute("SELECT price FROM fills WHERE origin='stop'").fetchone()[0]) == pytest.approx(
+        under - 0.01)                                                   # at the bid, not the print
 
 
 async def test_an_outage_with_nothing_cached_marks_every_holding_blind(eng, rig, store):

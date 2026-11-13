@@ -417,6 +417,7 @@ class Engine:
         cash_symbol = self.cfg.universe.cash_symbol
         try:
             quotes = await self.market.live_quotes()
+            trades = await self.market.recent_trades()
             marks = await self.market.marks()
         except MarketDataError:
             # No quotes at all: every holding is unprotected, which the watchdog must see.
@@ -436,7 +437,7 @@ class Engine:
                 prev_close[s] = corporate.restate(done[-1].close, changes)
         exits = corporate.exits_due(self.store, self.market.calendar, mt.session.day, current)
         res = monitor.check(self.cfg, now, current, valuation, quotes, state, points, self.classes(), prev_close,
-                            exits)
+                            exits, trades)
         blind = self._blind_state({d["asset"] for k, d in res.events if k == "risk_blind"}, now)
         with self.store.tx():
             for a, h in res.high_water.items():

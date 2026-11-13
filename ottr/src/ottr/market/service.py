@@ -7,7 +7,8 @@ What it does:
   restart knows the session at once;
 - live IEX snapshots for every tracked symbol (core, reference, held, and any extra the
   caller adds), cached for `data.quote_ttl_sec`; `quote()` returns only a quote that
-  passed `check_quote`, or why there is none;
+  passed `check_quote`, or why there is none; `recent_trades()` the last IEX trades the
+  risk monitor watches while a holding's quote is unusable;
 - daily bars once each session's close is final (raw closes for marks, adjusted closes
   for indicators and benchmarks), kept in the book;
 - `marks()` for every holding, by the session rules in `ledger/marks.py`;
@@ -35,7 +36,7 @@ from ottr.ledger.store import Store
 from ottr.market import benchmarks as bm
 from ottr.market import history
 from ottr.market import indicators as ind
-from ottr.market.alpaca import Alpaca, AlpacaError, Asset, check_quote, completed_bars
+from ottr.market.alpaca import Alpaca, AlpacaError, Asset, check_quote, check_trade, completed_bars
 from ottr.market.calendar import CalendarError, Session, TradingCalendar
 from ottr.market.packet import UsSnapshot, build_snapshot
 from ottr.market.types import Bar, MarketDataError, Quote
@@ -139,6 +140,19 @@ class MarketData:
     async def live_quotes(self) -> Dict[str, Quote]:
         """Every tracked symbol that has a usable live quote right now."""
         return {s: q for s, (q, _) in (await self.quote_checks()).items() if q is not None}
+
+    async def recent_trades(self) -> Dict[str, Tuple[float, float]]:
+        """symbol -> (time, price) of its last IEX trade, for every tracked symbol that
+        traded within `data.max_quote_age_sec` (from the cached snapshots, so the risk
+        monitor reads the same poll its quotes came from)."""
+        now = self.clock.time()
+        snaps, limits, splits = await self.snapshots(), self.cfg.data.quote_limits(), self._splits(now)
+        out = {}
+        for s in self.tracked():
+            t = check_trade(snaps.get(s), now, limits, splits.get(s, 1.0))
+            if t is not None:
+                out[s] = t
+        return out
 
     async def quote_checks(self, symbols: Optional[Iterable[str]] = None) -> Dict[str, Tuple[Optional[Quote], str]]:
         """symbol -> (a usable quote or None, why not), for every tracked symbol (from the

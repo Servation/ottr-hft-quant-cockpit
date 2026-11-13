@@ -7,6 +7,8 @@ only) gives the clock, the exchange calendar and the asset list. The data API gi
 IEX quotes (snapshots), SIP daily bars and corporate actions (read by
 `ottr.events.corporate`). `check_quote` turns a snapshot into a Quote only
 when the quote is sane; otherwise it says why, so the caller defers instead of guessing.
+`check_trade` reads the snapshot's last IEX trade, which the risk monitor watches while a
+holding's quote is unusable.
 
 Why GET only, paper host only: OTTR simulates its own fills, so it never needs to send an
 order. A client that can only GET, and only from the paper trading host, can't place a
@@ -372,3 +374,28 @@ def check_quote(symbol: str, snap: Optional[dict], now: float,
             return None, f"off_market ({gap:.1f}% from previous close)"
     return Quote(asset=normalize(symbol), bid=bid, ask=ask, last=last or mid, ts=qts, source="alpaca",
                  basis=BASIS_LIVE), "ok"
+
+
+def check_trade(snap: Optional[dict], now: float, limits: QuoteLimits = QuoteLimits(),
+                split: float = 1.0) -> Optional[Tuple[float, float]]:
+    """(trade time, price) of the snapshot's latest IEX trade when it is no older than
+    `max_age_sec` and within `max_close_gap_pct` of the previous close (as `check_quote`
+    judges a mid), else None.
+
+    Why a trade can stand in for a quote the risk monitor can't use: IEX doesn't trade
+    through the national best, so a recent IEX print is where the market was, even while
+    IEX's own book is too thin to quote it. On 2026-11-13 RPRX's IEX quote read 68.93 x
+    70.62 (2.4% wide) while the national quote was 69.14 x 69.16; replaying that session,
+    an IEX print from the last two minutes covered 64 of the 65 minutes its quote was
+    unusable. Never a price to fill at: an order still needs a sane quote."""
+    trade = (snap or {}).get("latestTrade") or {}
+    price = float(trade.get("p") or 0)
+    if price <= 0 or "t" not in trade:
+        return None
+    ts = parse_ts(trade["t"])
+    if now - ts > limits.max_age_sec:
+        return None
+    prev = float(((snap or {}).get("prevDailyBar") or {}).get("c") or 0)
+    if prev > 0 and min(abs(price / prev - 1), abs(price * split / prev - 1)) * 100 > limits.max_close_gap_pct:
+        return None
+    return ts, price
