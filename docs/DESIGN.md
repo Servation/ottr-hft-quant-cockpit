@@ -91,6 +91,18 @@ count sessions, not days, and volatility annualizes by sqrt(252).
 Quotes come from Alpaca's free IEX feed and must pass a sanity check: two-sided, not
 crossed, a spread under 1%, fresh, near the last trade, and within 25% of the previous
 close. A split explains a bigger gap on its ex-date. An order always needs such a quote.
+
+Fresh means at most 2 minutes old, timed from when the quote last changed on IEX. The cash
+ETF is the exception. A T-bill ETF's quote can sit unchanged for 15 minutes and still be
+current (SGOV's did on 2026-11-12, and the desk found it usable in only 265 of 390
+minutes). So its age runs from the latest fetch that saw it, but only if some other quote
+in that same fetch had just changed, which shows the feed is moving.
+- **Outages:** an outage leaves the cached quote aging from its last good fetch, and a
+  stuck feed or a market-wide halt vouches for nothing, so both still read as stale.
+- **Only the cash ETF:** a halted stock's IEX quote also sits unchanged (OMH's did through
+  a 10-minute pause on 2026-11-13, then reopened 20% higher), and the free feed can't tell
+  a halt from a calm market.
+
 The book is marked by session:
 - In session: the live bid, else the newest delayed SIP minute close.
 - Closed: the last official close, restated by any corporate action applied since.

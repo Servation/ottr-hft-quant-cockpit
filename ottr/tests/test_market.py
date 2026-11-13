@@ -200,6 +200,57 @@ async def test_snapshots_are_cached_and_an_outage_serves_quotes_judged_by_age(uc
     assert q is None and why.startswith("stale")
 
 
+def standing_sgov(f, age=600.0):
+    """SGOV as on 2026-11-12: a one-cent IEX quote that hasn't changed for `age` seconds."""
+    px = round(f.bars["SGOV"][-1]["c"], 2)
+    f.add_quote("SGOV", px, px + 0.01, age=age, trade_age=900)
+
+
+async def test_the_cash_etfs_unchanged_quote_is_current_while_the_feed_moves(ucfg, store):
+    f = fake_market(ucfg, WED_11)
+    snaps_for(f, ucfg.universe.core)
+    standing_sgov(f)
+    tip = f.bars["TIP"][-1]["c"]
+    f.add_quote("TIP", tip * 0.9999, tip * 1.0001, age=600)             # any other symbol: as a halt leaves it
+    svc, clock = service(ucfg, store, f, WED_11)
+    await svc.refresh_calendar()
+    q, why = await svc.quote("SGOV")
+    assert why == "ok" and q.ts == WED_11 and q.basis == BASIS_LIVE     # current as of this fetch
+    checks = await svc.quote_checks()
+    assert checks["SGOV"][1] == "ok" and checks["SPY"][1] == "ok"
+    assert checks["TIP"][0] is None and checks["TIP"][1].startswith("stale (600s)")
+    clock.advance(20)
+    q, why = await svc.quote("SGOV")                                    # an order's quote is re-fetched
+    assert why == "ok" and q.ts == WED_11 + 20
+    assert (await svc.prices(["SGOV"]))["SGOV"].basis == BASIS_LIVE     # not "delayed" in the packet
+
+
+async def test_an_outage_or_a_stuck_feed_still_ages_the_cash_etfs_quote_into_stale(ucfg, store):
+    f = fake_market(ucfg, WED_11)
+    snaps_for(f, ucfg.universe.core)
+    standing_sgov(f)
+    svc, clock = service(ucfg, store, f, WED_11)
+    await svc.refresh_calendar()
+    assert (await svc.quote("SGOV"))[1] == "ok"
+    clock.advance(100)
+    f.now += 100
+    f.fail_429["/v2/stocks/snapshots"] = 99                             # Alpaca unreachable
+    q, why = await svc.quote("SGOV")                                    # cached: vouched for 100s ago
+    assert why == "ok" and q.ts == WED_11
+    clock.advance(30)
+    f.now += 30
+    q, why = await svc.quote("SGOV")
+    assert q is None and why == "stale (130s)"                          # the last fetch that saw it
+    assert all(q is None for q, _ in (await svc.quote_checks()).values())
+    f.fail_429.clear()                                                  # Alpaca answers, but IEX is frozen:
+    q, why = await svc.quote("SGOV")                                    # every quote has stood 130s or more
+    assert q is None and why.startswith("stale (730s)")
+    f.add_quote("SPY", 600, 600.1, age=1)                               # the feed moves again
+    clock.advance(11)
+    f.now += 11
+    assert (await svc.quote("SGOV"))[1] == "ok"
+
+
 async def test_an_order_quote_is_refetched_when_the_cache_is_10s_old(ucfg, store):
     f = fake_market(ucfg, WED_11)
     snaps_for(f, ucfg.universe.core)

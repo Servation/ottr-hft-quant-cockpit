@@ -217,6 +217,21 @@ async def test_the_sweep_runs_before_the_close_and_fees_are_charged_after_it(cfg
     assert ledger.pending_fees() == 0 and ledger.check() == []
 
 
+async def test_the_sweep_fills_while_sgovs_iex_quote_stands_unchanged(cfg, store, ledger, rig):
+    # 2026-11-12: SGOV's IEX quote stood at one cent wide for up to 15 minutes at a time, and
+    # judged by its own timestamp it was stale, so the sweep and funding sells deferred.
+    eng = engine(cfg, store, rig)
+    rig.at(et(2026, 10, 21, 15, 46))
+    px = round(rig.price("SGOV"), 2)
+    rig.fake.add_quote("SGOV", px, px + 0.01, age=600, trade_age=900)
+    rig.market._snaps_ts = 0
+    assert "sweep submitted" in await eng.jobs_tick()
+    await eng.executor.drain()
+    assert ("BUY", "SGOV", "sweep") in fills(store)
+    q = json.loads(store.conn.execute("SELECT quote FROM fills WHERE asset='SGOV'").fetchone()[0])
+    assert (q["bid"], q["ask"], q["ts"]) == (px, px + 0.01, rig.clock.time())   # current as of the fetch
+
+
 async def test_equity_points_in_session_and_one_at_the_close_with_benchmarks(cfg, store, ledger):
     from datetime import date
     rig = await market_rig(cfg, store, through=date(2026, 10, 23)).ready()   # Alpaca will have Wed's bar

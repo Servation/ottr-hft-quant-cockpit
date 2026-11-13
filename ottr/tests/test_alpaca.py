@@ -9,7 +9,7 @@ import pytest
 
 from ottr.clock import FakeClock
 from ottr.market.alpaca import (TRADING_PAPER, Alpaca, AlpacaError, Credentials, QuoteLimits,
-                                bar_day, check_quote, check_trade, completed_bars, parse_ts)
+                                bar_day, check_quote, check_trade, completed_bars, feed_live, parse_ts)
 from ottr.market.calendar import ET
 from ottr.market.http import RateLimiter
 from ottr.market.types import Bar
@@ -244,6 +244,29 @@ def test_limits_are_tunable(fake):
     s = snap(fake, bid=500, ask=503)  # 0.6% spread
     assert check_quote("SPY", s, NOW)[1] == "ok"
     assert check_quote("SPY", s, NOW, QuoteLimits(max_spread_pct=0.5))[1].startswith("too_wide")
+
+
+def test_a_standing_quote_is_current_as_of_the_fetch_that_saw_it(fake):
+    # SGOV on 2026-11-12: 100.52 x 100.53, unchanged on IEX for 10 minutes and still current.
+    s = snap(fake, "SGOV", bid=100.52, ask=100.53, age=600, trade_age=900)
+    q, why = check_quote("SGOV", s, NOW)
+    assert q is None and why.startswith("stale (600s)")          # by its own time alone
+    q, why = check_quote("SGOV", s, NOW, seen=NOW - 5)            # a live fetch saw it 5s ago
+    assert why == "ok" and q.ts == NOW - 5 and q.age(NOW) == 5
+    q, why = check_quote("SGOV", s, NOW, seen=NOW - 300)          # that fetch was 5 minutes ago
+    assert q is None and why == "stale (300s)"
+    fresh = snap(fake, "SPY", bid=500, ask=500.1, age=3)
+    assert check_quote("SPY", fresh, NOW, seen=NOW - 60)[0].ts == pytest.approx(NOW - 3, abs=0.2)  # never older
+
+
+def test_the_feed_is_live_only_while_some_quote_in_the_batch_moves(fake):
+    fake.add_quote("SGOV", 100.52, 100.53, age=600)
+    fake.add_quote("SPY", 500, 500.1, age=1)
+    assert feed_live(fake.snaps, NOW)
+    fake.add_quote("SPY", 500, 500.1, age=121)                    # a stuck feed or a market-wide halt
+    assert not feed_live(fake.snaps, NOW)
+    assert feed_live(fake.snaps, NOW, QuoteLimits(max_age_sec=200))
+    assert not feed_live({}, NOW) and not feed_live({"SPY": {"latestTrade": {}}}, NOW)
 
 
 async def test_rate_limiter_is_shared_across_calls(fake):

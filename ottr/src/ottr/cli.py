@@ -467,7 +467,7 @@ async def cmd_data(cfg, args) -> int:
         print(e)
         return 2
     print(f"Checking Alpaca for {len(symbols)} symbols (about 30 seconds)...", flush=True)
-    code = await datacheck.run(alpaca, symbols, time.time())
+    code = await datacheck.run(alpaca, symbols, time.time(), standing=cfg.standing_quotes)
     print()
     print("Checking the events and macro feeds (FRED, Alpha Vantage, SEC, corporate actions)...", flush=True)
     code = max(code, await eventcheck.run(_sources(alpaca), cfg.events, symbols, time.time()))

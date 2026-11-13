@@ -34,7 +34,7 @@ import logging
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 import httpx
 
@@ -334,15 +334,48 @@ class QuoteLimits:
     recent_trade_sec: float = 300.0
 
 
+def feed_live(snaps: Mapping[str, dict], fetched: float, limits: QuoteLimits = QuoteLimits()) -> bool:
+    """Whether a batch of snapshots fetched at `fetched` shows IEX's quotes moving: some
+    quote in it no older than `max_age_sec` then.
+
+    Why: a fetch that answers proves Alpaca is up, not that IEX's quotes are still reaching
+    it. In session SPY's IEX quote changes several times a second, so a batch whose newest
+    quote has stood for minutes is a stuck feed or a market-wide halt, and no quote in it
+    is vouched for (`check_quote`'s `seen`)."""
+    newest = None
+    for snap in snaps.values():
+        t = ((snap or {}).get("latestQuote") or {}).get("t")
+        if t:
+            ts = parse_ts(t)
+            newest = ts if newest is None else max(newest, ts)
+    return newest is not None and fetched - newest <= limits.max_age_sec
+
+
 def check_quote(symbol: str, snap: Optional[dict], now: float,
-                limits: QuoteLimits = QuoteLimits(), split: float = 1.0) -> Tuple[Optional[Quote], str]:
+                limits: QuoteLimits = QuoteLimits(), split: float = 1.0,
+                seen: Optional[float] = None) -> Tuple[Optional[Quote], str]:
     """A tradeable Quote from a snapshot, or (None, reason). Never repairs a bad quote.
 
     Reasons: no_snapshot, no_quote, one_sided, crossed, too_wide, stale, off_market. The
-    Quote's `ts` is the exchange's quote time (not when we fetched it), so staleness is
-    measured against the market, not against our own poll. `split` is the share multiple
-    of a split effective since the previous close: on its ex-date that close may still be
-    in the old shares, so a move the split explains is not off-market.
+    Quote's `ts` is when it is known to be current, and its age is judged from that:
+    - by default the exchange's quote time, so staleness is measured against the market,
+      not against our own poll;
+    - with `seen`, the later of that and `seen`.
+
+    `seen` is when a fetch whose batch passed `feed_live` returned this snapshot. An IEX
+    quote is stamped when IEX's best bid or offer last changed, so a calm instrument's
+    current quote can be minutes old by its own time: SGOV's stood at 100.52 x 100.53 for
+    up to 15 minutes on 2026-11-12, and the desk found it usable in only 265 of 390. Callers
+    pass it only for the cash class (`Config.standing_quotes`), because a halted stock's
+    IEX quote stands unchanged too (OMH's on 2026-11-13, through a 10-minute pause it
+    reopened from 20% higher) and nothing in the free feed tells the two apart, while a
+    T-bill ETF can't move 5% to trip a pause and has no company news to halt on. A cached
+    snapshot keeps the time of the fetch that returned it, so an outage still ages every
+    quote into stale.
+
+    `split` is the share multiple of a split effective since the previous close: on its
+    ex-date that close may still be in the old shares, so a move the split explains is not
+    off-market.
     """
     if not snap:
         return None, "no_snapshot"
@@ -359,6 +392,8 @@ def check_quote(symbol: str, snap: Optional[dict], now: float,
     if spread > limits.max_spread_pct:
         return None, f"too_wide ({spread:.2f}%)"
     qts = parse_ts(q["t"])
+    if seen is not None:
+        qts = max(qts, seen)
     if now - qts > limits.max_age_sec:
         return None, f"stale ({now - qts:.0f}s)"
     trade = snap.get("latestTrade") or {}

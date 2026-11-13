@@ -224,7 +224,7 @@ make_up_missed = true                # a slot that fails (no prices, no models) 
 feed = "iex"               # live quotes: iex (free) or sip (paid)
 history_days = 400         # calendar days of daily bars loaded (>= 273 sessions)
 max_spread_pct = 1.0       # a wider IEX quote isn't a market: the order defers
-max_quote_age_sec = 120
+max_quote_age_sec = 120    # since the quote last changed; the cash ETF's, since a live fetch saw it
 max_trade_gap_pct = 2.0
 max_close_gap_pct = 25.0
 quote_ttl_sec = 30         # snapshots are re-fetched after this (an order re-fetches after 10s)
