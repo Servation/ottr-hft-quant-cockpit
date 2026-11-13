@@ -16,7 +16,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, FrozenSet, List, Optional, Tuple
 
 from ottr.broker.fees import FeeSchedule, FeeScheduleError
 from ottr.broker.fees import from_rows as fee_schedule_from_rows
@@ -473,6 +473,13 @@ class Config:
     def asset_class(self, symbol: str) -> Optional[str]:
         """A core symbol's class. Satellites are stocks; their membership lives in the DB."""
         return self.universe.core.get(symbol)
+
+    @property
+    def standing_quotes(self) -> FrozenSet[str]:
+        """Core symbols whose unchanged IEX quote a live fetch vouches for: the cash class,
+        whose quote can stand for minutes and still be current, and which can't be halted
+        on a move or on news (see `market/alpaca.check_quote`)."""
+        return frozenset(s for s, c in self.universe.core.items() if c == "cash_etf")
 
     def cap_pct(self, symbol: str, asset_class: Optional[str] = None) -> Optional[float]:
         """Max % of equity in one position: a symbol override, else its class cap. None means

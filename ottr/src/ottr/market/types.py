@@ -26,7 +26,7 @@ class Quote:
     bid: float
     ask: float
     last: float
-    ts: float                      # when we fetched it (epoch seconds)
+    ts: float                      # when it is known current (epoch seconds; see `check_quote`)
     source: str                    # "alpaca" (tests use others)
     basis: str = BASIS_LIVE
 

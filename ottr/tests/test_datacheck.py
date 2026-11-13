@@ -33,10 +33,10 @@ def healthy(now: float, skip_day: date = None) -> FakeAlpaca:
     return f
 
 
-async def run(fake, creds=CREDS, now=None):
+async def run(fake, creds=CREDS, now=None, standing=()):
     lines = []
     a = Alpaca(creds, client=fake.client(), limiter=RateLimiter(1e6), backoff=0, clock=FakeClock(fake.now))
-    code = await datacheck.run(a, SYMS, now or fake.now, out=lines.append)
+    code = await datacheck.run(a, SYMS, now or fake.now, out=lines.append, standing=standing)
     return code, "\n".join(lines)
 
 
@@ -60,8 +60,20 @@ async def test_closed_market_quotes_are_informational():
 
 async def test_stale_quotes_during_the_session_degrade():
     f = healthy(et(2026, 10, 21, 11, 0))
-    f.add_quote("SGOV", 100, 100.02, age=900)
-    code, text = await run(f)
+    f.add_quote("SPY", 100, 100.02, age=900)
+    code, text = await run(f, standing={"SGOV"})
+    assert code == 1 and "SPY: no usable quote (stale" in text
+
+
+async def test_the_cash_etfs_standing_quote_is_judged_as_the_desk_judges_it():
+    f = healthy(et(2026, 10, 21, 11, 0))
+    f.add_quote("SGOV", 101, 101.01, age=900)          # a T-bill ETF's quote, unchanged 15 minutes
+    code, text = await run(f, standing={"SGOV"})
+    assert code == 0, text
+    assert "SGOV: IEX 101.00 x 101.01 (spread 0.010%, unchanged for 900s, current as of this fetch)" in text
+    for s in SYMS:                                     # a stuck feed: nothing vouches for it
+        f.add_quote(s, 100 + SYMS.index(s), 100.02 + SYMS.index(s), age=900)
+    code, text = await run(f, standing={"SGOV"})
     assert code == 1 and "SGOV: no usable quote (stale" in text
 
 

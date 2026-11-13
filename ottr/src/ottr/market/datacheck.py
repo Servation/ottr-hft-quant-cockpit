@@ -20,9 +20,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Callable, List, Sequence
+from typing import Callable, Collection, List, Sequence
 
-from ottr.market.alpaca import Alpaca, AlpacaError, check_quote, completed_bars
+from ottr.market.alpaca import Alpaca, AlpacaError, check_quote, completed_bars, feed_live, parse_ts
 from ottr.market.calendar import ET, CalendarError
 
 HISTORY_DAYS = 400        # calendar days of bars: covers the screener's 273-session minimum
@@ -75,7 +75,9 @@ def _et(ts: float) -> str:
 
 
 async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
-              out: Callable[[str], None] = print) -> int:
+              out: Callable[[str], None] = print, standing: Collection[str] = ()) -> int:
+    """`standing`: the symbols whose unchanged quote a live fetch vouches for, as the desk
+    judges them (`Config.standing_quotes`: the cash class)."""
     r = Report()
     kind = alpaca.creds.kind
     if kind == "paper":
@@ -131,11 +133,15 @@ async def run(alpaca: Alpaca, symbols: Sequence[str], now: float,
         r.fail(f"snapshots: {e}")
         snaps = {}
     closed_reasons: dict = {}
+    seen = now if feed_live(snaps, now) else None
     for sym in symbols:
-        q, why = check_quote(sym, snaps.get(sym), now)
+        q, why = check_quote(sym, snaps.get(sym), now, seen=seen if sym in standing else None)
         if q is not None:
             spread = (q.ask - q.bid) / q.mid * 100
-            r.ok(f"{sym}: IEX {q.bid:,.2f} x {q.ask:,.2f} (spread {spread:.3f}%, {now - q.ts:.0f}s old)")
+            quoted = parse_ts(snaps[sym]["latestQuote"]["t"])
+            age = (f"unchanged for {now - quoted:.0f}s, current as of this fetch" if q.ts > quoted
+                   else f"{now - q.ts:.0f}s old")
+            r.ok(f"{sym}: IEX {q.bid:,.2f} x {q.ask:,.2f} (spread {spread:.3f}%, {age})")
         elif clk.is_open:
             r.warn(f"{sym}: no usable quote ({why}); orders would defer")
         else:
