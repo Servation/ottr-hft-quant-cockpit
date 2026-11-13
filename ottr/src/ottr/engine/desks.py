@@ -4,7 +4,8 @@ The Desk: the market-specific half of the executor.
 What it does: the Executor owns everything that must never differ between brokers (the
 priority queue, idempotency, dry run, the one-transaction commit, cooldowns, outcomes and
 notifications). The Desk supplies the rest for US equities: `context()` gathers the facts
-the gate needs (session, a sanity-checked quote, the book, buying power, events),
+the gate needs (session, a sanity-checked quote, the book, buying power, events, and for
+a stock BUY how often its IEX quote was usable over the last week),
 `evaluate()` is the gate, `book()` has the Broker (the SimBroker, later Alpaca) execute an
 approved order and records the fill with the regulatory fees it accrued, and `funding()`
 names the cash-ETF sale that frees cash for a BUY that's short of it.
@@ -27,6 +28,7 @@ from ottr.clock import SYSTEM, Clock
 from ottr.ledger import corporate
 from ottr.ledger.book import Fill, Ledger, trade_day
 from ottr.ledger.store import Store
+from ottr.market import quality
 from ottr.market.calendar import TradingCalendar
 from ottr.market.types import Quote
 from ottr.risk import gate
@@ -110,6 +112,9 @@ class Desk:
         unapplied = behind.get(intent.asset)
         if unapplied is None and intent.side == "BUY":
             unapplied = next((f"{s}: {why}" for s, why in sorted(behind.items()) if s in positions), None)
+        poor = None
+        if intent.side == "BUY" and member is not None and member.asset_class == gate.STOCK:
+            poor = quality.unreliable(self.store, cal, [intent.asset], now, self.cfg.screen).get(intent.asset)
         return gate.GateContext(
             cfg=self.cfg, now=now, market=cal.state_at(now), member=member,
             quote=quote, quote_problem=problem,
@@ -118,7 +123,7 @@ class Desk:
             buying_power=buying_power(self.cfg.account.type, self.ledger, cal, now).available,
             cash_etf_value=values.get(cash_symbol, 0.0), satellites_value=satellites,
             earnings_sessions=self.events.earnings_sessions(intent.asset, now),
-            corp_action=self.events.corp_action(intent.asset, now),
+            corp_action=self.events.corp_action(intent.asset, now), quote_unreliable=poor,
             halted=st.halted, cooldown_until=st.cooldowns.get(intent.asset, 0.0), risk_event_since_intent=hit,
             unapplied=unapplied)
 

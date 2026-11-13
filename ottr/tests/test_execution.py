@@ -231,6 +231,44 @@ async def test_single_stocks_respect_the_earnings_blackout(rig, earnings, reason
     assert (await rig.ex.process(buy("NVDA"))).reason == reason
 
 
+def quote_week(store, symbol, usable, samples=390, days=("2026-10-14", "2026-10-15", "2026-10-16", "2026-10-19",
+                                                           "2026-10-20")):
+    """`usable` of `samples` quote checks passed on each of the 5 sessions before OPEN."""
+    with store.tx() as c:
+        c.executemany("INSERT OR REPLACE INTO quote_quality(symbol,day,samples,usable) VALUES(?,?,?,?)",
+                      [(symbol, d, samples, usable) for d in days])
+
+
+async def test_a_stock_whose_iex_quote_was_rarely_usable_last_week_is_not_bought(rig):
+    """RPRX, 2026-11-13: the council added to a satellite whose IEX quote had been usable
+    72.6% of its week (the screener demotes under 75%, but only on Saturday)."""
+    rig.desk.events = Events({"NVDA": 30})
+    quote_week(rig.store, "NVDA", usable=283)                          # 72.6%
+    v = await rig.ex.process(buy("NVDA", "b1"))
+    assert v.reason == "quote_unreliable"
+    assert v.notes == ("IEX quote usable only 73% of the time since 2026-10-14 (needs 75%)",)
+    # Today's samples don't count until the session has closed: a perfect morning is no week.
+    with rig.store.tx() as c:
+        c.execute("INSERT INTO quote_quality(symbol,day,samples,usable) VALUES('NVDA','2026-10-21',5000,5000)")
+    assert (await rig.ex.process(buy("NVDA", "b2"))).reason == "quote_unreliable"
+    quote_week(rig.store, "NVDA", usable=293)                          # 75.1%: usable enough
+    assert (await rig.ex.process(buy("NVDA", "b3"))).approved
+    # A core ETF isn't held to it (the rule is the screener's, for the stocks it picks), and
+    # the holding can always be sold.
+    quote_week(rig.store, "NVDA", usable=10)
+    quote_week(rig.store, "GLD", usable=10)
+    assert (await rig.ex.process(buy("GLD", "b4"))).approved
+    assert (await rig.ex.process(sell("NVDA", "s1"))).approved
+
+
+async def test_an_unmeasured_stock_is_left_to_its_quote_check(rig):
+    """Too few samples says nothing (a member is sampled every minute, so that only follows
+    an engine outage); the order's own quote check still guards the fill."""
+    rig.desk.events = Events({"NVDA": 30})
+    quote_week(rig.store, "NVDA", usable=0, samples=3)
+    assert (await rig.ex.process(buy("NVDA"))).approved
+
+
 async def test_pending_corporate_action_blocks_buys(rig):
     rig.desk.events = Events(actions={"GLD"})
     v = await rig.ex.process(buy("GLD"))

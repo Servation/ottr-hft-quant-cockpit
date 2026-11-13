@@ -138,6 +138,17 @@ def test_a_stock_needs_a_known_report_date_outside_the_blackout(cfg, sessions, r
     assert v.reason == reason
 
 
+def test_a_stock_whose_iex_quote_was_rarely_usable_is_not_added_to(cfg):
+    why = "IEX quote usable only 73% of the time since 2026-11-09 (needs 75%)"
+    v = gate.evaluate(buy("NVDA"), ctx(cfg, asset="NVDA", price=180.0, vol=0.40, earnings_sessions=30,
+                                       quote_unreliable=why))
+    assert (v.reason, v.notes) == ("quote_unreliable", (why,))
+    # A SELL never waits on it: limits stop risk going up, never down.
+    held = pos("NVDA", q="2", cost="360", hwm=180.0)
+    assert gate.evaluate(sell("NVDA"), ctx(cfg, asset="NVDA", price=180.0, side="SELL", position=held,
+                                           quote_unreliable=why)).approved
+
+
 def test_an_expired_decision_or_a_caller_sized_order_is_refused(cfg):
     assert gate.evaluate(buy(created=OPEN - 3600), ctx(cfg)).reason == "decision_expired"
     sized = Intent(origin="council", asset="TLT", side="BUY", conviction=1.0, usd=5000, idem_key="k", created_ts=OPEN)

@@ -11,7 +11,9 @@ symbol that left the universe can always be sold. A BUY must also:
 - not be in the session's last minutes, during the drawdown halt, during a cooldown,
   or after a risk action on the asset during the meeting;
 - for a single stock, be known to report more than the blackout away (a listed date,
-  or the floor its last report gives: `events/view.py`);
+  or the floor its last report gives: `events/view.py`), and have had an IEX quote usable
+  often enough over the last week (`market/quality.py`): the desk can't trade or protect
+  a stock it rarely has a quote for, so it doesn't add to one;
 - not have a corporate action pending that blocks BUYs, or unknown corporate actions;
 - fit its target (vol-target weight x conviction x regime, capped by class and symbol),
   the per-trade ceiling, gross exposure (the cash ETF doesn't count), the satellite
@@ -62,6 +64,7 @@ class GateContext:
     satellites_value: float = 0.0        # stocks held, sunset ones included
     earnings_sessions: Optional[int] = None   # sessions to the next report (or a floor); None = unknown
     corp_action: Optional[str] = None         # what blocks a BUY (a pending action, or unknown)
+    quote_unreliable: Optional[str] = None    # a stock's IEX quote was usable too rarely of late
     halted: bool = False
     cooldown_until: float = 0.0
     risk_event_since_intent: bool = False
@@ -153,6 +156,8 @@ def _buy(intent: Intent, ctx: GateContext) -> Verdict:
             return Verdict.reject(intent, "earnings_unknown", "no confirmed earnings date: no new BUY")
         if ctx.earnings_sessions <= EARNINGS_BLACKOUT_SESSIONS:
             return Verdict.reject(intent, "earnings_blackout", f"reports in {ctx.earnings_sessions} sessions")
+        if ctx.quote_unreliable:
+            return Verdict.reject(intent, "quote_unreliable", ctx.quote_unreliable)
     if ctx.corp_action:
         return Verdict.reject(intent, "corporate_action_pending", ctx.corp_action)
     val = ctx.valuation

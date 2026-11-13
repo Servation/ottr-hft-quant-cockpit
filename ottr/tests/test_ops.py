@@ -65,10 +65,19 @@ async def test_market_tick_in_session_and_after_hours(cfg, store, ledger, rec):
 
 
 async def test_market_tick_fails_when_no_quote_is_usable(eng, rig):
+    from datetime import date
+    from ottr.market import quality
     rig.requote(age=600)                                               # every quote 10 minutes old
     rig.market._snaps_ts = 0
     with pytest.raises(MarketDataError, match="no usable live quote for any member"):
         await eng.market_tick()
+    # The feed failing isn't each stock's IEX book: the minute isn't counted against any of
+    # them (2026-11-06 marked every symbol usable 126 of 389 minutes).
+    assert quality.usable(eng.store, ["SPY", "TLT"], date(2026, 10, 21)) == {}
+    rig.requote()
+    rig.market._snaps_ts = 0
+    await eng.market_tick()
+    assert quality.usable(eng.store, ["SPY", "TLT"], date(2026, 10, 21)) == {"SPY": (1, 1), "TLT": (1, 1)}
 
 
 async def test_market_tick_fails_when_daily_bars_stop_updating(eng, rig):
