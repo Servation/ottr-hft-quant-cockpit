@@ -177,6 +177,9 @@ class Engine:
     def buy_blocks(self, now: float) -> Dict[str, str]:
         """Members the gate would refuse to BUY right now, and why, for the council."""
         out = {}
+        poor = quality.unreliable(self.store, self.market.calendar,
+                                  [s for s, m in self.members.items() if m.asset_class == gate.STOCK], now,
+                                  self.cfg.screen)
         for s, m in self.members.items():
             if not m.buyable:
                 out[s] = "being sold off or not tradable: SELL or HOLD only"
@@ -188,6 +191,9 @@ class Engine:
                     continue
                 if n <= EARNINGS_BLACKOUT:
                     out[s] = f"earnings in {n} sessions"
+                    continue
+                if s in poor:
+                    out[s] = poor[s]
                     continue
             ca = self.events.corp_action(s, now)
             if ca:
@@ -216,9 +222,13 @@ class Engine:
             problems.append(f"daily bars stop at {bars[-1].day if bars else 'nothing'}, but {final.day} closed")
         if mt.is_open:
             checks = await self.market.quote_checks()
-            quality.record(self.store, {s: q is not None for s, (q, _) in checks.items()}, mt.session.day)
-            await self._sample_candidates(now, mt.session.day)
             live = {s: q for s, (q, _) in checks.items() if q is not None}
+            if live:
+                # A minute with no usable quote for anything is the feed (or the engine) failing,
+                # not each symbol's book: counting it would mark every stock as rarely usable
+                # (2026-11-06: every symbol 126 of 389, RPRX and SPY alike).
+                quality.record(self.store, {s: q is not None for s, (q, _) in checks.items()}, mt.session.day)
+            await self._sample_candidates(now, mt.session.day)
             missing = sorted(s for s, m in self.members.items() if m.buyable and s not in live)
             if not live:
                 problems.append("no usable live quote for any member")

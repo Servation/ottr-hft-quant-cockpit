@@ -221,8 +221,9 @@ came sooner than 8 days after its own period end.
 - **Any order:** a council decision older than 15 minutes is dropped. Every order needs
   the regular session and a sane quote.
 - **BUYs only:** the drawdown halt, a cooldown, a risk action during the meeting, the last
-  10 minutes of the session, a sunset member, an unknown earnings date or a pending
-  corporate action each block a BUY, never a SELL.
+  10 minutes of the session, a sunset member, an unknown earnings date, a stock whose IEX
+  quote was usable too rarely last week (below) or a pending corporate action each block
+  a BUY, never a SELL.
 - **Small SELLs:** a council SELL under the minimum is refused; a protective one never
   is.
 
@@ -282,7 +283,12 @@ A correlation filter (0.75 with any member) keeps the sleeve diversified, and a 
 filter keeps it tradable. The free feed is IEX's own book, so a stock whose IEX quote was
 usable less than 75% of the sampled minutes over the last week is skipped, or demoted if
 it is a satellite. Members are sampled every minute and the latest screen's top 40 every
-15 minutes (the `quote_quality` table, schema v4).
+15 minutes (the `quote_quality` table, schema v4); a minute with no usable quote for any
+symbol is the feed failing and isn't sampled. The week is the last 5 completed sessions,
+never today's partial one. A liquidity provider can leave IEX mid-week (RPRX fell from
+about 51,000 IEX quote updates a day in October to 4,300 on 2026-11-13), so between
+screens the gate reads the same week and refuses to add to a satellite under the line; it
+can still be sold, and Saturday's screen decides whether it stays.
 
 ## Tax
 

@@ -356,6 +356,25 @@ async def test_stocks_that_just_reported_are_promoted_and_buyable_before_their_n
     blocks = eng.buy_blocks(SAT)
     assert blocks[first] == "no confirmed earnings date" and blocks[second] == "earnings in 2 sessions"
     assert not set(promoted[2:]) & set(blocks)
+    third = promoted[2]
+    quotes_seen(store, [third], samples=400, usable=120)           # its IEX quote faded during the week
+    blocks = eng.buy_blocks(SAT)
+    assert blocks[third] == "IEX quote usable only 30% of the time since 2026-10-19 (needs 75%)"
+    assert not set(promoted[3:]) & set(blocks)
+
+
+def test_the_quote_rules_read_the_last_completed_sessions_only(cfg, store):
+    """Monday mid-session: the week is Mon-Fri before it; this morning's samples wait for
+    the close, so a screen run now and the gate both judge last week."""
+    from tests.nyse import calendar_2026
+    cal, monday = calendar_2026(), et(2026, 10, 26, 11)
+    quotes_seen(store, ["X"], samples=100, usable=50)                          # Friday
+    quotes_seen(store, ["X"], samples=1000, usable=1000, day=date(2026, 10, 26))   # this morning
+    quotes_seen(store, ["X"], samples=1000, usable=0, day=date(2026, 10, 16))      # the week before
+    assert quality.window(cal, monday, 5) == (date(2026, 10, 19), FRIDAY)
+    assert quality.usable(store, ["X"], date(2026, 10, 19), FRIDAY) == {"X": (100, 50)}
+    assert quality.unreliable(store, cal, ["X", "Y"], monday, cfg.screen) == {
+        "X": "IEX quote usable only 50% of the time since 2026-10-19 (needs 75%)"}
 
 
 async def test_a_satellite_that_fails_a_gate_is_sold_off_then_leaves(cfg, store, ledger):

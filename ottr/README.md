@@ -379,8 +379,13 @@ anything). It is deterministic code; no model can add a symbol.
     time over the last 5 sessions.
   - A satellite below that is demoted, since the desk could neither trade it nor enforce
     its stop.
+  - Between screens, a satellite whose last 5 completed sessions fall below that can't be
+    bought (the council sees it under BUYS BLOCKED); it can still be sold, and BUYs return
+    when its week recovers. The screen then decides whether it stays.
   - A candidate not measured yet waits a week, so a brand-new book's first screen adds
     no stocks until the next Saturday.
+  - A minute when no symbol has a usable quote is the feed failing, not each stock's
+    book, so it isn't sampled.
 
 - **Earnings:** a stock is promoted, and bought, only when its next report is known to
   be more than 5 sessions away. The screener, the gate and the council packet all read

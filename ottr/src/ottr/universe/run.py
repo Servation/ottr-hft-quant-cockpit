@@ -238,9 +238,10 @@ async def run_screen(cfg, store: Store, alpaca: Alpaca, sec: Optional[Sec], cal:
 
     # A stock whose IEX quote was rarely usable can't be traded or protected on this feed:
     # a satellite like that is demoted, a candidate passed over.
-    window = cal.completed_sessions(now, sc.quote_sessions)
-    since = window[0].day if window else today
-    seen = quality.usable(store, rows, since)
+    # Completed sessions only (the gate reads the same window between screens): a screen
+    # run mid-session must not count today's partial day.
+    since, until = quality.window(cal, now, sc.quote_sessions)
+    seen = quality.usable(store, rows, since, until)
     untradable: Dict[str, str] = {}
     for s in rows:
         n, ok = seen.get(s, (0, 0))
@@ -250,9 +251,7 @@ async def run_screen(cfg, store: Store, alpaca: Alpaca, sec: Optional[Sec], cal:
             if s not in current:
                 untradable[s] = (f"IEX quote not measured enough yet ({n} samples since {since}; the best of each "
                                  "screen are sampled all week)")
-        elif ok / n * 100 < sc.min_quote_usable_pct:
-            why = (f"IEX quote usable only {ok / n * 100:.0f}% of the time since {since} (needs "
-                   f"{sc.min_quote_usable_pct:g}%)")
+        elif why := quality.too_rare(n, ok, since, sc):
             if s in current:
                 unfit[s] = why
             else:
