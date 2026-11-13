@@ -231,7 +231,12 @@ came sooner than 8 days after its own period end.
 - *Trailing stop:* each position gets its distance when it opens: 2x the move its
   volatility implies over 10 sessions, clamped to 3 to 15% (10% when vol is unknown).
   The distance never changes and the high-water mark only rises, so a stop never loosens.
-  A gap through the stop overnight sells at the bid and says so.
+  A gap through the stop overnight sells at the bid and says so. While a holding's IEX
+  quote is unusable (a thin book can read 2 to 5% wide while the national quote is a cent
+  wide), its last IEX trade from the past 2 minutes stands in: IEX doesn't trade through
+  the national best, so the print is where the market is. It can trip the stop, whose
+  sale waits for a usable quote and fills at that bid, but never raises the high-water
+  mark. Replaying RPRX's 2026-11-13 session, this cut its blind minutes from 65 to 1.
 - *Trims:* back to the cap when a weight exceeds it by 5 points, and the stock sleeve
   back to 40% pro rata.
 - *Drawdown breaker:* at 15% off peak, block BUYs and sell 25% of each holding. Those
@@ -315,7 +320,8 @@ stays exact and a corrected rule applies to all history at once.
   good data, and data older than its limit reads as unknown.
 - **Watchdog alarms:** these fire on:
   - a stale task, judged by its schedule for the council and the screen;
-  - a blind risk monitor;
+  - a risk monitor blind on a holding for 5 minutes (no usable quote and no recent
+    trade; `ottr status` shows it at once);
   - a stale events feed;
   - a corporate action that needs a person;
   - a ledger that doesn't balance;

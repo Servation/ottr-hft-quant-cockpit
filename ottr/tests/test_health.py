@@ -96,11 +96,36 @@ def test_one_blind_alarm_for_all_held_assets(cfg, store, ledger):
             ledger.apply_fill(idem_key=f"b-{asset}", asset=asset, side="BUY", quantity="1", price=px,
                               quote_source="alpaca", origin="test")
     # IEF isn't held: a stale entry for it is not news.
-    store.set_state("risk_blind", {"TLT": now - 300, "GLD": now - 60, "IEF": now - 300})
+    store.set_state("risk_blind", {"TLT": now - 600, "GLD": now - 400, "IEF": now - 600})
     rep = health.evaluate(cfg, store, inside_engine=True, epoch=now - 30)
     assert [a.key for a in rep.alarms] == ["risk:blind"] and rep.exit_code == health.EXIT_DEGRADED
-    assert rep.alarms[0].message.startswith("risk monitor blind on GLD, TLT for up to 5m")
+    assert rep.alarms[0].message.startswith("risk monitor blind on GLD, TLT for up to 10m")
     assert "trailing stops" in rep.alarms[0].message and rep.blind.keys() == {"GLD", "TLT"}
+
+
+def test_a_short_blind_spell_is_shown_but_raises_no_alarm(cfg, store, ledger):
+    """RPRX, 2026-11-13: its thin IEX book lost the quote for one to six minutes at a time
+    and raised (and cleared) a critical alarm 10 times. Status shows it at once; the alarm
+    waits for `engine.blind_alarm_after_sec`."""
+    import dataclasses
+    now = time.time()
+    _engine_running(store, now - 30)
+    _all_fresh(store)
+    with store.tx():
+        for asset, px in (("TLT", "90"), ("GLD", "380")):
+            ledger.apply_fill(idem_key=f"b-{asset}", asset=asset, side="BUY", quantity="1", price=px,
+                              quote_source="alpaca", origin="test")
+    after = cfg.engine.blind_alarm_after_sec
+    assert after == 300
+    store.set_state("risk_blind", {"TLT": now - 120, "GLD": now - (after - 5)})
+    rep = health.evaluate(cfg, store, now, inside_engine=True, epoch=now - 30)
+    assert rep.alarms == [] and rep.blind.keys() == {"GLD", "TLT"}
+    rep = health.evaluate(cfg, store, now + 5, inside_engine=True, epoch=now - 30)
+    assert [a.message.split(":")[0] for a in rep.alarms] == ["risk monitor blind on GLD for up to 5m"]
+    # 0 raises at once, as before.
+    cfg0 = dataclasses.replace(cfg, engine=dataclasses.replace(cfg.engine, blind_alarm_after_sec=0))
+    assert health.evaluate(cfg0, store, now, inside_engine=True, epoch=now - 30).alarms[0].message.startswith(
+        "risk monitor blind on GLD, TLT")
 
 
 def test_ledger_problem_wins_exit_2(cfg, store, ledger):

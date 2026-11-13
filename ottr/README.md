@@ -198,8 +198,12 @@ The watchdog checks every minute. An alarm is raised when:
 
 - **A task is stale:** its last *success* is older than 3x its interval. The council is
   judged by its schedule (a missed meeting) and the screen by its weekly slot.
-- **The risk monitor is blind:** a held asset has no usable live quote in session, so
-  its stop isn't enforced.
+- **The risk monitor is blind:** a held asset has had no usable live quote and no IEX
+  trade in the last 2 minutes for `engine.blind_alarm_after_sec` (5 minutes), so its
+  stop isn't enforced. `ottr status` shows a blind holding at once; the alarm waits,
+  because a thin IEX book loses its quote for a minute or two many times a day while the
+  stock keeps trading. Until the quote is usable again the monitor judges the stop on
+  the last IEX trade.
 - **An events feed is too old:** corporate actions or earnings dates count as unknown,
   which blocks the BUYs they guard.
 - **A corporate action needs a person:**

@@ -257,6 +257,27 @@ def test_no_live_quote_makes_the_monitor_blind_not_silent(cfg):
     assert run(cfg, {"TLT": pos()}, {"TLT": stale}).events[0][0] == "risk_blind"
 
 
+def test_a_recent_trade_keeps_the_monitor_watching_without_a_quote(cfg):
+    """No usable quote (a thin IEX book), but a print 40s ago: not blind, and the stop is
+    judged on it. It never raises the high-water mark (a print can be at the ask)."""
+    def watch(hwm, px, age=40.0):
+        return monitor.check(cfg, OPEN, {"TLT": pos(hwm=hwm, stop=0.05)}, None, {}, monitor.RiskState(), 100,
+                             CLASSES, {"TLT": hwm}, trades={"TLT": (OPEN - age, px)})
+    r = watch(100.0, 120.0)
+    assert r.events == [] and r.intents == [] and r.high_water == {} and r.summary() == "all clear"
+    (stop,) = watch(100.0, 94.9).intents                               # stop at 95
+    assert (stop.origin, stop.idem_key) == ("stop", f"stop:TLT:{OPEN - 86400:.0f}")
+    assert stop.reason == ("last trade 94.90 <= stop 95.00 (5.0% off high 100.00); no usable quote yet, so it "
+                           "sells at the first usable bid")
+    assert watch(100.0, 94.9).events == []                              # not a gap: that needs a bid
+    assert watch(100.0, 120.0, age=cfg.data.max_quote_age_sec + 1).events == [
+        ("risk_blind", {"asset": "TLT", "why": "no live quote"})]       # too old to say anything
+    # A usable quote always wins over a print.
+    r = monitor.check(cfg, OPEN, {"TLT": pos(hwm=100.0, stop=0.05)}, None, {"TLT": live("TLT", 99.0)},
+                      monitor.RiskState(), 100, CLASSES, trades={"TLT": (OPEN - 5, 90.0)})
+    assert r.intents == []
+
+
 # ---- PR 8: vol stops, gaps, the sleeve, a breaker that persists ----------------------------------
 @pytest.mark.parametrize("vol,expect", [
     (0.15, 2 * 0.15 * (10 / 252) ** 0.5),   # SPY-like: about 6%

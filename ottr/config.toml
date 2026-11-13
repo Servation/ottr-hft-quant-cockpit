@@ -264,6 +264,7 @@ risk_interval_sec = 60
 equity_interval_sec = 900
 watchdog_interval_sec = 60
 alarm_clear_sec = 300
+blind_alarm_after_sec = 300  # risk:blind waits this long: a holding with no usable quote and no recent trade
 
 [alerts]
 burst = 10

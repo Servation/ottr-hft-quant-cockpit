@@ -12,7 +12,9 @@ risk state, high-water updates, events).
   only rises, so a stop is never loosened. When the bid is at or under the stop, the
   position is sold at the bid. If it closed above the stop and is under it at the first
   check of the day, it gapped through overnight: the exit is still at the bid (the stop
-  price was never available), and a `gap` event says so.
+  price was never available), and a `gap` event says so. A holding without a usable quote
+  is judged on its last IEX trade when there is a recent one (see `check`); with neither
+  it is reported blind.
 - Trims: a position over its cap (class or symbol) by more than `trim_band_pct` is cut to
   the cap; the single-stock sleeve over `universe.sleeve_pct` by more than the band is cut
   back pro rata. Holdings that left the universe count as stocks.
@@ -107,13 +109,16 @@ def cap_for(cfg, symbol: str, classes: Mapping[str, str]) -> Optional[float]:
 def check(cfg, now: float, positions: Mapping[str, Position], valuation: Optional[Valuation],
           quotes: Mapping[str, Quote], state: RiskState, equity_points: int,
           classes: Mapping[str, str], prev_close: Optional[Mapping[str, float]] = None,
-          exits: Optional[Mapping[str, Tuple[str, str]]] = None) -> MonitorResult:
+          exits: Optional[Mapping[str, Tuple[str, str]]] = None,
+          trades: Optional[Mapping[str, Tuple[float, float]]] = None) -> MonitorResult:
     """`quotes`: live quotes that passed the sanity check. `classes`: member -> asset class.
     `prev_close`: each holding's last official close in today's share basis (to tell a gap
     from an intraday fall). `exits`: holdings to sell ahead of a corporate action the book
-    can't model, asset -> (action id, why)."""
+    can't model, asset -> (action id, why). `trades`: asset -> (time, price) of its last
+    sane IEX trade (`market/alpaca.check_trade`), watched while its quote is unusable."""
     r = cfg.risk
     prev_close = prev_close or {}
+    trades = trades or {}
     st = RiskState.from_dict(state.to_dict())
     st.cooldowns = {a: u for a, u in st.cooldowns.items() if u > now}
     intents: List[Intent] = []
@@ -128,24 +133,36 @@ def check(cfg, now: float, positions: Mapping[str, Position], valuation: Optiona
         if a == cash_symbol:
             continue
         q = quotes.get(a)
-        if q is None or q.age(now) > cfg.data.max_quote_age_sec:
-            events.append(("risk_blind", {"asset": a, "why": "no live quote"}))
-            continue
-        new_hwm = max(p.high_water, q.bid)
-        if new_hwm > p.high_water:
-            hwm[a] = new_hwm
+        if q is not None and q.age(now) <= cfg.data.max_quote_age_sec:
+            seen, px = "bid", q.bid
+            new_hwm = max(p.high_water, q.bid)
+            if new_hwm > p.high_water:
+                hwm[a] = new_hwm
+        else:
+            t = trades.get(a)
+            if t is None or now - t[0] > cfg.data.max_quote_age_sec:
+                events.append(("risk_blind", {"asset": a, "why": "no live quote"}))
+                continue
+            # No usable quote, but a recent IEX trade says where the market is (IEX doesn't
+            # trade through the national best). It can trip the stop, never raise the
+            # high-water mark: a print can be at the ask, and a stop must never tighten on
+            # a price nobody could have sold at.
+            seen, px, new_hwm = "last trade", t[1], p.high_water
         pct = p.stop_pct if p.stop_pct else r.stop_unknown_vol_pct / 100
         stop_px = new_hwm * (1 - pct)
-        if q.bid > stop_px:
+        if px > stop_px:
             continue
         exiting.add(a)
         closed = prev_close.get(a)
-        if closed is not None and closed > stop_px:
+        if seen == "bid" and closed is not None and closed > stop_px:
             why = (f"gapped through its stop: bid {q.bid:.2f} vs stop {stop_px:.2f} ({pct * 100:.1f}% off "
                    f"high {new_hwm:.2f}); last close {closed:.2f}. Exiting at the bid")
             events.append(("gap", {"asset": a, "bid": q.bid, "stop": stop_px, "close": closed}))
         else:
-            why = f"bid {q.bid:.2f} <= stop {stop_px:.2f} ({pct * 100:.1f}% off high {new_hwm:.2f})"
+            why = f"{seen} {px:.2f} <= stop {stop_px:.2f} ({pct * 100:.1f}% off high {new_hwm:.2f})"
+            if seen != "bid":
+                # The executor defers it until the quote is usable again, then sells at the bid.
+                why += "; no usable quote yet, so it sells at the first usable bid"
         intents.append(Intent(origin="stop", asset=a, side="SELL", fraction=1.0, ref="trailing_stop",
                               idem_key=f"stop:{a}:{p.opened_ts:.0f}", created_ts=now, reason=why))
 

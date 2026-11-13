@@ -88,6 +88,10 @@ class Engine:
     equity_interval_sec: float = 900.0
     watchdog_interval_sec: float = 60.0
     alarm_clear_sec: float = 300.0     # an alarm must stay clear this long to resolve
+    # A holding the risk monitor can't see (no usable quote, no recent trade) raises
+    # risk:blind once it has been blind this long: a one-minute gap in a thin IEX book
+    # isn't news, five minutes without a stop is.
+    blind_alarm_after_sec: float = 300.0
 
 
 @dataclass(frozen=True)
@@ -244,6 +248,8 @@ def _validate_shared(cfg) -> None:
                  "watchdog_interval_sec"):
         if getattr(cfg.engine, name) <= 0:
             raise ConfigError(f"engine.{name} must be positive")
+    if cfg.engine.blind_alarm_after_sec < 0:
+        raise ConfigError("engine.blind_alarm_after_sec must be >= 0 (0 raises at once)")
     if cfg.alerts.burst < 1 or cfg.alerts.per_hour <= 0:
         raise ConfigError("alerts.burst must be >= 1 and alerts.per_hour > 0")
     if not 1.0 <= cfg.alerts.live_edit_sec <= 60.0:

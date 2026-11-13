@@ -9,7 +9,7 @@ import pytest
 
 from ottr.clock import FakeClock
 from ottr.market.alpaca import (TRADING_PAPER, Alpaca, AlpacaError, Credentials, QuoteLimits,
-                                bar_day, check_quote, completed_bars, parse_ts)
+                                bar_day, check_quote, check_trade, completed_bars, parse_ts)
 from ottr.market.calendar import ET
 from ottr.market.http import RateLimiter
 from ottr.market.types import Bar
@@ -214,6 +214,30 @@ def test_an_old_trade_does_not_veto_a_good_quote(fake):
 def test_missing_pieces(fake):
     assert check_quote("SPY", None, NOW)[1] == "no_snapshot"
     assert check_quote("SPY", {"latestTrade": {}}, NOW)[1] == "no_quote"
+
+
+def test_a_recent_sane_trade_is_read_even_when_the_quote_is_too_wide(fake):
+    """RPRX on 2026-11-13: IEX quoted 68.93 x 70.62 while it printed near the national
+    69.14 x 69.16. The quote can't be filled on; the trade still says where the market is."""
+    s = snap(fake, sym="RPRX", bid=68.93, ask=70.62, last=69.15, trade_age=40, prev_close=68.80)
+    assert check_quote("RPRX", s, NOW)[1].startswith("too_wide")
+    ts, px = check_trade(s, NOW)
+    assert px == 69.15 and ts == pytest.approx(NOW - 40, abs=0.2)
+
+
+@pytest.mark.parametrize("kw", [
+    dict(trade_age=121),                            # older than max_age_sec (120)
+    dict(last=40.0, prev_close=69.0),               # 42% off the previous close: a bad print
+    dict(last=0.0),
+])
+def test_an_old_or_bad_trade_is_not_read(fake, kw):
+    assert check_trade(snap(fake, sym="RPRX", bid=68.9, ask=70.6, **kw), NOW) is None
+
+
+def test_a_split_explains_a_trade_far_from_the_close(fake):
+    s = snap(fake, sym="X", bid=49.9, ask=50.1, last=50.0, prev_close=100.0)   # a 2-for-1 split today
+    assert check_trade(s, NOW) is None and check_trade(s, NOW, split=2.0) is not None
+    assert check_trade(None, NOW) is None and check_trade({"latestTrade": {"p": 5}}, NOW) is None
 
 
 def test_limits_are_tunable(fake):
