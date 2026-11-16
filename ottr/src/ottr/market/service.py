@@ -36,7 +36,7 @@ from ottr.ledger.store import Store
 from ottr.market import benchmarks as bm
 from ottr.market import history
 from ottr.market import indicators as ind
-from ottr.market.alpaca import Alpaca, AlpacaError, Asset, check_quote, check_trade, completed_bars
+from ottr.market.alpaca import Alpaca, AlpacaError, Asset, check_quote, check_trade, completed_bars, feed_live
 from ottr.market.calendar import CalendarError, Session, TradingCalendar
 from ottr.market.packet import UsSnapshot, build_snapshot
 from ottr.market.types import Bar, MarketDataError, Quote
@@ -58,7 +58,8 @@ class MarketData:
         self._cal: Optional[TradingCalendar] = history.load_calendar(store)
         self._cal_day = None                       # ET date of the last calendar refresh
         self._snaps: Dict[str, dict] = {}
-        self._snaps_ts = 0.0
+        self._snaps_ts = 0.0                       # when the cached snapshots were fetched
+        self._snaps_seen: Optional[float] = None   # the same, if that fetch showed the feed live
         self._minutes: Dict[str, Tuple[float, float]] = {}
         self._minutes_ts = 0.0
         self._bars_through = None                  # the last session whose final bars are stored
@@ -101,33 +102,54 @@ class MarketData:
     # -- quotes ------------------------------------------------------------------------------
     async def snapshots(self, force: bool = False) -> Dict[str, dict]:
         """Raw snapshots for every tracked symbol, cached for `quote_ttl_sec`. On an outage
-        the cache is returned: each quote carries its own exchange timestamp, so
-        `check_quote` still judges it stale rather than trusting it."""
+        the cache is returned: each quote carries its own exchange timestamp, and a standing
+        quote is vouched for only as of the fetch that returned it, so `check_quote` still
+        judges it stale rather than trusting it."""
+        return (await self._tracked_snapshots(force))[0]
+
+    async def _tracked_snapshots(self, force: bool = False) -> Tuple[Dict[str, dict], Optional[float]]:
+        """`snapshots()`, with when a fetch that showed the feed live returned them (None
+        if it didn't): what vouches for the cash class's standing quotes."""
         async with self._lock:
             now = self.clock.time()
             if not force and self._snaps and now - self._snaps_ts < self.cfg.data.quote_ttl_sec:
-                return dict(self._snaps)
+                return dict(self._snaps), self._snaps_seen
             try:
                 self._snaps = await self.alpaca.snapshots(self.tracked(), feed=self.cfg.data.feed)
                 self._snaps_ts = now
+                self._snaps_seen = now if feed_live(self._snaps, now, self.cfg.data.quote_limits()) else None
             except AlpacaError as e:
                 if not self._snaps:
                     raise MarketDataError(f"no quotes: {e}") from e
                 logger.warning("snapshots failed (%s); quotes judged from the last ones", e)
-            return dict(self._snaps)
+            return dict(self._snaps), self._snaps_seen
+
+    async def _fetch_snapshots(self, symbols: Sequence[str]) -> Tuple[Dict[str, dict], Optional[float]]:
+        """Snapshots fetched now for untracked symbols (never cached), with when they were
+        fetched if the batch shows the feed live. Raises AlpacaError."""
+        fetched = self.clock.time()
+        snaps = await self.alpaca.snapshots(symbols, feed=self.cfg.data.feed) if symbols else {}
+        return snaps, (fetched if feed_live(snaps, fetched, self.cfg.data.quote_limits()) else None)
+
+    def _judge(self, symbols: Iterable[str], snaps: Mapping[str, dict], seen: Optional[float],
+               now: float) -> Dict[str, Tuple[Optional[Quote], str]]:
+        """`check_quote` for each symbol. `seen` (when a live fetch returned `snaps`) vouches
+        only for the cash class's standing quotes: see `check_quote` for why not the rest."""
+        limits, splits, standing = self.cfg.data.quote_limits(), self._splits(now), self.cfg.standing_quotes
+        return {s: check_quote(s, snaps.get(s), now, limits, splits.get(s, 1.0), seen if s in standing else None)
+                for s in symbols}
 
     async def quote(self, symbol: str) -> Tuple[Optional[Quote], str]:
         """A fresh, sane quote for an order, or (None, why not)."""
         if symbol not in set(self.tracked()):
             try:
-                snaps = await self.alpaca.snapshots([symbol], feed=self.cfg.data.feed)
+                snaps, seen = await self._fetch_snapshots([symbol])
             except AlpacaError as e:
                 return None, f"market_data_error ({e})"
         else:
-            snaps = await self.snapshots(force=self.clock.time() - self._snaps_ts > REFRESH_IF_OLDER_SEC)
-        now = self.clock.time()
-        return check_quote(symbol, snaps.get(symbol), now, self.cfg.data.quote_limits(),
-                           self._splits(now).get(symbol, 1.0))
+            snaps, seen = await self._tracked_snapshots(
+                force=self.clock.time() - self._snaps_ts > REFRESH_IF_OLDER_SEC)
+        return self._judge([symbol], snaps, seen, self.clock.time())[symbol]
 
     def _splits(self, now: float) -> Dict[str, float]:
         """symbol -> the share multiple of splits effective since the last close."""
@@ -158,17 +180,16 @@ class MarketData:
         """symbol -> (a usable quote or None, why not), for every tracked symbol (from the
         cached snapshots), or for `symbols` (fetched now: the screener's candidates). A
         symbol Alpaca returns no snapshot for is unusable, not missing."""
-        now = self.clock.time()
         if symbols is None:
-            syms, snaps = self.tracked(), await self.snapshots()
+            syms = self.tracked()
+            snaps, seen = await self._tracked_snapshots()
         else:
             syms = sorted(set(symbols))
             try:
-                snaps = await self.alpaca.snapshots(syms, feed=self.cfg.data.feed) if syms else {}
+                snaps, seen = await self._fetch_snapshots(syms)
             except AlpacaError as e:
                 raise MarketDataError(f"snapshots: {e}") from e
-        limits, splits = self.cfg.data.quote_limits(), self._splits(now)
-        return {s: check_quote(s, snaps.get(s), now, limits, splits.get(s, 1.0)) for s in syms}
+        return self._judge(syms, snaps, seen, self.clock.time())
 
     # -- asset records -----------------------------------------------------------------------
     async def refresh_assets(self, symbols: Iterable[str], force: bool = False) -> Dict[str, Asset]:
