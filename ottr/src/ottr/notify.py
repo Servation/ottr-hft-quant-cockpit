@@ -113,8 +113,9 @@ def _live_analyst(a: dict) -> str:
 
 
 def _moves(changes) -> str:
-    """'SPY BUY to HOLD (0.40), TLT HOLD to BUY (0.55)' for round 2's changed stances."""
-    return ", ".join(f"{c.get('asset')} {c.get('from')} to {c.get('to')} ({float(c.get('conviction') or 0):.2f})"
+    """'SPY BUY to HOLD 0.40, TLT HOLD to BUY 0.55' for round 2's changed stances (written
+    like round 1's 'BUY KO 0.40', the new conviction last)."""
+    return ", ".join(f"{c.get('asset')} {c.get('from')} to {c.get('to')} {float(c.get('conviction') or 0):.2f}"
                      for c in changes or [])
 
 
@@ -129,10 +130,9 @@ def _live_debate(d: dict) -> List[str]:
             continue
         name, st, took = a.get("name"), r.get("status"), _dur(r.get("latency_sec") or 0)
         if st == "done":
-            moved = _moves(r.get("changes"))
-            out.append(f"- {name}: {'changed ' + moved if moved else 'held every stance'} ({took})")
+            out.append(f"- {name}: answered in {took}: {_moves(r.get('changes')) or 'held every stance'}")
         elif st == "dropped":
-            out.append(f"- {name}: no answer after {took} ({clip(r.get('error'), 120)}), round-1 stances stand")
+            out.append(f"- {name}: no answer after {took} ({clip(r.get('error'), 120)}), so its round-1 stances stand")
         else:
             out.append(f"- {name}: {st}")
     return out
@@ -211,7 +211,7 @@ def _debate_line(r: Optional[dict]) -> str:
     """The meeting post's round-2 line: who changed what, or that no one did."""
     if not r:
         return ""
-    moved = [f"{name} {_moves(c)}" for name, c in sorted((r.get("changes") or {}).items()) if c]
+    moved = [f"{name} changed {_moves(c)}" for name, c in sorted((r.get("changes") or {}).items()) if c]
     gone = [f"{name} didn't answer" for name in sorted(r.get("errors") or {})]
     return (f"\nRound 2 on {', '.join(r.get('assets') or [])}: "
             + ("; ".join(moved + gone) if moved or gone else "no one changed a stance"))

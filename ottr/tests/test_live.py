@@ -590,8 +590,8 @@ def test_round_two_shows_in_the_live_message_and_the_status_line():
     assert d["phase"] == "debate" and d["contested"] == ["SPY", "TLT"]
     text = format_event("meeting_live", d)
     assert "**Round 2** on SPY, TLT:" in text
-    assert "- gpt: changed SPY HOLD to BUY (0.55) (12s)" in text
-    assert "- gemini: no answer after 5m 00s (agy: timed out after 300s), round-1 stances stand" in text
+    assert "- gpt: answered in 12s: SPY HOLD to BUY 0.55" in text
+    assert "- gemini: no answer after 5m 00s (agy: timed out after 300s), so its round-1 stances stand" in text
     assert "- claude: thinking" in text
     line = render.council_line({"running": True, "started_at": 5.0, "progress": d})
     assert line.endswith("claude, gpt and gemini done, round 2 on SPY, TLT (claude answering)")
@@ -601,7 +601,7 @@ def test_round_two_shows_in_the_live_message_and_the_status_line():
     assert {a["name"]: a["debate"]["status"] for a in stopped.to_dict()["analysts"]} == {
         "claude": "stopped", "gpt": "done", "gemini": "dropped"}
     p.apply("debate_done", {"name": "claude", "latency": 15.0, "changes": []})
-    assert "- claude: held every stance (15s)" in format_event("meeting_live", p.to_dict(1110.0))
+    assert "- claude: answered in 15s: held every stance" in format_event("meeting_live", p.to_dict(1110.0))
 
 
 async def test_round_two_inside_the_engine_is_stored_apart_and_posted(cfg, store, ledger):
@@ -622,7 +622,7 @@ async def test_round_two_inside_the_engine_is_stored_apart_and_posted(cfg, store
     rows = store.conn.execute("SELECT analyst, asset, stance, conviction FROM debate_stances ORDER BY analyst").fetchall()
     assert [tuple(r) for r in rows] == [("claude", "TLT", "BUY", 0.8), ("gemini", "TLT", "BUY", 0.5),
                                         ("gpt", "TLT", "BUY", 0.6)]
-    assert "Round 2 on TLT: gemini TLT HOLD to BUY (0.50)" in hook.posts[0]
+    assert "Round 2 on TLT: gemini changed TLT HOLD to BUY 0.50" in hook.posts[0]
     (audit,) = store.audits("meeting")
     assert audit["debate"]["changes"]["gemini"][0]["to"] == "BUY"
     (mid, ts, status, record) = store.conn.execute("SELECT id, ts, status, record FROM meetings").fetchone()
