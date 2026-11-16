@@ -121,6 +121,11 @@ def bar_day(t: str) -> date:
     return datetime.fromtimestamp(parse_ts(t), tz=ET).date()
 
 
+def _ny_day(ts: float) -> date:
+    """The New York calendar date of an instant."""
+    return datetime.fromtimestamp(ts, tz=ET).date()
+
+
 def _classify(resp: httpx.Response) -> http.Classified:
     if resp.status_code == 401:
         return None, "HTTP 401: Alpaca rejected the keys (check APCA_API_KEY_ID / APCA_API_SECRET_KEY)", False
@@ -360,7 +365,8 @@ def check_quote(symbol: str, snap: Optional[dict], now: float,
     Quote's `ts` is when it is known to be current, and its age is judged from that:
     - by default the exchange's quote time, so staleness is measured against the market,
       not against our own poll;
-    - with `seen`, the later of that and `seen`.
+    - with `seen`, the later of that and `seen`, if the quote was placed the same New York
+      day as `seen`.
 
     `seen` is when a fetch whose batch passed `feed_live` returned this snapshot. An IEX
     quote is stamped when IEX's best bid or offer last changed, so a calm instrument's
@@ -371,7 +377,11 @@ def check_quote(symbol: str, snap: Optional[dict], now: float,
     reopened from 20% higher) and nothing in the free feed tells the two apart, while a
     T-bill ETF can't move 5% to trip a pause and has no company news to halt on. A cached
     snapshot keeps the time of the fetch that returned it, so an outage still ages every
-    quote into stale.
+    quote into stale. A quote from an earlier day is never vouched for. Until IEX's first
+    quote of the morning (SGOV's came at 08:00 every day from 2026-11-02 to 11-13), the
+    snapshot still carries the last session's: on Sunday 2026-11-15 it was Friday's 16:59:58
+    100.55 x 100.57. On an ex-dividend morning that price is off by the dividend, about 0.4%
+    for SGOV.
 
     `split` is the share multiple of a split effective since the previous close: on its
     ex-date that close may still be in the old shares, so a move the split explains is not
@@ -392,7 +402,7 @@ def check_quote(symbol: str, snap: Optional[dict], now: float,
     if spread > limits.max_spread_pct:
         return None, f"too_wide ({spread:.2f}%)"
     qts = parse_ts(q["t"])
-    if seen is not None:
+    if seen is not None and _ny_day(qts) == _ny_day(seen):
         qts = max(qts, seen)
     if now - qts > limits.max_age_sec:
         return None, f"stale ({now - qts:.0f}s)"

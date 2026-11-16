@@ -259,6 +259,17 @@ def test_a_standing_quote_is_current_as_of_the_fetch_that_saw_it(fake):
     assert check_quote("SPY", fresh, NOW, seen=NOW - 60)[0].ts == pytest.approx(NOW - 3, abs=0.2)  # never older
 
 
+def test_a_quote_left_from_an_earlier_day_is_never_vouched_for(fake):
+    # Until IEX's first quote of the morning, the snapshot still carries the last session's
+    # (on Sunday 2026-11-15, SGOV's was Friday's 16:59:58), and an ex-dividend morning moves it.
+    s = snap(fake, "SGOV", bid=100.55, ask=100.57, age=NOW - et(2026, 10, 20, 16, 59), trade_age=NOW - et(2026, 10, 20, 15, 59))
+    q, why = check_quote("SGOV", s, NOW, seen=NOW - 5)
+    assert q is None and why.startswith("stale (")
+    s = snap(fake, "SGOV", bid=100.55, ask=100.57, age=NOW - et(2026, 10, 21, 8, 0), trade_age=900)  # today's 08:00
+    q, why = check_quote("SGOV", s, NOW, seen=NOW - 5)
+    assert why == "ok" and q.ts == NOW - 5
+
+
 def test_the_feed_is_live_only_while_some_quote_in_the_batch_moves(fake):
     fake.add_quote("SGOV", 100.52, 100.53, age=600)
     fake.add_quote("SPY", 500, 500.1, age=1)

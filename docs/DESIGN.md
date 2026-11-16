@@ -102,6 +102,9 @@ in that same fetch had just changed, which shows the feed is moving.
 - **Only the cash ETF:** a halted stock's IEX quote also sits unchanged (OMH's did through
   a 10-minute pause on 2026-11-13, then reopened 20% higher), and the free feed can't tell
   a halt from a calm market.
+- **Today's quotes only:** before IEX's first quote of the morning, the snapshot still
+  carries the last session's quote, which an ex-dividend morning moves by the dividend, so
+  only a quote placed the same day is vouched for.
 
 The book is marked by session:
 - In session: the live bid, else the newest delayed SIP minute close.

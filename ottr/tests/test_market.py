@@ -251,6 +251,18 @@ async def test_an_outage_or_a_stuck_feed_still_ages_the_cash_etfs_quote_into_sta
     assert (await svc.quote("SGOV"))[1] == "ok"
 
 
+async def test_the_cash_etfs_quote_from_the_last_session_is_stale_at_the_open(ucfg, store):
+    # Monday's open before IEX has quoted SGOV: the snapshot still carries Friday's last quote.
+    f = fake_market(ucfg, WED_11)
+    snaps_for(f, ucfg.universe.core)
+    standing_sgov(f, age=WED_11 - et(2026, 10, 20, 16, 59))
+    svc, _ = service(ucfg, store, f, WED_11)
+    await svc.refresh_calendar()
+    q, why = await svc.quote("SGOV")
+    assert q is None and why.startswith("stale (")
+    assert (await svc.quote_checks())["SPY"][1] == "ok"                 # the feed itself is live
+
+
 async def test_an_order_quote_is_refetched_when_the_cache_is_10s_old(ucfg, store):
     f = fake_market(ucfg, WED_11)
     snaps_for(f, ucfg.universe.core)
