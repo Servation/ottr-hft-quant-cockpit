@@ -1,14 +1,14 @@
 """
 Council tests: JSON extraction, schema rules, repair retry, anonymization, code-side rules,
-and the fallback chair that stands in when the chair fails.
+the fallback chair that stands in when the chair fails, and round 2 where the analysts split.
 """
 
 import pytest
 
 from ottr.council.council import Council, compute_tally, enforce_rules
 from ottr.council.models import ModelError, ask_json, extract_json
-from ottr.council.schemas import SchemaError, analyst_validator, chair_validator
-from tests.fakes import ScriptedModel, analyst_reply
+from ottr.council.schemas import SchemaError, analyst_validator, chair_validator, debate_validator
+from tests.fakes import ScriptedModel, analyst_reply, debate_reply
 
 U = ["SPY", "TLT"]
 
@@ -151,3 +151,82 @@ async def test_both_chairs_failing_abstains_with_both_reasons():
 async def test_without_a_fallback_a_failed_chair_abstains():
     rec = await Council(_analysts(), ScriptedModel("claude", [ModelError(SIGNED_OUT)]), U).run("ctx", held=set())
     assert rec["status"] == f"abstain: chair failed ({SIGNED_OUT})"
+
+
+# -- round 2 ---------------------------------------------------------------------------------------
+def _split(round2, spy=("BUY", "HOLD", "HOLD")):
+    """claude, gemini and gpt rate SPY as `spy` in round 1 (TLT: all HOLD), then answer
+    round 2 with `round2` (a reply or an exception each, same order)."""
+    return {n: ScriptedModel(n, [analyst_reply(U, {"SPY": (s, 0.7 if s == "BUY" else 0.5)}), r])
+            for n, s, r in zip(("claude", "gemini", "gpt"), spy, round2)}
+
+
+async def test_round_two_argues_only_the_split_and_the_chair_reads_both_rounds():
+    analysts = _split([debate_reply({"SPY": ("BUY", 0.7)}), debate_reply({"SPY": ("HOLD", 0.6)}),
+                       debate_reply({"SPY": ("BUY", 0.5)})])
+    chair = ScriptedModel("chair", [{"summary": "s", "trades": []}])
+    events = []
+    rec = await Council(analysts, chair, U, debate=True).run("ctx", held=set(),
+                                                             observe=lambda k, d: events.append(k))
+    assert rec["debate"]["assets"] == ["SPY"]                          # TLT, all HOLD, isn't argued
+    second = analysts["gpt"].prompts[1]
+    assert second.startswith("You are Analyst C") and "split on SPY" in second
+    body = second.split("=== ROUND 1 ===")[1]
+    assert "Analyst A: BUY (0.70) t Risk: r" in body and "You: HOLD (0.50)" in body and "TLT:" not in body
+    assert not any(n in body for n in ("claude", "gpt", "gemini"))   # anonymized, as for the chair
+    assert rec["analysts"]["gpt"]["assets"][0]["stance"] == "HOLD"     # round 1 stays as it was
+    assert rec["debate"]["changes"] == {"claude": [], "gemini": [],
+                                        "gpt": [{"asset": "SPY", "from": "HOLD", "to": "BUY", "conviction": 0.5}]}
+    assert rec["tally"]["assets"]["SPY"]["counts"] == {"BUY": 2, "HOLD": 1}   # final stances
+    p = chair.prompts[0]
+    assert "Where they split (SPY), each then read the others' cases" in p
+    assert "Round 2: held BUY (0.70). on SPY: weighed it" in p and "Round 2: changed to BUY (0.50)" in p
+    assert "Round 2: held HOLD (0.60)" in p
+    assert events == ["analysts_started", *["analyst_done"] * 3, "debate_started", *["debate_done"] * 3,
+                      "chair_started", "chair_done"]
+
+
+async def test_no_round_two_when_the_analysts_agree_or_it_is_off():
+    for debate, spy in ((True, ("BUY", "BUY", "BUY")), (False, ("BUY", "HOLD", "HOLD"))):
+        analysts = _split([None] * 3, spy)
+        chair = ScriptedModel("chair", [{"summary": "s", "trades": []}])
+        rec = await Council(analysts, chair, U, debate=debate).run("ctx", held=set())
+        assert rec["debate"] is None and all(len(a.prompts) == 1 for a in analysts.values())
+        assert "Round 2" not in chair.prompts[0] and "Where they split" not in chair.prompts[0]
+
+
+async def test_round_two_can_take_away_a_buys_only_backer():
+    analysts = _split([debate_reply({"SPY": ("HOLD", 0.4)}), debate_reply({"SPY": ("HOLD", 0.5)}),
+                       debate_reply({"SPY": ("HOLD", 0.5)})])
+    chair = ScriptedModel("chair", [{"summary": "s", "trades": [
+        {"action": "BUY", "asset": "SPY", "conviction": 0.6, "reasoning": "r"}]}])
+    rec = await Council(analysts, chair, U, debate=True).run("ctx", held=set())
+    assert rec["trades"] == [] and rec["dropped"][0]["why"] == "no analyst rated it BUY"
+
+
+async def test_an_analyst_that_fails_round_two_keeps_its_round_one_stance():
+    """claude's BUY is the only one; it times out in round 2, so its BUY still backs the
+    chair's trade and the chair is told it didn't answer."""
+    analysts = _split([ModelError("claude: timed out after 300s"), debate_reply({"SPY": ("HOLD", 0.5)}),
+                       debate_reply({"SPY": ("HOLD", 0.5)})])
+    chair = ScriptedModel("chair", [{"summary": "s", "trades": [
+        {"action": "BUY", "asset": "SPY", "conviction": 0.6, "reasoning": "r"}]}])
+    events = []
+    rec = await Council(analysts, chair, U, debate=True).run("ctx", held=set(),
+                                                             observe=lambda k, d: events.append((k, d)))
+    assert rec["status"] == "ok" and [t["asset"] for t in rec["trades"]] == ["SPY"]
+    assert rec["debate"]["errors"] == {"claude": "claude: timed out after 300s"}
+    assert set(rec["debate"]["answers"]) == {"gemini", "gpt"}
+    assert "Round 2: no answer, so its round-1 stance stands." in chair.prompts[0]
+    dropped = [d for k, d in events if k == "debate_dropped"]
+    assert [d["name"] for d in dropped] == ["claude"] and dropped[0]["error"].endswith("300s")
+
+
+def test_round_two_must_answer_exactly_the_split_assets():
+    v = debate_validator(["SPY"])
+    assert v(debate_reply({"SPY": ("buy", 0.6)}))["assets"][0]["stance"] == "BUY"
+    for bad, why in ((debate_reply({}), "missing stance"), (debate_reply({"SPY": ("BUY", 0.6), "TLT": ("BUY", 0.6)}), "unknown asset"),
+                     ({"assets": [{"asset": "SPY", "stance": "BUY", "conviction": 0.6}]}, "reply"),
+                     ({"assets": [{"asset": "SPY", "stance": "BUY", "conviction": 1.5, "reply": "x"}]}, "outside 0..1")):
+        with pytest.raises(SchemaError, match=why):
+            v(bad)

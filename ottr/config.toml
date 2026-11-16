@@ -237,6 +237,9 @@ analysts = ["claude", "gpt", "gemini"]
 chair = "claude"
 chair_fallback = "gpt"     # chairs when the chair fails (signed out, timed out, bad JSON); "" = abstain
 min_analysts = 2
+debate = true              # round 2: where the analysts split on an asset, each reads the others' cases
+                           # and gives a final stance; the chair sees both rounds (one more call per
+                           # analyst, only when they split)
 timeout_sec = 300
 claude_backend = "api"     # api: the Claude API with CLAUDE_API_KEY (per token) | cli: `claude -p` (subscription)
 claude_model = "claude-fable-5-2"  # a full model id (the CLI takes it too)

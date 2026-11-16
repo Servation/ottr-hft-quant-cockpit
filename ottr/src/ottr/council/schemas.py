@@ -1,8 +1,8 @@
 """
 Council wire schemas + validators (plain Python, no dependency).
 
-What it does: defines and checks the JSON that analysts and the chair must return.
-Why: model output is untrusted input. Every field is type/range-checked (NaN and
+What it does: defines and checks the JSON that analysts return (round 1, and round 2 on
+the assets they split on) and the chair returns. Why: model output is untrusted input. Every field is type/range-checked (NaN and
 infinity rejected), and the chair's shape has no dollar field at all, so sizing can
 only ever come from code.
 """
@@ -37,36 +37,50 @@ def _text(v: Any, where: str, max_len: int = 600) -> str:
     return v.strip()[:max_len]
 
 
-def analyst_validator(universe: List[str]):
-    allowed = set(universe)
+def _stances(obj: Any, assets: List[str], extra) -> List[Dict[str, Any]]:
+    """One validated row per asset in `assets`, in that order: asset, stance, conviction,
+    plus what `extra(row, where)` adds (the text fields, which differ by round)."""
+    if not isinstance(obj, dict):
+        raise SchemaError("top level must be an object")
+    rows = obj.get("assets")
+    if not isinstance(rows, list):
+        raise SchemaError("assets must be a list")
+    allowed = set(assets)
+    seen: Dict[str, Dict[str, Any]] = {}
+    for i, r in enumerate(rows):
+        if not isinstance(r, dict):
+            raise SchemaError(f"assets[{i}] must be an object")
+        a = str(r.get("asset", "")).upper().strip()
+        if a not in allowed:
+            raise SchemaError(f"assets[{i}]: unknown asset {a!r} (expected one of {', '.join(assets)})")
+        if a in seen:
+            raise SchemaError(f"assets[{i}]: duplicate {a}")
+        s = str(r.get("stance", "")).upper().strip()
+        if s not in STANCES:
+            raise SchemaError(f"assets[{i}]: stance must be one of {STANCES}")
+        seen[a] = {"asset": a, "stance": s,
+                   "conviction": _num01(r.get("conviction"), f"assets[{i}].conviction"),
+                   **extra(r, f"assets[{i}]")}
+    missing = allowed - set(seen)
+    if missing:
+        raise SchemaError(f"missing stance for {sorted(missing)}")
+    return [seen[a] for a in assets]
 
+
+def analyst_validator(universe: List[str]):
     def validate(obj: Any) -> Dict[str, Any]:
-        if not isinstance(obj, dict):
-            raise SchemaError("top level must be an object")
-        rows = obj.get("assets")
-        if not isinstance(rows, list):
-            raise SchemaError("assets must be a list")
-        seen: Dict[str, Dict[str, Any]] = {}
-        for i, r in enumerate(rows):
-            if not isinstance(r, dict):
-                raise SchemaError(f"assets[{i}] must be an object")
-            a = str(r.get("asset", "")).upper().strip()
-            if a not in allowed:
-                raise SchemaError(f"assets[{i}]: unknown asset {a!r}")
-            if a in seen:
-                raise SchemaError(f"assets[{i}]: duplicate {a}")
-            s = str(r.get("stance", "")).upper().strip()
-            if s not in STANCES:
-                raise SchemaError(f"assets[{i}]: stance must be one of {STANCES}")
-            seen[a] = {"asset": a, "stance": s,
-                       "conviction": _num01(r.get("conviction"), f"assets[{i}].conviction"),
-                       "thesis": _text(r.get("thesis"), f"assets[{i}].thesis"),
-                       "key_risk": _text(r.get("key_risk"), f"assets[{i}].key_risk")}
-        missing = allowed - set(seen)
-        if missing:
-            raise SchemaError(f"missing stance for {sorted(missing)}")
-        return {"overall_view": _text(obj.get("overall_view"), "overall_view", 800),
-                "assets": [seen[a] for a in universe]}
+        rows = _stances(obj, universe, lambda r, at: {"thesis": _text(r.get("thesis"), f"{at}.thesis"),
+                                                      "key_risk": _text(r.get("key_risk"), f"{at}.key_risk")})
+        return {"overall_view": _text(obj.get("overall_view"), "overall_view", 800), "assets": rows}
+
+    return validate
+
+
+def debate_validator(contested: List[str]):
+    """Round 2: a final stance on exactly the contested assets, each with a reply to the
+    strongest point against the analyst's round-1 view."""
+    def validate(obj: Any) -> Dict[str, Any]:
+        return {"assets": _stances(obj, contested, lambda r, at: {"reply": _text(r.get("reply"), f"{at}.reply", 500)})}
 
     return validate
 
@@ -123,6 +137,13 @@ ANALYST_SHAPE = """{
     {"asset": "SPY", "stance": "BUY|SELL|HOLD", "conviction": 0.0-1.0,
      "thesis": "one or two sentences citing the numbers given",
      "key_risk": "the single biggest way this call is wrong"}
+  ]
+}"""
+
+DEBATE_SHAPE = """{
+  "assets": [
+    {"asset": "SPY", "stance": "BUY|SELL|HOLD", "conviction": 0.0-1.0,
+     "reply": "the strongest point against your round-1 view, and why it does or doesn't move you"}
   ]
 }"""
 

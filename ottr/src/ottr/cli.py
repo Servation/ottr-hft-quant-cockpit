@@ -28,6 +28,7 @@ import json
 import logging
 import logging.handlers
 import os
+import sqlite3
 import sys
 import tempfile
 import time
@@ -300,12 +301,24 @@ def _scratch_copy(cfg) -> Store:
     Propose-only meetings run the full pipeline (council, gate verdicts) against real
     holdings but write only to this copy, so the live DB is never touched and the engine
     can keep running.
+
+    The copy is opened only after the backup, so a live book older than this code is
+    migrated, as the live one will be when the engine next starts. Why: backing up into a
+    Store that was already open replaced its fresh schema with the live book's, unmigrated,
+    and a rehearsal of new code before its deploy failed on 2026-11-16 at its first write
+    to a table the live book doesn't have yet ("no such table: debate_stances").
     """
+    path = Path(tempfile.mkdtemp(prefix="ottr-propose-")) / "ottr.db"
     live = Store(_db(cfg), writer=False)
-    scratch = Store(Path(tempfile.mkdtemp(prefix="ottr-propose-")) / "ottr.db", writer=True)
-    live.conn.backup(scratch.conn)
-    live.close()
-    return scratch
+    try:
+        dst = sqlite3.connect(path)
+        try:
+            live.conn.backup(dst)
+        finally:
+            dst.close()
+    finally:
+        live.close()
+    return Store(path, writer=True)
 
 
 async def cmd_meeting(cfg, args) -> int:
@@ -345,8 +358,17 @@ def _print_meeting(rec, store: Store) -> None:
     ch = rec.get("chair") or {}
     if ch.get("replaced"):
         print(f"  ! chair {ch['replaced']} failed, {ch.get('name')} chaired: {ch.get('error')}")
+    deb = rec.get("debate")
+    if deb:
+        print(f"\nROUND 2 on {', '.join(deb['assets'])}:")
+        for name, answers in sorted(deb["answers"].items()):
+            for asset, a in answers.items():
+                print(f"  {name:7} {asset:6} {a['stance']:4} {a['conviction']:.2f}  {a['reply']}")
+        for name, e in deb["errors"].items():
+            print(f"  ! {name} gave no round-2 answer (its round-1 stances stand): {e}")
     if rec["tally"]:
         from ottr.council.council import format_tally
+        print(("\nTALLY (final stances)" if deb else "\nTALLY") + ":")
         print(format_tally(rec["tally"]))
     d = rec["decision"]
     if d:

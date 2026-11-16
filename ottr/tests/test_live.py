@@ -29,7 +29,8 @@ from ottr.engine.progress import MeetingProgress
 from ottr.health import Alarm
 from ottr.market.types import MarketDataError
 from ottr.notify import LIMIT, Alerts, DiscordWebhook, format_event
-from tests.fakes import OPEN, LiveRecorder, ScriptedModel, analyst_reply, buy_council, market_rig, no_corporate_actions
+from tests.fakes import (OPEN, LiveRecorder, ScriptedModel, analyst_reply, buy_council, debate_reply, market_rig,
+                         no_corporate_actions)
 
 FAST = Limits(live_edit_sec=0.05)
 EM_DASH = chr(0x2014)
@@ -572,3 +573,62 @@ def test_a_stand_in_chair_shows_who_failed_and_who_decided():
     plain = format_event("meeting", {"id": "m-2", "status": "ok", "summary": "s", "trades": [],
                                      "dropped": [], "chair": {"name": "claude"}})
     assert "Chaired by" not in plain
+
+
+# -- round 2 ---------------------------------------------------------------------------------------
+def test_round_two_shows_in_the_live_message_and_the_status_line():
+    u = ["SPY", "TLT"]
+    p = MeetingProgress("m-1", ["claude", "gpt", "gemini"], "claude", now=1000.0)
+    p.apply("analysts_started", {})
+    for n in ("claude", "gpt", "gemini"):
+        p.apply("analyst_done", {"name": n, "latency": 20.0, "report": analyst_reply(u)})
+    p.apply("debate_started", {"assets": ["SPY", "TLT"], "analysts": ["claude", "gemini", "gpt"]})
+    p.apply("debate_done", {"name": "gpt", "latency": 12.0, "changes": [
+        {"asset": "SPY", "from": "HOLD", "to": "BUY", "conviction": 0.55}]})
+    p.apply("debate_dropped", {"name": "gemini", "latency": 300.0, "error": "agy: timed out after 300s"})
+    d = p.to_dict(1100.0)
+    assert d["phase"] == "debate" and d["contested"] == ["SPY", "TLT"]
+    text = format_event("meeting_live", d)
+    assert "**Round 2** on SPY, TLT:" in text
+    assert "- gpt: answered in 12s: SPY HOLD to BUY 0.55" in text
+    assert "- gemini: no answer after 5m 00s (agy: timed out after 300s), so its round-1 stances stand" in text
+    assert "- claude: thinking" in text
+    line = render.council_line({"running": True, "started_at": 5.0, "progress": d})
+    assert line.endswith("claude, gpt and gemini done, round 2 on SPY, TLT (claude answering)")
+    import copy
+    stopped = copy.deepcopy(p)
+    stopped.abort("cancelled, the engine is stopping", now=1120.0)
+    assert {a["name"]: a["debate"]["status"] for a in stopped.to_dict()["analysts"]} == {
+        "claude": "stopped", "gpt": "done", "gemini": "dropped"}
+    p.apply("debate_done", {"name": "claude", "latency": 15.0, "changes": []})
+    assert "- claude: answered in 15s: held every stance" in format_event("meeting_live", p.to_dict(1110.0))
+
+
+async def test_round_two_inside_the_engine_is_stored_apart_and_posted(cfg, store, ledger):
+    """buy_council splits on TLT (claude and gpt BUY, gemini HOLD); in round 2 gemini comes
+    round to BUY. Round 1 stays in `stances`, round 2 goes to `debate_stances`, and the
+    meeting post, the API's meeting view and the chat's view all say what moved."""
+    from types import SimpleNamespace
+
+    from ottr.api import _meeting_view
+    council = buy_council(cfg, "TLT", round2=[debate_reply({"TLT": ("BUY", 0.8)}), debate_reply({"TLT": ("BUY", 0.6)}),
+                                             debate_reply({"TLT": ("BUY", 0.5)})])
+    eng, hook = await make_engine(cfg, store, council, limits=dataclasses.replace(FAST, live_meeting=False))
+    async with eng.alerts.running():
+        rec = await eng.meeting(execute=True)
+        await eng.executor.drain()
+    assert rec["status"] == "ok" and "TLT" in eng.ledger.positions()
+    assert store.conn.execute("SELECT stance FROM stances WHERE analyst='gemini' AND asset='TLT'").fetchone()[0] == "HOLD"
+    rows = store.conn.execute("SELECT analyst, asset, stance, conviction FROM debate_stances ORDER BY analyst").fetchall()
+    assert [tuple(r) for r in rows] == [("claude", "TLT", "BUY", 0.8), ("gemini", "TLT", "BUY", 0.5),
+                                        ("gpt", "TLT", "BUY", 0.6)]
+    assert "Round 2 on TLT: gemini changed TLT HOLD to BUY 0.50" in hook.posts[0]
+    (audit,) = store.audits("meeting")
+    assert audit["debate"]["changes"]["gemini"][0]["to"] == "BUY"
+    (mid, ts, status, record) = store.conn.execute("SELECT id, ts, status, record FROM meetings").fetchone()
+    view = _meeting_view(SimpleNamespace(reader=store), mid, ts, status, record, full=False)
+    tlt = {s["asset"]: s for s in view["analysts"]["gemini"]["stances"]}["TLT"]
+    assert (tlt["stance"], tlt["round2"]["stance"]) == ("HOLD", "BUY") and view["debate"]["assets"] == ["TLT"]
+    assert {s["asset"]: s for s in view["analysts"]["gemini"]["stances"]}["SPY"]["round2"] is None
+    shown = render.meeting(dict(view, ts=ts), ts)
+    assert "> round 2, TLT: HOLD to BUY 0.50: on TLT: weighed it" in shown

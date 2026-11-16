@@ -252,3 +252,28 @@ def test_the_log_skips_a_line_per_http_request():
     finally:
         root.handlers[:] = handlers
         root.setLevel(level)
+
+
+def test_a_propose_only_copy_of_an_older_book_is_migrated_and_the_book_is_not(tmp_path, monkeypatch):
+    """2026-11-16: rehearsing round 2 before its deploy failed at the first write to
+    debate_stances: the scratch copy kept the live book's v4 schema. The copy now migrates
+    as the live book will when the engine next starts; the live book is left as it is."""
+    monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
+    s = Store(tmp_path / "ottr.db", writer=True)
+    Ledger(s).initialize(10000)
+    s.conn.execute("DROP TABLE debate_stances")
+    s.conn.execute("UPDATE meta SET value='4' WHERE key='schema_version'")
+    s.close()
+    scratch = cli._scratch_copy(cfgmod.load(data_dir=tmp_path))
+    try:
+        assert scratch.path != tmp_path / "ottr.db"
+        assert scratch.meta("schema_version") == "5" and Ledger(scratch).cash() == 10000
+        scratch.conn.execute("INSERT INTO debate_stances VALUES('m', 'gpt', 'SPY', 'BUY', 0.5, NULL, 0)")
+    finally:
+        scratch.close()
+    live = Store(tmp_path / "ottr.db", writer=False)
+    try:
+        assert live.meta("schema_version") == "4"
+        assert not live.conn.execute("SELECT 1 FROM sqlite_master WHERE name='debate_stances'").fetchone()
+    finally:
+        live.close()

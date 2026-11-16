@@ -121,16 +121,27 @@ Each equity point records which basis it used.
 2. Claude, GPT and Gemini each return a stance for every asset (BUY / SELL / HOLD,
    conviction 0-1, thesis, key risk) through their lenses: risk and regime, quant and
    technical, cross-asset risk appetite.
-3. Code tallies the stances and gives the tally to the chair as a fact.
-4. The chair returns at most 3 trades: `BUY {asset, conviction}` or
+3. Round 2, where they split (`council.debate`): for each asset whose stances differ, every
+   analyst reads the others' cases (anonymized, as the chair sees them) and gives a final
+   stance with a reply to the strongest point against its own. Round 1 stays independent,
+   so no view anchors on another and the scorecard grades each model's own call. Round 2
+   exists because the chair, settling every split alone, bought what all three backed (24
+   of 26 from 2026-10-22 to 11-16) and almost never a lone BUY (2 of 24), whose author never
+   defended it. An analyst that fails round 2 keeps its round-1 stance; agreement isn't
+   argued again, so a meeting without a split costs nothing extra.
+4. Code tallies the final stances and gives the tally to the chair as a fact.
+5. The chair returns at most 3 trades: `BUY {asset, conviction}` or
    `SELL {asset, fraction_of_position}`. If the chair fails (its CLI signed out, a
    timeout, JSON it can't repair), the fallback chair (GPT) gets the same prompt, so one
    provider being down doesn't cost the meeting. The record and the Discord post say who
    chaired and why; if both fail, the meeting abstains.
-5. Code enforces the rules: no BUY without an analyst's BUY, no SELL of what isn't held,
-   no BUY of a blocked asset (sunset, earnings blackout, corporate action), each dropped
-   with its reason.
-6. Each surviving trade becomes an Intent for the executor.
+6. Code enforces the rules: no BUY without an analyst's final BUY (a model talked out of
+   its BUY in round 2 no longer backs one), no SELL of what isn't held, no BUY of a blocked
+   asset (sunset, earnings blackout, corporate action), each dropped with its reason.
+7. Each surviving trade becomes an Intent for the executor.
+
+The record keeps round 1 as `analysts` (and the `stances` table) and round 2 as `debate`
+(and `debate_stances`), so both can be graded.
 
 Progress is reported through a callback that does no I/O, folded into one
 `MeetingProgress` state that `GET /api/council` serves and one Discord message shows,
@@ -148,6 +159,12 @@ stance's raw intraday mid, so a dividend inside the window is never booked as a 
 rest of the meeting day goes ungraded. A call not yet due is pending, never zero. Because
 each asset is rated twice a session, calls overlap, so every row also counts the
 non-overlapping windows its mean rests on and divides its standard error by that count.
+
+Two rows grade the council's process rather than a model: BUYs by how many analysts backed
+them in round 1 (do lone ideas pay?), and round 2's final stances by what they did to the
+round-1 stance, with the net value of the changes (the asset's excess over SPY, signed by
+the direction the stance moved). Round 2 costs a call per analyst when they split; this is
+how it shows whether it earns that.
 
 ### The watcher, between meetings
 

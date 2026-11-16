@@ -389,14 +389,18 @@ def _meeting_view(ctx: ApiContext, mid: str, ts: float, status: str, record: str
     prices = {(r[0], r[1]): r[2] for r in ctx.reader.conn.execute(
         "SELECT analyst, asset, price FROM stances WHERE meeting_id=?", (mid,))}
     labels = rec.get("labels") or {}
+    debate = rec.get("debate") or {}
     analysts = {}
     for name, rep in (rec.get("analysts") or {}).items():
+        r2 = (debate.get("answers") or {}).get(name) or {}
         analysts[name] = {
             "label": labels.get(name), "overall_view": rep.get("overall_view"),
             "latency_sec": (rec.get("latency") or {}).get(name),
+            # `round2`: its final stance and reply where the analysts split (None elsewhere).
             "stances": [{"asset": a["asset"], "stance": a["stance"], "conviction": a["conviction"],
                          "thesis": a.get("thesis"), "key_risk": a.get("key_risk"),
-                         "price": prices.get((name, a["asset"]))} for a in rep.get("assets", [])],
+                         "price": prices.get((name, a["asset"])), "round2": r2.get(a["asset"])}
+                        for a in rep.get("assets", [])],
         }
     prefix = f"council:{mid}:"
     orders = []
@@ -412,6 +416,7 @@ def _meeting_view(ctx: ApiContext, mid: str, ts: float, status: str, record: str
            "dropped": rec.get("dropped", []), "errors": rec.get("errors", {}),
            "latency": rec.get("latency", {}), "tally": rec.get("tally"), "chair": rec.get("chair"),
            "models": rec.get("models"),
+           "debate": ({k: debate.get(k) for k in ("assets", "changes", "errors", "latency")} if debate else None),
            "analysts": analysts, "orders": orders}
     if full:
         out["decision"] = rec.get("decision")

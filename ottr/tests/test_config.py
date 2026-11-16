@@ -43,6 +43,15 @@ def test_claude_has_its_own_council_effort_and_the_watcher_and_chat_run_below_it
     assert shared.council.effort_for("claude") == shared.council.effort_for("gpt") == "high"
 
 
+def test_round_two_is_on_and_takes_only_a_real_boolean(tmp_path):
+    from ottr.engine.engine import build_council
+    c = load(data_dir=tmp_path)
+    assert c.council.debate is True and build_council(c).debate is True
+    assert variant(tmp_path, ("debate = true", "debate = false")).council.debate is False
+    with pytest.raises(ConfigError, match="council.debate must be true or false"):
+        variant(tmp_path, ("debate = true", 'debate = "false"'))    # a string would read as on
+
+
 def test_caps_resolve_override_then_class_and_cash_is_uncapped(tmp_path):
     c = load(data_dir=tmp_path)
     assert c.cap_pct("SPY") == 25.0            # class cap
