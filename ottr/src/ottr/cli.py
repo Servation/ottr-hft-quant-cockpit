@@ -345,8 +345,17 @@ def _print_meeting(rec, store: Store) -> None:
     ch = rec.get("chair") or {}
     if ch.get("replaced"):
         print(f"  ! chair {ch['replaced']} failed, {ch.get('name')} chaired: {ch.get('error')}")
+    deb = rec.get("debate")
+    if deb:
+        print(f"\nROUND 2 on {', '.join(deb['assets'])}:")
+        for name, answers in sorted(deb["answers"].items()):
+            for asset, a in answers.items():
+                print(f"  {name:7} {asset:6} {a['stance']:4} {a['conviction']:.2f}  {a['reply']}")
+        for name, e in deb["errors"].items():
+            print(f"  ! {name} gave no round-2 answer (its round-1 stances stand): {e}")
     if rec["tally"]:
         from ottr.council.council import format_tally
+        print(("\nTALLY (final stances)" if deb else "\nTALLY") + ":")
         print(format_tally(rec["tally"]))
     d = rec["decision"]
     if d:

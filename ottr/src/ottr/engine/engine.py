@@ -90,12 +90,22 @@ WEEK_SEC = 7 * 86400.0
 EARNINGS_BLACKOUT = gate.EARNINGS_BLACKOUT_SESSIONS
 
 
+def _debate_summary(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Round 2 for the meeting post: the contested assets, who changed what, who dropped
+    out. None when there was no round 2."""
+    d = rec.get("debate")
+    if not d:
+        return None
+    return {"assets": d.get("assets", []), "changes": d.get("changes", {}), "errors": d.get("errors", {})}
+
+
 def build_council(cfg: Config) -> Council:
     c = cfg.council
     return Council(analysts={n: make_adapter(n, c) for n in c.analysts}, chair=make_adapter(c.chair, c),
                    universe=list(cfg.core), min_analysts=c.min_analysts,
                    max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec,
-                   fallback=make_adapter(c.chair_fallback, c) if c.chair_fallback else None)
+                   fallback=make_adapter(c.chair_fallback, c) if c.chair_fallback else None,
+                   debate=c.debate)
 
 
 def members_from(cfg: Config, assets: Mapping[str, Asset],
@@ -768,6 +778,15 @@ class Engine:
             leans = ", ".join(f"{s['stance']} {s['asset']} {s['conviction']:.2f}"
                               for s in prog.analysts[d["name"]]["stances"])
             logger.info("council %s: %s done in %.0fs (%s)", prog.id, d["name"], d["latency"], leans or "all HOLD")
+        elif kind == "debate_started":
+            logger.info("council %s: round 2 on %s", prog.id, ", ".join(d["assets"]))
+        elif kind == "debate_done":
+            moved = ", ".join(f"{c['asset']} {c['from']} to {c['to']}" for c in d["changes"])
+            logger.info("council %s: %s answered round 2 in %.0fs (%s)", prog.id, d["name"], d["latency"],
+                        moved or "held every stance")
+        elif kind == "debate_dropped":
+            logger.warning("council %s: %s dropped out of round 2 after %.0fs: %s", prog.id, d["name"],
+                           d["latency"], d["error"])
         elif kind == "chair_started":
             logger.info("council %s: chair deliberating on %d reports", prog.id, d["reports"])
         elif kind == "chair_replaced":
@@ -830,8 +849,16 @@ class Engine:
                     c.execute("INSERT OR REPLACE INTO stances VALUES(?,?,?,?,?,?,?)",
                               (rec["id"], name, a["asset"], a["stance"], a["conviction"],
                                q.mid if q else None, snap.as_of))
+            debate = rec.get("debate") or {}
+            for name, answers in (debate.get("answers") or {}).items():
+                for asset, a in answers.items():
+                    q = snap.quote(asset)
+                    c.execute("INSERT OR REPLACE INTO debate_stances VALUES(?,?,?,?,?,?,?)",
+                              (rec["id"], name, asset, a["stance"], a["conviction"], q.mid if q else None,
+                               snap.as_of))
             self.store.audit("meeting", id=rec["id"], status=rec["status"], trades=rec["trades"],
-                             dropped=rec["dropped"], errors=rec["errors"], latency=rec["latency"])
+                             dropped=rec["dropped"], errors=rec["errors"], latency=rec["latency"],
+                             debate={k: debate[k] for k in ("assets", "changes", "errors") if k in debate})
         prog.adjourn(rec, executing=execute)
         if prog.phase == "orders":  # registered before submitting, so no outcome can slip past
             self._awaiting_orders[prog.id] = prog
@@ -847,7 +874,7 @@ class Engine:
                                       "summary": (rec["decision"] or {}).get("summary", ""),
                                       "trades": rec["trades"], "dropped": rec["dropped"],
                                       "called": (called or {}).get("why"), "called_by": (called or {}).get("by"),
-                                      "chair": rec.get("chair")})
+                                      "chair": rec.get("chair"), "debate": _debate_summary(rec)})
         return rec
 
     def next_meeting(self, after: float) -> float:

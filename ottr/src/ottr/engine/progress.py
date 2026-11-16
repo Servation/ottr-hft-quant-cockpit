@@ -1,16 +1,17 @@
 """
 Meeting progress: what a council meeting has done so far, as plain data.
 
-What it does: folds the council's events (analysts started, one done or dropped out, the
-chair deliberating or decided) and then the executor's order outcomes into one state,
+What it does: folds the council's events (analysts started, one done or dropped out, round
+2 on the assets they split on, the chair deliberating or decided) and then the executor's
+order outcomes into one state,
 and `to_dict()` renders it for GET /api/council and the live Discord message.
 
 Why its own object: the council only reports what happened and never learns who is
 watching, and the watchers only read this snapshot. So neither the API nor a Discord
 outage can slow a meeting down, and both surfaces show the same facts.
 
-Phases: market (building the packet) -> analysts -> chair -> orders (recorded; the risk
-gate is deciding the trades) -> done. A meeting that raised, or was cancelled by an
+Phases: market (building the packet) -> analysts -> debate (round 2, only when they split)
+-> chair -> orders (recorded; the risk gate is deciding the trades) -> done. A meeting that raised, or was cancelled by an
 engine stop, ends in "aborted" with the reason in `note`.
 """
 
@@ -44,7 +45,8 @@ class MeetingProgress:
         self.phase = "market"
         self.analysts: Dict[str, Dict[str, Any]] = {
             n: {"name": n, "status": "waiting", "latency_sec": None, "stances": [], "view": None,
-                "error": None} for n in analysts}
+                "error": None, "debate": None} for n in analysts}
+        self.contested: List[str] = []         # the assets round 2 is about (none: no round 2)
         self.chair: Dict[str, Any] = {"name": chair, "status": "waiting", "reports": None,
                                       "latency_sec": None, "error": None,
                                       "replaced": None}  # {name, error, latency_sec}: the chair that failed
@@ -69,7 +71,7 @@ class MeetingProgress:
                 a["status"] = "thinking"
         elif kind in ("analyst_done", "analyst_dropped"):
             a = self.analysts.setdefault(d["name"], {"name": d["name"], "stances": [], "view": None,
-                                                     "error": None})
+                                                     "error": None, "debate": None})
             a["latency_sec"] = round(float(d.get("latency") or 0.0), 1)
             if kind == "analyst_done":
                 rep = d.get("report") or {}
@@ -79,6 +81,20 @@ class MeetingProgress:
                                 for s in rep.get("assets", []) if s.get("stance") != "HOLD"]
             else:
                 a["status"], a["error"] = "dropped", d.get("error")
+        elif kind == "debate_started":
+            self.phase, self.contested = "debate", list(d.get("assets") or [])
+            for n in d.get("analysts") or []:
+                if n in self.analysts:
+                    self.analysts[n]["debate"] = {"status": "thinking", "changes": [], "latency_sec": None,
+                                                  "error": None}
+        elif kind in ("debate_done", "debate_dropped"):
+            a = self.analysts.get(d["name"])
+            if a is not None and a.get("debate") is not None:
+                a["debate"]["latency_sec"] = round(float(d.get("latency") or 0.0), 1)
+                if kind == "debate_done":
+                    a["debate"].update(status="done", changes=[dict(c) for c in d.get("changes") or []])
+                else:
+                    a["debate"].update(status="dropped", error=d.get("error"))
         elif kind == "chair_started":
             self.phase = "chair"
             self.chair.update(status="thinking", reports=d.get("reports"))
@@ -114,7 +130,8 @@ class MeetingProgress:
         if self.phase in ("orders", "done"):
             return  # already recorded: a later failure doesn't unmake the meeting
         self.ended, self.note, self.phase = time.time() if now is None else now, why, "aborted"
-        for who in (*self.analysts.values(), self.chair):
+        debating = [a["debate"] for a in self.analysts.values() if a.get("debate")]
+        for who in (*self.analysts.values(), *debating, self.chair):
             if who["status"] in ("waiting", "thinking"):
                 who["status"] = "stopped"
 
@@ -146,7 +163,11 @@ class MeetingProgress:
             "id": self.id, "phase": self.phase, "started_at": self.started, "ended_at": self.ended,
             "called": self.called, "called_by": self.called_by,
             "elapsed_sec": round(end - self.started, 1), "status": self.status, "note": self.note,
-            "analysts": [dict(a, stances=list(a["stances"])) for a in self.analysts.values()],
+            "analysts": [dict(a, stances=list(a["stances"]),
+                              debate=(dict(a["debate"], changes=[dict(c) for c in a["debate"]["changes"]])
+                                      if a.get("debate") else None))
+                         for a in self.analysts.values()],
+            "contested": list(self.contested),
             "chair": dict(self.chair, replaced=dict(self.chair["replaced"]) if self.chair["replaced"] else None),
             "executing": self.executing,
             "trades": [dict(t, outcome=dict(t["outcome"]) if t["outcome"] else None) for t in self.trades],

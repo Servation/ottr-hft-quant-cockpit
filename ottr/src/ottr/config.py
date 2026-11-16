@@ -52,6 +52,7 @@ class Council:
     chair: str = "claude"
     chair_fallback: str = "gpt"            # chairs a meeting the chair fails ("" = abstain instead)
     min_analysts: int = 2
+    debate: bool = True                    # round 2 on the assets the analysts split on (council/council.py)
     timeout_sec: float = 300.0
     claude_backend: str = "api"            # api (CLAUDE_API_KEY, per token) | cli (`claude -p`, subscription)
     claude_model: str = "claude-fable-5-2"  # a full model id: the API takes no aliases such as "opus"
@@ -281,6 +282,8 @@ def _validate_shared(cfg) -> None:
         raise ConfigError(f"council.chair_fallback must be \"\" or claude, gpt or gemini other than "
                           f"the chair, got {fb!r}")
     c = cfg.council
+    if not isinstance(c.debate, bool):   # "false" in quotes would read as on
+        raise ConfigError("council.debate must be true or false")
     if c.claude_backend not in ("api", "cli"):
         raise ConfigError(f"council.claude_backend must be api or cli, got {c.claude_backend!r}")
     if c.claude_backend == "api" and not c.claude_model.startswith("claude-"):

@@ -112,6 +112,11 @@ def meeting_progress(p: Optional[dict]) -> str:
     for a in p.get("analysts") or []:
         by_state.setdefault(str(a.get("status")), []).append(str(a.get("name")))
     parts = [f"{names(by_state[s])} {word}" for s, word in ANALYST_STATES if by_state.get(s)]
+    if p.get("phase") == "debate":
+        busy = [str(a.get("name")) for a in p.get("analysts") or []
+                if (a.get("debate") or {}).get("status") == "thinking"]
+        parts.append(f"round 2 on {', '.join(p.get('contested') or [])}"
+                     + (f" ({names(busy)} answering)" if busy else ""))
     c = p.get("chair") or {}
     chair = {"thinking": "chair deliberating", "done": "chair decided",
              "failed": "chair failed"}.get(c.get("status"))
@@ -251,6 +256,12 @@ def meeting(m: Optional[dict], now: float) -> str:
             if s.get("stance") != "HOLD":
                 out.append(f"> {s['asset']} {s['stance']}: {clip(s.get('thesis'), 220)} "
                            f"Risk: {clip(s.get('key_risk'), 140)}")
+        for s in stances:
+            r2 = s.get("round2")
+            if r2:
+                moved = "held" if r2.get("stance") == s["stance"] else f"{s['stance']} to"
+                out.append(f"> round 2, {s['asset']}: {moved} {r2.get('stance')} "
+                           f"{float(r2.get('conviction') or 0):.2f}: {clip(r2.get('reply'), 220)}")
     return no_em_dash("\n".join(out))  # most of this view is model text
 
 

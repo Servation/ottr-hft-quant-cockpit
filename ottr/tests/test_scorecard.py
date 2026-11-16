@@ -171,3 +171,54 @@ def test_cli_scorecard_reads_only(tmp_path, monkeypatch, capsys):
 def test_cli_scorecard_without_a_book(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("OTTR_DATA_DIR", str(tmp_path))
     assert cli.main(["scorecard"]) == 3 and "no OTTR database" in capsys.readouterr().out
+
+
+# -- the council itself: BUYs by backing, and round 2 -----------------------------------------------
+def test_buys_by_backing_and_what_round_two_changed(tmp_path):
+    """m-1 (11-02): claude alone rates AAA BUY; in round 2 gpt comes round to BUY and claude
+    holds. m-2 (11-03): both rate BBB BUY. AAA then rose 2% to SPY's 1% (+1 session), so
+    gpt's move toward BUY was worth +1%."""
+    s = Store(tmp_path / "ottr.db", writer=True)
+    with s.tx() as c:
+        for d in S:
+            c.execute("INSERT INTO calendar(day,open,close,settles) VALUES(?,?,?,NULL)", (d.isoformat(), "09:30", "16:00"))
+        for sym, xs in C.items():
+            c.executemany("INSERT INTO adj_closes(symbol,day,close) VALUES(?,?,?)", [(sym, d.isoformat(), x) for d, x in xs.items()])
+        for mid, ts in (("m-1", et(2026, 11, 2, 10, 15)), ("m-2", et(2026, 11, 3, 10, 15))):
+            c.execute("INSERT INTO meetings(id,ts,status,packet,record) VALUES(?,?,?,?,?)",
+                      (mid, ts, "ok", "packet", dumps({"id": mid, "trades": []})))
+        t1, t2 = et(2026, 11, 2, 10, 15), et(2026, 11, 3, 10, 15)
+        c.executemany("INSERT INTO stances VALUES(?,?,?,?,?,?,?)", [
+            ("m-1", "claude", "AAA", "BUY", 0.7, 1.0, t1), ("m-1", "gpt", "AAA", "HOLD", 0.5, 1.0, t1),
+            ("m-2", "claude", "BBB", "BUY", 0.6, 1.0, t2), ("m-2", "gpt", "BBB", "BUY", 0.6, 1.0, t2)])
+        c.executemany("INSERT INTO debate_stances VALUES(?,?,?,?,?,?,?)", [
+            ("m-1", "claude", "AAA", "BUY", 0.7, 1.0, t1), ("m-1", "gpt", "AAA", "BUY", 0.5, 1.0, t1)])
+    s.close()
+    store = Store(tmp_path / "ottr.db", writer=False)
+    try:
+        out = sc.scorecard(store)
+    finally:
+        store.close()
+    one = {r["who"]: r for r in out["backing"] if r["horizon"] == 1}
+    assert set(one) == {"1 of 2", "2 of 2"} and one["1 of 2"]["calls"] == 1 and one["2 of 2"]["calls"] == 1
+    assert one["1 of 2"]["mean_excess"] == pytest.approx(51 / 50 - 101 / 100)
+    r2 = {r["who"]: r for r in out["round2"] if r["horizon"] == 1}
+    assert set(r2) == {"held BUY", "HOLD to BUY"} and r2["HOLD to BUY"]["calls"] == 1
+    (v1,) = [v for v in out["round2_value"] if v["horizon"] == 1]
+    assert (v1["changes"], v1["graded"]) == (1, 1) and v1["mean_value"] == pytest.approx(51 / 50 - 101 / 100)
+    text = sc.report(out)
+    assert "BUYs by backing, +1 session:" in text and "  1 of 2     BUY" in text
+    assert "Round 2's changes, net" in text and "+1: +1.00% per change (1 of 1 graded, 1 independent)" in text
+
+
+def test_a_book_from_before_round_two_still_has_a_scorecard(tmp_path):
+    write_book(tmp_path / "ottr.db")
+    s = Store(tmp_path / "ottr.db", writer=True)
+    s.conn.execute("DROP TABLE debate_stances")         # as a schema-4 book read by this code
+    s.close()
+    store = Store(tmp_path / "ottr.db", writer=False)
+    try:
+        out = sc.scorecard(store)
+    finally:
+        store.close()
+    assert out["round2"] == [] and "Round 2's changes: none yet." in sc.report(out)

@@ -205,6 +205,11 @@ def _meeting(ctx: DeskContext, now: float) -> List[str]:
         for s in a.get("stances") or []:
             lines.append(f"    {s['asset']} {s['stance']} conviction {float(s['conviction']):.2f}: "
                          f"{clip(s.get('thesis'), 300)} Key risk: {clip(s.get('key_risk'), 200)}")
+            r2 = s.get("round2")
+            if r2:
+                moved = "held" if r2.get("stance") == s["stance"] else "changed to"
+                lines.append(f"      Round 2: {moved} {r2.get('stance')} conviction "
+                             f"{float(r2.get('conviction') or 0):.2f}: {clip(r2.get('reply'), 300)}")
     return lines
 
 

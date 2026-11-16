@@ -183,19 +183,30 @@ def analyst_reply(universe, overrides: Optional[Dict[str, Tuple[str, float]]] = 
         for a in universe]}
 
 
-def council_for(cfg, analyst_replies, chair_reply, universe=None):
-    analysts = {n: ScriptedModel(n, [r]) for n, r in zip(("claude", "gpt", "gemini"), analyst_replies)}
+def debate_reply(answers: Dict[str, Tuple[str, float]]) -> dict:
+    """A round-2 answer: asset -> (stance, conviction), each with a reply."""
+    return {"assets": [{"asset": a, "stance": s, "conviction": c, "reply": f"on {a}: weighed it"}
+                       for a, (s, c) in answers.items()]}
+
+
+def council_for(cfg, analyst_replies, chair_reply, universe=None, round2=None):
+    """Scripted analysts claude, gpt and gemini (in that order). With `round2` (one reply or
+    exception each, same order) the council holds round 2."""
+    second = list(round2 or [])
+    analysts = {n: ScriptedModel(n, [r, *second[i:i + 1]])
+                for i, (n, r) in enumerate(zip(("claude", "gpt", "gemini"), analyst_replies))}
     return Council(analysts, ScriptedModel("chair", [chair_reply]), list(universe or cfg.core),
-                   min_analysts=2, max_trades=3)
+                   min_analysts=2, max_trades=3, debate=round2 is not None)
 
 
-def buy_council(cfg, asset: str = "TLT", conviction: float = 0.7):
-    """A council whose analysts back `asset` and whose chair buys it."""
+def buy_council(cfg, asset: str = "TLT", conviction: float = 0.7, round2=None):
+    """A council whose analysts back `asset` (claude and gpt BUY, gemini HOLD) and whose
+    chair buys it."""
     u = list(cfg.core)
     reps = [analyst_reply(u, {asset: ("BUY", 0.8)}), analyst_reply(u, {asset: ("BUY", 0.6)}), analyst_reply(u)]
     chair = {"summary": f"buy {asset.lower()}", "dissent_notes": "",
              "trades": [{"action": "BUY", "asset": asset, "conviction": conviction, "reasoning": "trend"}]}
-    return council_for(cfg, reps, chair)
+    return council_for(cfg, reps, chair, round2=round2)
 
 
 class LiveRecorder:

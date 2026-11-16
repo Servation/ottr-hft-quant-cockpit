@@ -8,9 +8,10 @@ rationale: [`../docs/DESIGN.md`](../docs/DESIGN.md).
   - Up to 6 single stocks: satellites a weekly code screener picks (40% of equity at most).
   - SGOV holds idle cash.
 - **Council:** Claude (Claude API), GPT (Codex CLI) and Gemini (Antigravity CLI) each give a stance per
-  asset as validated JSON at 10:15 and 15:15 New York time on trading days. A Claude
-  chair decides on anonymized reports, and GPT stands in if the chair fails. The chair
-  never gives dollar sizes.
+  asset as validated JSON at 10:15 and 15:15 New York time on trading days. Where they
+  split on an asset, each reads the others' cases and gives a final stance (round 2). A
+  Claude chair decides on the anonymized reports of both rounds, and GPT stands in if the
+  chair fails. The chair never gives dollar sizes.
 - **Code:**
   - **Sizing:** sizes BUYs (vol target x conviction x regime, topping up only to target).
   - **Gate:** runs the pre-trade gate (session, quote sanity, caps, sleeve, earnings blackout, corporate actions).
@@ -285,9 +286,10 @@ runs, and **No make-up meeting** (and why) when it is dropped. `ottr status`, `/
 
 ## Watching a council meeting
 
-A meeting takes a few minutes (the analysts in parallel, then the chair). When it starts,
-the webhook posts one message and edits it as the meeting moves: each analyst's view and
-calls as they finish, the chair's decision, the trades code dropped (a BUY in an earnings
+A meeting takes a few minutes (the analysts in parallel, round 2 if they split, then the
+chair). When it starts, the webhook posts one message and edits it as the meeting moves:
+each analyst's view and calls as they finish, round 2 (the assets argued, and who changed
+which stance or held), the chair's decision, the trades code dropped (a BUY in an earnings
 blackout, a sunset satellite, an unmodeled corporate action) and, once recorded, the risk
 gate's answer per trade (filled, dry run, deferred or rejected, and why). The usual
 summary post follows, and so do fill posts. `/status` in the chat bot reads the same
@@ -420,6 +422,14 @@ close 1 and 5 sessions later, and by that return minus SPY's. Rows are split by 
 model and effort (`claude-fable-5-2/xhigh`), and stance: a model change shows as a new row
 beside the old one. Meetings recorded before the record kept the model show as
 `not recorded`.
+
+Two more views grade the council rather than one model:
+- **BUYs by backing:** each asset a meeting rated BUY in round 1, by how many analysts did
+  (`1 of 3` is a lone idea). It shows whether the ideas the chair passes over would have paid.
+- **Round 2:** each final stance where the analysts split, by what it did to the round-1
+  stance (`HOLD to BUY`, `held BUY`), and the net value of the changes: the asset's return
+  over SPY, counted + when the stance moved toward BUY and - when it moved away. Positive
+  means round 2 helped. `council.debate = false` turns round 2 off.
 
 Read it with its evidence columns. The same asset is rated twice a session, so calls
 overlap: `n` counts graded calls, `indep` the calls on one asset whose windows don't

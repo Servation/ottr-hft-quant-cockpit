@@ -30,7 +30,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 FIRST_SUPPORTED_VERSION = 3   # v1/v2 were the crypto book: archived, never converted
 
 SCHEMA = """
@@ -86,6 +86,12 @@ CREATE TABLE IF NOT EXISTS meetings (
     id TEXT PRIMARY KEY, ts REAL NOT NULL, status TEXT NOT NULL,
     packet TEXT NOT NULL, record TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS stances (
+    meeting_id TEXT NOT NULL, analyst TEXT NOT NULL, asset TEXT NOT NULL,
+    stance TEXT NOT NULL, conviction REAL NOT NULL, price REAL, ts REAL NOT NULL,
+    PRIMARY KEY (meeting_id, analyst, asset));
+-- Round 2: an analyst's final stance on an asset the analysts split on in round 1 (its
+-- round-1 stance stays in `stances`), so the scorecard can grade what the round changed.
+CREATE TABLE IF NOT EXISTS debate_stances (
     meeting_id TEXT NOT NULL, analyst TEXT NOT NULL, asset TEXT NOT NULL,
     stance TEXT NOT NULL, conviction REAL NOT NULL, price REAL, ts REAL NOT NULL,
     PRIMARY KEY (meeting_id, analyst, asset));
@@ -201,6 +207,10 @@ MIGRATIONS: Dict[int, Tuple[str, ...]] = {
     4: ("""CREATE TABLE IF NOT EXISTS quote_quality (
     symbol TEXT NOT NULL, day TEXT NOT NULL, samples INTEGER NOT NULL, usable INTEGER NOT NULL,
     PRIMARY KEY (symbol, day))""",),   # IEX quote usability per symbol and day (market/quality.py)
+    5: ("""CREATE TABLE IF NOT EXISTS debate_stances (
+    meeting_id TEXT NOT NULL, analyst TEXT NOT NULL, asset TEXT NOT NULL,
+    stance TEXT NOT NULL, conviction REAL NOT NULL, price REAL, ts REAL NOT NULL,
+    PRIMARY KEY (meeting_id, analyst, asset))""",),   # the council's round 2 (council/council.py)
 }
 
 

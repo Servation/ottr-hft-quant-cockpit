@@ -33,6 +33,16 @@ that count overstates the evidence; `sessions` says how many distinct days it re
 The record of a meeting carries each analyst's model id and effort (`models`, and
 `model`/`effort` on `chair`); meetings recorded before it did show as "not recorded".
 
+Two views of the council itself, not of one model:
+- BUYs by backing: each asset a meeting's round-1 stances rated BUY, once, grouped by how
+  many of the responding analysts rated it so ("1 of 3" is a lone idea). Why: it says
+  whether the ideas the chair passes over (it rarely buys a lone one) would have paid.
+- Round 2: each final stance where the analysts split, grouped by what it did to the
+  analyst's round-1 stance ("BUY to HOLD", "held BUY"), and the net value of the changes:
+  the asset's excess return signed by the way the stance moved (toward BUY: +, away: -).
+  Positive means round 2's changes helped. Why: round 2 costs a call per analyst, and it
+  should earn that on evidence like any other change.
+
 Pure functions (`grade`, `independent`, `summarize`) work on plain data; `load` reads a
 Store (read-only is enough) and `scorecard` ties them together for the CLI and the API.
 """
@@ -44,7 +54,7 @@ import json
 import math
 import statistics
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -54,6 +64,7 @@ from ottr.ledger.store import Store
 HORIZONS = (1, 5)
 BENCHMARK = "SPY"
 ACTIONS = ("BUY", "SELL", "HOLD")
+LEAN = {"BUY": 1, "HOLD": 0, "SELL": -1}  # which way a stance leans, to sign a change
 NOT_RECORDED = "not recorded"     # meetings from before the record kept model ids
 
 PENDING, NO_PRICE, GRADED = "pending", "no price", "graded"
@@ -177,6 +188,8 @@ class Book:
     sessions: List[date]
     closes: Dict[str, Dict[date, float]]
     as_of: Optional[date]
+    backing: List[Call] = field(default_factory=list)   # who: "k of n" analysts at BUY (round 1)
+    round2: List[Tuple[str, Call]] = field(default_factory=list)   # (round-1 stance, final stance)
 
 
 def load(store: Store, benchmark: str = BENCHMARK) -> Book:
@@ -210,13 +223,59 @@ def _load(conn, benchmark: str) -> Book:
         for t in m["trades"]:   # the trades the chair kept, filled by the gate or not
             trades.append(Call(who=chair.get("name", NOT_RECORDED), model=model_label(chair), action=t["action"],
                                asset=t["asset"], day=m["day"], meeting_id=mid))
+    by_meeting: Dict[Tuple[str, str], List[str]] = defaultdict(list)
+    voters: Dict[str, set] = defaultdict(set)
+    for c in stances:
+        by_meeting[(c.meeting_id, c.asset)].append(c.action)
+        voters[c.meeting_id].add(c.who)
+    first = {(c.meeting_id, c.asset): c for c in stances}
+    backing = [Call(who=f"{acts.count('BUY')} of {len(voters[mid])}", model="round 1", action="BUY", asset=asset,
+                    day=first[(mid, asset)].day, meeting_id=mid)
+               for (mid, asset), acts in by_meeting.items() if "BUY" in acts]
+    round2 = []
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='debate_stances'").fetchone():
+        # A reader may open a book from before round 2 (schema 4), which has no such table.
+        was = {(c.meeting_id, c.who, c.asset): c for c in stances}
+        for mid, analyst, asset, stance in conn.execute(
+                "SELECT meeting_id, analyst, asset, stance FROM debate_stances"):
+            r1 = was.get((mid, analyst, asset))
+            if r1 is not None:
+                round2.append((r1.action, Call(who=analyst, model=r1.model, action=stance, asset=asset,
+                                               day=r1.day, meeting_id=mid)))
     sessions = [date.fromisoformat(d) for (d,) in conn.execute("SELECT day FROM calendar ORDER BY day")]
     closes: Dict[str, Dict[date, float]] = defaultdict(dict)
     for sym, d, c in conn.execute("SELECT symbol, day, close FROM adj_closes"):
         closes[sym][date.fromisoformat(d)] = c
     bench = closes.get(benchmark)
     return Book(meetings=len(meetings), stances=stances, trades=trades, sessions=sessions,
-                closes=dict(closes), as_of=max(bench) if bench else None)
+                closes=dict(closes), as_of=max(bench) if bench else None, backing=backing, round2=round2)
+
+
+def moved(was: str, now: str) -> str:
+    """A round-2 group: 'BUY to HOLD', or 'held BUY'."""
+    return f"held {now}" if was == now else f"{was} to {now}"
+
+
+def round2_value(round2: Sequence[Tuple[str, Call]], sessions: Sequence[date],
+                 closes: Mapping[str, Mapping[date, float]], as_of: Optional[date],
+                 horizons: Sequence[int] = HORIZONS, benchmark: str = BENCHMARK) -> List[Dict[str, Any]]:
+    """Per horizon, the net value of round 2's changes: each changed stance's asset excess
+    over SPY, signed + when the stance moved toward BUY and - when it moved away (a fraction;
+    None until one is graded). Held stances change nothing, so they don't count."""
+    changed = [(was, c) for was, c in round2 if c.action != was]
+    rows = []
+    for h in horizons:
+        done = []
+        for was, c in changed:
+            g = grade(c.asset, c.day, h, sessions, closes, as_of, benchmark)
+            if g.status == GRADED:
+                done.append((c, g, (1 if LEAN[c.action] > LEAN[was] else -1) * g.excess))
+        vals = [v for _, _, v in done]
+        indep = independent(((c.asset, g.base) for c, g, _ in done), h)
+        rows.append({"horizon": h, "changes": len(changed), "graded": len(done), "independent": indep,
+                     "mean_value": statistics.fmean(vals) if vals else None,
+                     "value_se": (statistics.stdev(vals) / math.sqrt(indep)) if len(vals) >= 2 and indep >= 2 else None})
+    return rows
 
 
 def scorecard(store: Store, horizons: Sequence[int] = HORIZONS, benchmark: str = BENCHMARK) -> Dict[str, Any]:
@@ -228,6 +287,11 @@ def scorecard(store: Store, horizons: Sequence[int] = HORIZONS, benchmark: str =
         "trades": len(b.trades),
         "analysts": summarize(b.stances, b.sessions, b.closes, b.as_of, horizons, benchmark),
         "chair": summarize(b.trades, b.sessions, b.closes, b.as_of, horizons, benchmark),
+        "backing": summarize(b.backing, b.sessions, b.closes, b.as_of, horizons, benchmark),
+        "round2": summarize([Call(who=moved(was, c.action), model="all analysts", action=c.action, asset=c.asset,
+                                  day=c.day, meeting_id=c.meeting_id) for was, c in b.round2],
+                            b.sessions, b.closes, b.as_of, horizons, benchmark),
+        "round2_value": round2_value(b.round2, b.sessions, b.closes, b.as_of, horizons, benchmark),
     }
 
 
@@ -242,17 +306,20 @@ def _se(x: Optional[float]) -> str:
     return "-" if x is None else f"{x * 100:.2f}%"
 
 
-def _table(rows: List[Dict[str, Any]], horizon: int, who: str) -> List[str]:
+def _table(rows: List[Dict[str, Any]], horizon: int, who: str, models: bool = True) -> List[str]:
+    """`models=False` leaves out the model column (for groups that pool every model)."""
     rows = [r for r in rows if r["horizon"] == horizon]
     if not rows:
         return ["  (none)"]
     mw = max(len("model"), *(len(r["model"]) for r in rows))
     ww = max(len(who), *(len(r["who"]) for r in rows))
-    out = [f"  {who:<{ww}}  {'model':<{mw}}  {'call':<4}  {'n':>4}  {'indep':>5}  {'days':>4}  "
+    mh = f"{'model':<{mw}}  " if models else ""
+    out = [f"  {who:<{ww}}  {mh}{'call':<4}  {'n':>4}  {'indep':>5}  {'days':>4}  "
            f"{'pending':>7}  {'return':>7}  {'vs SPY':>7}  {'+/-':>6}  {'hit':>4}"]
     for r in rows:
         extra = f"  ({r['no_price']} no price)" if r["no_price"] else ""
-        out.append(f"  {r['who']:<{ww}}  {r['model']:<{mw}}  {r['action']:<4}  {r['graded']:>4}  "
+        mc = f"{r['model']:<{mw}}  " if models else ""
+        out.append(f"  {r['who']:<{ww}}  {mc}{r['action']:<4}  {r['graded']:>4}  "
                    f"{r['independent']:>5}  {r['sessions']:>4}  {r['pending']:>7}  "
                    f"{_pct(r['mean_return']):>7}  {_pct(r['mean_excess']):>7}  "
                    f"{_se(r['excess_se']):>6}  "
@@ -274,4 +341,23 @@ def report(sc: Dict[str, Any]) -> str:
         lines += ["", f"Analysts, +{h} session{'s' if h != 1 else ''}:", *_table(sc["analysts"], h, "analyst")]
     for h in sc["horizons"]:
         lines += ["", f"Chair's trades, +{h} session{'s' if h != 1 else ''}:", *_table(sc["chair"], h, "chair")]
+    lines += ["", "BUYs by backing: each asset a meeting rated BUY in round 1, once, by how many of the "
+              "analysts rated it so."]
+    for h in sc["horizons"]:
+        lines += ["", f"BUYs by backing, +{h} session{'s' if h != 1 else ''}:",
+                  *_table(sc.get("backing") or [], h, "backed by", models=False)]
+    lines += ["", "Round 2: each final stance where the analysts split, by what it did to the round-1 stance. "
+              "A change helped when the asset then moved its way (up vs SPY after a move toward BUY)."]
+    for h in sc["horizons"]:
+        lines += ["", f"Round 2, +{h} session{'s' if h != 1 else ''}:",
+                  *_table(sc.get("round2") or [], h, "stance", models=False)]
+    values = sc.get("round2_value") or []
+    if not any(v["changes"] for v in values):
+        lines += ["", "Round 2's changes: none yet."]
+    else:
+        lines += ["", "Round 2's changes, net (each change's asset vs SPY, + when it moved toward BUY):"]
+        for v in values:
+            se = f" +/- {_se(v['value_se'])}" if v["value_se"] is not None else ""
+            lines.append(f"  +{v['horizon']}: {_pct(v['mean_value'])}{se} per change "
+                         f"({v['graded']} of {v['changes']} graded, {v['independent']} independent)")
     return "\n".join(lines)

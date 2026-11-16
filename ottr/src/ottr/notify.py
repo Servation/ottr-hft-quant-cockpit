@@ -41,7 +41,7 @@ import time
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import AsyncIterator, Awaitable, Callable, Deque, Dict, Mapping, Optional, Protocol, Tuple
+from typing import AsyncIterator, Awaitable, Callable, Deque, Dict, List, Mapping, Optional, Protocol, Tuple
 
 import httpx
 
@@ -112,6 +112,32 @@ def _live_analyst(a: dict) -> str:
     return f"- {name}: " + {"waiting": "waiting for the packet", "thinking": "thinking"}.get(st, str(st))
 
 
+def _moves(changes) -> str:
+    """'SPY BUY to HOLD (0.40), TLT HOLD to BUY (0.55)' for round 2's changed stances."""
+    return ", ".join(f"{c.get('asset')} {c.get('from')} to {c.get('to')} ({float(c.get('conviction') or 0):.2f})"
+                     for c in changes or [])
+
+
+def _live_debate(d: dict) -> List[str]:
+    """Round 2's lines: which assets are argued, and per analyst what it changed."""
+    if not d.get("contested"):
+        return []
+    out = [f"**Round 2** on {', '.join(d['contested'])}:"]
+    for a in d.get("analysts") or []:
+        r = a.get("debate")
+        if not r:
+            continue
+        name, st, took = a.get("name"), r.get("status"), _dur(r.get("latency_sec") or 0)
+        if st == "done":
+            moved = _moves(r.get("changes"))
+            out.append(f"- {name}: {'changed ' + moved if moved else 'held every stance'} ({took})")
+        elif st == "dropped":
+            out.append(f"- {name}: no answer after {took} ({clip(r.get('error'), 120)}), round-1 stances stand")
+        else:
+            out.append(f"- {name}: {st}")
+    return out
+
+
 def _live_chair(d: dict) -> str:
     c = d.get("chair") or {}
     rep = c.get("replaced")
@@ -171,6 +197,7 @@ def _live_meeting(d: dict) -> str:
         lines.append(_live_analyst(a))
         if a.get("status") == "done" and a.get("view"):
             lines.append(f"> {clip(no_em_dash(a['view']), 200)}")
+    lines += _live_debate(d)
     lines.append(_live_chair(d))
     for x in d.get("dropped") or []:
         lines.append(f"- code dropped {x.get('action')} {x.get('asset')}: {x.get('why')}")
@@ -178,6 +205,16 @@ def _live_meeting(d: dict) -> str:
         lines.append("**Orders**")
         lines += [f"- {_trade(t)}: {_live_outcome(t.get('outcome'), d)}" for t in d["trades"]]
     return "\n".join(lines)
+
+
+def _debate_line(r: Optional[dict]) -> str:
+    """The meeting post's round-2 line: who changed what, or that no one did."""
+    if not r:
+        return ""
+    moved = [f"{name} {_moves(c)}" for name, c in sorted((r.get("changes") or {}).items()) if c]
+    gone = [f"{name} didn't answer" for name in sorted(r.get("errors") or {})]
+    return (f"\nRound 2 on {', '.join(r.get('assets') or [])}: "
+            + ("; ".join(moved + gone) if moved or gone else "no one changed a stance"))
 
 
 def format_event(kind: str, d: dict) -> str:
@@ -194,7 +231,7 @@ def format_event(kind: str, d: dict) -> str:
         ch = d.get("chair") or {}
         stood = (f"\nChaired by {ch.get('name')}: {ch.get('replaced')} failed ({clip(ch.get('error'), 160)})"
                  if ch.get("replaced") else "")
-        return (f"**Council {d['id']}** ({d['status']}): {trades}{called}{stood}\n"
+        return (f"**Council {d['id']}** ({d['status']}): {trades}{called}{stood}{_debate_line(d.get('debate'))}\n"
                 f"{no_em_dash(d.get('summary', ''))}{dropped}")
     if kind == "watch_set":
         head = f"**Watching** ({d.get('reason')})" + (f": {clip(no_em_dash(d['note']), 200)}" if d.get("note") else "")
