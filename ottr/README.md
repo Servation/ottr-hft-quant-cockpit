@@ -11,9 +11,13 @@ rationale: [`../docs/DESIGN.md`](../docs/DESIGN.md).
   asset as validated JSON at 10:15 and 15:15 New York time on trading days. Where they
   split on an asset, each reads the others' cases and gives a final stance (round 2). A
   Claude chair decides on the anonymized reports of both rounds, and GPT stands in if the
-  chair fails. The chair never gives dollar sizes.
+  chair fails. The chair never gives dollar amounts or share counts; it sizes each BUY
+  as a % of equity (`sizing.sizer = "model"`), which code clamps to every cap.
 - **Code:**
-  - **Sizing:** sizes BUYs (vol target x conviction x regime, topping up only to target).
+  - **Sizing:** enforces the caps on the chair's sizes, and sizes the same decisions by its
+    own formula (vol target x conviction x regime) in a shadow book, so the two can be
+    compared (see [Who sizes](#who-sizes)). With `sizer = "code"` the formula sizes the
+    live book.
   - **Gate:** runs the pre-trade gate (session, quote sanity, caps, sleeve, earnings blackout, corporate actions).
   - **Protective monitor:** volatility-scaled trailing stops set at entry, gap exits, concentration and sleeve trims, the drawdown breaker with persistent de-risking.
   - **Fills:** books simulated fills the way Alpaca would fill a marketable limit order, with the 2026 regulatory fees, in an exact Decimal SQLite ledger with FIFO tax lots.
@@ -120,13 +124,13 @@ A meeting survives one provider being down:
 | `ottr data --check [--symbols A,B]` | no | checks Alpaca, FRED, Alpha Vantage, the SEC, corporate actions and the Claude API with your keys |
 | `ottr screen [--top N]` | no | runs the stock screener now and shows what it would change (a few minutes) |
 | `ottr tax [--year Y] [--detail]` | no | tax ESTIMATES: gains by term, wash sales, dividends, estimated tax, after tax |
-| `ottr scorecard [--json]` | no | grades each analyst's stances (by model) and the chair's trades at +1 and +5 sessions (see [Scorecard](#scorecard)) |
+| `ottr scorecard [--json]` | no | grades each analyst's stances (by model) and the chair's trades at +1 and +5 sessions, and compares the chair's sizing with the formula's (see [Scorecard](#scorecard)) |
 | `ottr watch` | no | asks the desk watcher now what it would watch for and whether it would call a meeting (a scratch copy) |
 | `ottr status [--json]` | no | health, the book (with after-tax equity), risk state, benchmarks, schedule |
 | `ottr check` | no | replays the ledger; exits 2 if the books don't balance |
 | `ottr meeting [--execute]` | no (yes with `--execute`) | one council meeting now; without `--execute` on a scratch copy |
-| `ottr resume` | yes | clears a drawdown halt and re-baselines the peak |
-| `ottr archive DEST [--retire]` | renames with `--retire` | a verified copy of the book (any version) with config, logs and a note; `--retire` then sets the original aside |
+| `ottr resume` | yes | clears a drawdown halt and re-baselines the peak (the shadow book's too) |
+| `ottr archive DEST [--retire]` | renames with `--retire` | a verified copy of the book (any version, with its shadow book) with config, logs and a note; `--retire` then sets the original aside |
 | `ottr chat [--check] [--standby]` | no (its own `chat.db`) | the Discord slash-command bot |
 | `ottr service install\|status\|start\|stop\|restart\|uninstall` | Task Scheduler | the supervisor as a logon task; `stop` lets queued orders finish |
 
@@ -319,6 +323,7 @@ switch and a meeting call, go to the engine, which records them.
 | `GET /api/universe` | the members (class, cap, buyable, fractional) and the satellites |
 | `GET /api/screen` | the latest stock screen, the satellites and recent membership changes |
 | `GET /api/scorecard` | the scorecard as JSON, the numbers `ottr scorecard` prints |
+| `GET /api/sizing` | the chair's sizing vs the formula's: the live book vs its code-sized shadow (see [Who sizes](#who-sizes)) |
 | `GET/POST /api/kill-switch` | read, or engage/release the runtime dry run |
 | `GET/POST /api/meeting-call` | whether a meeting may be called now (and why not), or call one |
 
@@ -430,6 +435,8 @@ Two more views grade the council rather than one model:
   stance (`HOLD to BUY`, `held BUY`), and the net value of the changes: the asset's return
   over SPY, counted + when the stance moved toward BUY and - when it moved away. Positive
   means round 2 helped. `council.debate = false` turns round 2 off.
+- **Sizing:** under model sizing, the live book (the chair's sizes) against its shadow (the
+  formula's); see [Who sizes](#who-sizes).
 
 Read it with its evidence columns. The same asset is rated twice a session, so calls
 overlap: `n` counts graded calls, `indep` the calls on one asset whose windows don't
@@ -437,6 +444,31 @@ overlap (the real evidence), `days` the distinct meeting days, and `+/-` a rough
 error of the excess over SPY. A mean inside its `+/-` is noise. A call whose target close
 isn't in yet is pending and counts nowhere, never as zero; one on a stock the desk stopped
 following has no price. Hit rate: a BUY rose, a SELL fell; HOLD has none.
+
+## Who sizes
+
+`[sizing] sizer` in `config.toml` says who sizes the council's BUYs:
+- `"model"` (shipped): the chair gives each BUY a `weight_pct`, the % of equity the whole
+  position should be after it. The gate clamps it to the per-position caps, gross
+  exposure, the stock sleeve, `max_trade_usd` and the cash on hand, and holds an asset
+  with unknown volatility to the formula's size. Every other BUY block applies as before.
+  The order's verdict says what the chair asked for, what it got, and the formula's target
+  (`the chair asked 20.00%, the formula 2.05%`); Discord's order line shows the size and
+  the formula's (`20.0% of equity (the formula: 2.0%)`).
+- `"code"`: the formula sizes from the chair's conviction, as before.
+
+**The shadow book.** Under model sizing the engine keeps a second, quiet paper book,
+`data/shadow.db`. It is copied from the live book just before the first BUY the chair
+sizes (Discord says "Model sizing starts"), then takes every council decision sized by the
+formula, plus fees, the sweep, corporate actions and its own stops and trims, with the same
+quotes at the same moments. Nothing about it reaches Discord or the council. Compare the
+two with `ottr scorecard` (return, max drawdown, daily volatility, time in cash, council
+BUYs, and how the chair's sizes ran against the formula's), `GET /api/sizing`, or the
+`sizing:` line of `ottr status`. Give it 20 closes before reading much into it.
+
+Switching to `sizer = "code"` and restarting retires the shadow (renamed to
+`shadow.db.retired-<time>`, never deleted); switching back later starts a new one. Never
+touch `shadow.db` by hand while the engine runs.
 
 ## Tax estimates
 
@@ -478,7 +510,8 @@ With Claude on the API (`[council] claude_backend = "api"`, the default), `/ask`
 from the same snapshot and can look up more: any meeting in full (and the packet the
 council saw), earlier meetings, more fills, the audit log, the equity curve, the screen,
 the universe, the watcher's conditions, full health, and whether a meeting may be called
-now. Each lookup is a fixed GET on the API, sent without the key, with its arguments
+now, and how the chair's sizing compares with the formula's. Each lookup is a fixed GET on
+the API, sent without the key, with its arguments
 checked by code: up to 8 per question. The footer says how many it made, and `data/chat.db`
 records each one.
 

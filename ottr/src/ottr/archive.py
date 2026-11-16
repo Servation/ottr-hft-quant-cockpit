@@ -6,9 +6,11 @@ What it does: takes the writer lock (so the engine must be stopped), copies `ott
 SQLite's online backup API (a consistent copy, the write-ahead log included), checks the
 copy (`PRAGMA integrity_check`, the same tables and row counts as the original), copies
 the config file and the logs, and writes NOTE.md: when, from where, the schema version,
-the git commit, the last equity point and the copy's SHA-256. With `retire`, the original
-database files are then renamed to `ottr.db.retired-<date>` (never deleted), which frees
-the data directory for a new book.
+the git commit, the last equity point and the copy's SHA-256. The code-sized shadow book
+(`shadow.db`, kept under model sizing: `engine/shadow.py`) is copied and checked with it.
+With `retire`, the original database files are then renamed to `ottr.db.retired-<date>`
+(and `shadow.db.retired-<date>`; never deleted), which frees the data directory for a new
+book.
 
 Why raw sqlite3 and not the Store: the book being archived is usually one this version
 refuses to open (the crypto v2 book at the US cutover). A copy needs no schema knowledge,
@@ -95,6 +97,20 @@ def archive(data_dir: Path, dest: Path, config_path: Path, retire: bool = False,
         if check != "ok" or original != copied:
             raise ArchiveError(f"the copy doesn't match the original (integrity: {check}; tables "
                                f"{original} vs {copied}); nothing was retired")
+        # The code-sized shadow book (model sizing) belongs to this book: archived with it.
+        shadow = data_dir / "shadow.db"
+        if shadow.exists():
+            src = sqlite3.connect(f"file:{shadow.as_posix()}?mode=ro", uri=True)
+            dst = sqlite3.connect(dest / "shadow.db")
+            try:
+                src.backup(dst)
+                shadow_check = dst.execute("PRAGMA integrity_check").fetchone()[0]
+            finally:
+                dst.close()
+                src.close()
+            if shadow_check != "ok":
+                raise ArchiveError(f"the shadow book's copy failed its integrity check ({shadow_check}); "
+                                   "nothing was retired")
         digest = hashlib.sha256(copy.read_bytes()).hexdigest()
         if config_path.exists():
             shutil.copy2(config_path, dest / config_path.name)
@@ -104,10 +120,11 @@ def archive(data_dir: Path, dest: Path, config_path: Path, retire: bool = False,
         if retire:
             stamp = now.strftime("%Y-%m-%d")
             retired = data_dir / f"ottr.db.retired-{stamp}"
-            for suffix in ("", "-wal", "-shm"):
-                part = data_dir / f"ottr.db{suffix}"
-                if part.exists():
-                    part.rename(data_dir / f"ottr.db.retired-{stamp}{suffix}")
+            for name in ("ottr.db", "shadow.db"):
+                for suffix in ("", "-wal", "-shm"):
+                    part = data_dir / f"{name}{suffix}"
+                    if part.exists():
+                        part.rename(data_dir / f"{name}.retired-{stamp}{suffix}")
         (dest / "NOTE.md").write_text("\n".join([
             f"# OTTR book archived {now.isoformat(timespec='seconds')}",
             "",
@@ -118,6 +135,8 @@ def archive(data_dir: Path, dest: Path, config_path: Path, retire: bool = False,
             f"- Copy: ottr.db, SHA-256 {digest}, integrity check ok, {sum(copied.values()):,} rows in "
             f"{len(copied)} tables",
             f"- Original: {'renamed to ' + retired.name if retired else 'left in place'}",
+            *(["- Shadow book (model sizing's code-sized twin): copied to shadow.db"
+               + (", and retired with the book" if retired else "")] if (dest / "shadow.db").exists() else []),
             "",
             "Restore: stop the engine, copy ottr.db back into the data directory, and check out the",
             "commit above (its code is the one that reads this schema).",

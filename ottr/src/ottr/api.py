@@ -40,6 +40,7 @@ from ottr import health
 from ottr.config import Config
 from ottr.council import scorecard
 from ottr.engine.engine import BENCH_BASE, NEXT_MEETING, Engine
+from ottr.engine import shadow as shadowbook
 from ottr.engine.killswitch import KillSwitch
 from ottr.engine.engine import WATCH_STATE
 from ottr.engine import watcher
@@ -72,6 +73,7 @@ ENDPOINTS = [
     "GET  /api/meetings/{id}    one meeting in full, incl. the packet the models saw",
     "GET  /api/audit            audit log (?kind=&since=&limit=)",
     "GET  /api/scorecard        each analyst's stances (by model) and the chair's trades graded at +1 and +5 sessions",
+    "GET  /api/sizing           the chair's sizing vs the formula's: the live book vs its code-sized shadow",
     "GET  /api/council          a running meeting's progress, the next and the last meeting, what the watcher watches",
     "GET  /api/universe         the members the desk trades: class, cap, buyable, fractional; the satellites",
     "GET  /api/screen           the latest stock screen (counts, changes, the top of the ranking), recent changes",
@@ -313,6 +315,7 @@ async def get_book(request: web.Request) -> web.Response:
         last = ctx.reader.conn.execute(
             f"SELECT {','.join(EQUITY_COLS)} FROM equity ORDER BY ts DESC LIMIT 1").fetchone()
         next_meeting = ctx.reader.get_state(NEXT_MEETING)
+        sizing = shadowbook.compare_files(ctx.reader, ctx.cfg.universe.cash_symbol)
     try:  # the same math as the equity tick, at this moment's prices
         bench = await asyncio.wait_for(ctx.benchmarks(base), PRICES_TIMEOUT)
     except Exception:
@@ -334,6 +337,10 @@ async def get_book(request: web.Request) -> web.Response:
         "last_equity_point": dict(zip(EQUITY_COLS, last)) if last else None,
         "next_meeting_at": next_meeting,
         "kill_switch": ctx.kill.state(),
+        # Under model sizing: the live book (the chair's sizes) vs its shadow (the formula's).
+        "sizing": {"since": sizing["since"], "sessions": sizing["sessions"],
+                   "chair_equity": sizing["live"]["equity"], "formula_equity": sizing["shadow"]["equity"],
+                   "difference_usd": sizing["difference_usd"]} if sizing else None,
     })
 
 
@@ -410,7 +417,10 @@ def _meeting_view(ctx: ApiContext, mid: str, ts: float, status: str, record: str
         vd = json.loads(verdict or "{}")
         orders.append({"asset": key[len(prefix):], "side": vd.get("side"), "status": ostatus,
                        "reason": vd.get("reason"), "notional": vd.get("notional"),
-                       "notes": vd.get("notes", []), "updated_ts": updated})
+                       "notes": vd.get("notes", []), "updated_ts": updated,
+                       # an approved BUY: who sized it, to what, and what the formula would have
+                       "sized_by": vd.get("sized_by") or None, "target_pct": vd.get("target_pct"),
+                       "formula_pct": vd.get("code_target_pct")})
     out = {"id": mid, "ts": ts, "status": status, "summary": d.get("summary"),
            "dissent_notes": d.get("dissent_notes"), "trades": rec.get("trades", []),
            "dropped": rec.get("dropped", []), "errors": rec.get("errors", {}),
@@ -465,6 +475,13 @@ async def get_audit(request: web.Request) -> web.Response:
 async def get_scorecard(request: web.Request) -> web.Response:
     ctx = request.app[CTX]
     return ok(scorecard.scorecard(ctx.reader))   # one snapshot: closes from one refresh
+
+
+async def get_sizing(request: web.Request) -> web.Response:
+    ctx = request.app[CTX]
+    with ctx.reader.snapshot():
+        cmp = shadowbook.compare_files(ctx.reader, ctx.cfg.universe.cash_symbol)
+    return ok({"sizer": ctx.cfg.sizing.sizer, "comparison": cmp})
 
 
 async def get_council(request: web.Request) -> web.Response:
@@ -620,6 +637,7 @@ def create_app(ctx: ApiContext) -> web.Application:
     app.router.add_get("/api/audit", get_audit)
     app.router.add_get("/api/council", get_council)
     app.router.add_get("/api/scorecard", get_scorecard)
+    app.router.add_get("/api/sizing", get_sizing)
     app.router.add_get("/api/universe", get_universe)
     app.router.add_get("/api/screen", get_screen)
     app.router.add_get("/api/kill-switch", get_kill)

@@ -52,6 +52,16 @@ def test_round_two_is_on_and_takes_only_a_real_boolean(tmp_path):
         variant(tmp_path, ("debate = true", 'debate = "false"'))    # a string would read as on
 
 
+def test_the_shipped_config_lets_the_chair_size_and_says_so(tmp_path):
+    from ottr.engine.engine import build_council
+    c = load(data_dir=tmp_path)
+    assert c.sizing.sizer == "model" and build_council(c).model_sizing is True
+    code = variant(tmp_path, ('sizer = "model"', 'sizer = "code"'))
+    assert code.sizing.sizer == "code" and build_council(code).model_sizing is False
+    with pytest.raises(ConfigError, match="sizing.sizer must be one of"):
+        variant(tmp_path, ('sizer = "model"', 'sizer = "chair"'))
+
+
 def test_caps_resolve_override_then_class_and_cash_is_uncapped(tmp_path):
     c = load(data_dir=tmp_path)
     assert c.cap_pct("SPY") == 25.0            # class cap

@@ -336,8 +336,16 @@ class Trading:
     no_buy_last_min: float = 10.0
 
 
+SIZERS = ("model", "code")
+
+
 @dataclass(frozen=True)
 class Sizing:
+    # Who sizes a council BUY. "model": the chair gives each BUY a weight (the % of equity
+    # the position should be) and code clamps it to the caps; a code-sized shadow book
+    # takes the same decisions so the two can be compared (`engine/shadow.py`). "code":
+    # the vol-target formula below sizes it from the chair's conviction.
+    sizer: str = "code"
     target_risk_pct: float = 1.5
     choppy_regime_factor: float = 0.25
     max_position_pct: float = 25.0
@@ -620,6 +628,8 @@ def _validate(cfg: Config) -> None:
         raise ConfigError("sizing: target_risk_pct > 0, missing_vol > 0, choppy_regime_factor in (0, 1]")
     if not 0 < s.max_position_pct <= 100:
         raise ConfigError("sizing.max_position_pct must be in (0, 100]")
+    if s.sizer not in SIZERS:
+        raise ConfigError(f"sizing.sizer must be one of {SIZERS}, got {s.sizer!r}")
     missing = [k for k in ASSET_CLASSES if s.vol_floor.get(k, 0) <= 0]
     if missing or set(s.vol_floor) - set(ASSET_CLASSES):
         raise ConfigError(f"sizing.vol_floor needs a positive floor for each of {ASSET_CLASSES} "

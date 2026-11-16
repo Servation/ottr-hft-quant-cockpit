@@ -15,9 +15,13 @@ symbol that left the universe can always be sold. A BUY must also:
   often enough over the last week (`market/quality.py`): the desk can't trade or protect
   a stock it rarely has a quote for, so it doesn't add to one;
 - not have a corporate action pending that blocks BUYs, or unknown corporate actions;
-- fit its target (vol-target weight x conviction x regime, capped by class and symbol),
-  the per-trade ceiling, gross exposure (the cash ETF doesn't count), the satellite
-  sleeve, and buying power less the cash reserve.
+- fit its target, the per-trade ceiling, gross exposure (the cash ETF doesn't count),
+  the satellite sleeve, and buying power less the cash reserve. The target is the
+  chair's weight when it sized the BUY (`sizing.sizer = "model"`), else the formula's
+  (vol-target weight x conviction x regime); either way it is capped by class and symbol,
+  and with no vol to judge the risk by it is no more than the formula's (which sizes an
+  unknown vol small).
+A weight on anything but a council BUY is refused: only the chair sizes, and only BUYs.
 A BUY short of buying power while the cash ETF is held asks to be funded first
 ("needs_cash"); the executor sells that much of the cash ETF and then asks again.
 Quantities are fractional to 1e-9 only where the broker allows it, else whole shares (a
@@ -84,10 +88,22 @@ def target_weight(cfg, symbol: str, asset_class: str, vol: Optional[float], regi
     return min(w, s.max_position_pct / 100.0, (cap if cap is not None else 100.0) / 100.0)
 
 
+def model_weight(cfg, symbol: str, asset_class: str, vol: Optional[float], weight: float,
+                 formula: float) -> float:
+    """The chair's target (a fraction of equity) clamped to the position caps. With no vol
+    the desk can't tell how risky the asset is, so it holds no more than `formula`, the
+    formula's target, which counts an unknown vol as high."""
+    cap = cfg.cap_pct(symbol, asset_class)
+    w = min(weight, cfg.sizing.max_position_pct / 100.0, (cap if cap is not None else 100.0) / 100.0)
+    return min(w, formula) if vol is None or vol <= 0 else w
+
+
 def evaluate(intent: Intent, ctx: GateContext) -> Verdict:
     t = ctx.cfg.trading
     if intent.usd and intent.origin not in CODE_SIZED:
         return Verdict.reject(intent, "sized_by_caller", "only code-originated orders carry a size")
+    if intent.weight and (intent.origin != "council" or intent.side != "BUY" or not 0 < intent.weight <= 1):
+        return Verdict.reject(intent, "bad_weight", "only a council BUY carries a weight, in (0, 1]")
     if intent.origin == "council" and ctx.now - intent.created_ts > t.decision_ttl_sec:
         return Verdict.reject(intent, "decision_expired",
                               f"{ctx.now - intent.created_ts:.0f}s > {t.decision_ttl_sec:.0f}s")
@@ -166,6 +182,7 @@ def _buy(intent: Intent, ctx: GateContext) -> Verdict:
 
     cash_symbol = cfg.universe.cash_symbol
     notes = []
+    sized_by, w, formula = "", 0.0, 0.0
     if intent.origin in CODE_SIZED:
         if intent.asset != cash_symbol or intent.usd <= 0:
             return Verdict.reject(intent, "bad_sweep", "the sweep only buys the cash ETF")
@@ -173,10 +190,17 @@ def _buy(intent: Intent, ctx: GateContext) -> Verdict:
     else:
         if not 0 < intent.conviction <= 1:
             return Verdict.reject(intent, "bad_conviction")
-        w = target_weight(cfg, intent.asset, m.asset_class, ctx.vol, ctx.regime, intent.conviction)
+        formula = target_weight(cfg, intent.asset, m.asset_class, ctx.vol, ctx.regime, intent.conviction)
+        if intent.weight:
+            sized_by = "model"
+            w = model_weight(cfg, intent.asset, m.asset_class, ctx.vol, intent.weight, formula)
+        else:
+            sized_by, w = "code", formula
         current = val.values.get(intent.asset, 0.0)
         want, binding = w * val.equity - current, "target"
-        notes.append(f"target {w * 100:.2f}% (${w * val.equity:,.2f}), holding ${current:,.2f}")
+        notes.append(f"target {w * 100:.2f}% (${w * val.equity:,.2f}), holding ${current:,.2f}"
+                     + (f"; the chair asked {intent.weight * 100:.2f}%, the formula {formula * 100:.2f}%"
+                        if sized_by == "model" else ""))
         if want <= 0:
             return Verdict.reject(intent, "at_or_above_target", *notes)
         if want < t.min_trade_usd:
@@ -216,4 +240,5 @@ def _buy(intent: Intent, ctx: GateContext) -> Verdict:
         return Verdict.reject(intent, "sized_below_min_by_whole_shares", *notes, f"${notional:,.2f}")
     notes.append(f"binding: {binding}")
     return Verdict(True, intent.asset, "BUY", "approved", quantity=q, price=float(price),
-                   notional=float(notional), quote_source=ctx.quote.source, notes=tuple(notes))
+                   notional=float(notional), quote_source=ctx.quote.source, notes=tuple(notes),
+                   sized_by=sized_by, target_pct=round(w * 100, 4), code_target_pct=round(formula * 100, 4))

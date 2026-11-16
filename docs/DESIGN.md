@@ -4,9 +4,11 @@ How OTTR works and why. Usage and operations live in [`ottr/README.md`](../ottr/
 
 ## The idea
 
-Three models analyze the market independently. A chair model decides. Deterministic code
-does everything that has a right answer: sizing, risk limits, execution, accounting, tax
-and vote counting.
+Three models analyze the market independently. A chair model decides, and sizes the
+BUYs it decides on. Deterministic code does everything that has a right answer: risk
+limits, execution, accounting, tax and vote counting. Size is the judgment in between:
+the chair chooses each BUY's weight inside code's caps, and a code-sized shadow book takes
+the same decisions so the two can be compared (see [Who sizes](#who-sizes)).
 
 OTTR is a paper desk for US markets: 16 core ETFs across stocks, bonds and cash,
 commodities and real estate, plus up to six single stocks that a code screener picks
@@ -22,7 +24,10 @@ money.
 ## Principles
 
 1. **Models judge, code acts.** Models return schema-validated JSON. No model output can
-   carry a dollar size, call a tool that changes anything, or add a symbol. The one model
+   name a dollar amount or share count, call a tool that changes anything, or add a
+   symbol. The chair may give a council BUY a weight (the % of equity the position should
+   be); code clamps it to every cap and limit and fills it, so a model chooses a size but
+   never gets past a limit. The one model
    that calls tools at all is /ask's in chat, and its tools are read-only lookups (fixed
    GETs on the API, sent without its key). A meeting it proposes is only a field of its
    answer: the owner presses a button, and code's limits decide.
@@ -62,7 +67,8 @@ ottr/src/ottr/
   ledger/          SQLite store (WAL, one writer via an OS lock), the Decimal ledger with FIFO
                    tax lots, marks, corporate actions applied, tax estimates
   engine/          executor (the only path from an order to a fill), the Desk (US specifics),
-                   daily jobs (fees, sweep), engine loops, kill switch, meeting progress
+                   daily jobs (fees, sweep), engine loops, kill switch, meeting progress,
+                   the code-sized shadow book that model sizing is measured against
   health.py        alarms and status exit codes shared by watchdog, CLI and API
   notify.py        rate-limited Discord webhook posts, and the live meeting message
   api.py           read-only JSON API on 127.0.0.1 + the authenticated kill switch
@@ -76,7 +82,8 @@ ottr/src/ottr/
 ```
 
 One engine process is the only writer. Read-only commands, the API and propose-only
-meetings open the database read-only or work on a scratch copy.
+meetings open the database read-only or work on a scratch copy. Under model sizing the
+engine also writes the shadow book's own database, `shadow.db`, under the same lock.
 
 ### Time and the session
 
@@ -116,8 +123,9 @@ Each equity point records which basis it used.
 
 1. Code builds the packet: the session, each asset's indicators and events (earnings,
    corporate actions), breadth from the sector ETFs, the macro block (VIX, rates, the
-   curve, credit spreads), and the book (holdings, target weights, caps, the sleeve,
-   blocked BUYs and why, recent fills, the last meeting's summary).
+   curve, credit spreads), and the book (holdings, caps, the sleeve, blocked BUYs and
+   why, recent fills, the last meeting's summary; the formula's target weights only when
+   code sizes, so a sizing chair doesn't anchor on them).
 2. Claude, GPT and Gemini each return a stance for every asset (BUY / SELL / HOLD,
    conviction 0-1, thesis, key risk) through their lenses: risk and regime, quant and
    technical, cross-asset risk appetite.
@@ -130,8 +138,8 @@ Each equity point records which basis it used.
    defended it. An analyst that fails round 2 keeps its round-1 stance; agreement isn't
    argued again, so a meeting without a split costs nothing extra.
 4. Code tallies the final stances and gives the tally to the chair as a fact.
-5. The chair returns at most 3 trades: `BUY {asset, conviction}` or
-   `SELL {asset, fraction_of_position}`. If the chair fails (its CLI signed out, a
+5. The chair returns at most 3 trades: `BUY {asset, conviction, weight_pct}` (no
+   `weight_pct` when code sizes) or `SELL {asset, fraction_of_position}`. If the chair fails (its CLI signed out, a
    timeout, JSON it can't repair), the fallback chair (GPT) gets the same prompt, so one
    provider being down doesn't cost the meeting. The record and the Discord post say who
    chaired and why; if both fail, the meeting abstains.
@@ -219,16 +227,57 @@ is deferred and retried; a dry-run verdict doesn't block real execution later.
 
 ## Risk policy
 
-**Sizing (BUYs only).** Conviction maps to a target weight: `1.5% / annualized vol x
+**Sizing (BUYs only).** A BUY's target weight is the chair's `weight_pct` under model
+sizing (see [Who sizes](#who-sizes)), else the formula's: `1.5% / annualized vol x
 conviction`, with per-class volatility floors, quartered when the regime is CHOPPY or
-unknown, and capped:
+unknown. Either way it is capped:
 - broad ETFs at 20 to 25% (EEM, SLV and PDBC lower);
 - single stocks at 8%, and all stocks together at 40% of equity;
 - SGOV uncapped (it is cash, outside gross exposure).
+With no volatility to judge the risk by, the chair's weight is held to the formula's,
+which counts an unknown vol as high.
 
 Code buys only the gap to the target, clamped by `max_trade_usd`, 90% gross exposure and
 a 2% cash reserve; anything under $100 is dropped. Single stocks also need their next
 earnings report known to be more than 5 sessions away.
+
+### Who sizes
+
+`sizing.sizer` says who sizes the council's BUYs: `"model"` (the chair) or `"code"` (the
+formula). The shipped config says `"model"`, as an experiment: the formula kept the desk
+mostly in SGOV (about 1.5% risk per position at full conviction), and the owner wanted to
+see whether the model sizes better than code, measured rather than assumed.
+
+- **What the chair may do:** give each BUY a `weight_pct` in (0, 100], the % of equity
+  the whole position should be after the BUY. Code only tops up to it; to cut a
+  position the chair SELLs. It never names dollars or shares.
+- **What code still does:** everything else. The gate clamps the weight to the
+  per-position caps, gross exposure, the stock sleeve, `max_trade_usd` and the cash on
+  hand; every BUY block (earnings, corporate actions, halt, cooldown) applies as before;
+  a weight on anything but a council BUY is refused (`bad_weight`). The verdict records
+  both the size taken and the formula's target at the same conviction.
+- **What the chair sees:** the facts it needs (each asset's volatility and regime, the
+  caps, gross exposure, the sleeve), never the formula's targets, so the comparison
+  measures its judgment rather than how closely it copied the formula.
+
+**The shadow book.** Just before the first BUY the chair sizes, the engine copies the live
+book into `shadow.db` (next to `ottr.db`). From then on the shadow gets every council
+trade with the weight taken off, so the formula sizes each BUY from the same conviction,
+and everything the desk does on its own: corporate actions, fees, the sweep, deferred
+retries, and the risk monitor on its own holdings. It goes through the same gate,
+executor and simulated broker at the same moments and quotes, and gets an equity point
+whenever the live book does. So the two books differ only in who sized the BUYs. A
+holding only the shadow has can't be sold by the council, which never sees the shadow;
+once that asset leaves the universe the shadow sells it by itself.
+
+The shadow is quiet: nothing about it reaches Discord or the council. `ottr scorecard`
+and `GET /api/sizing` compare the two books (return, max drawdown, daily volatility,
+time in cash, council BUYs, and how the chair's sizes ran against the formula's), and
+`ottr status` shows one line. It is too early to judge before 20 closes.
+
+A shadow lives only while model sizing does: an engine started with `sizer = "code"`
+retires it (renamed, never deleted), and so does one that finds a shadow forked from
+another book. The archive copies and retires it with the book.
 
 **The next report.** One reader (`events/view.py`) answers for the gate, the screener
 and the council packet. A date on Alpha Vantage's calendar is exact. Most dates are only
@@ -417,5 +466,6 @@ stays exact and a corrected rule applies to all history at once.
   - **Phase 3, live:** an Alpaca broker behind the seam, reconciliation at start-up, and
     broker-side stop orders so stops survive the PC being off.
   - **A dashboard** on the API.
-- **Open question:** sizing is conservative (about 1.5% risk per position at full
-  conviction), so the desk often holds SGOV. `sizing.target_risk_pct` is the knob.
+- **Open question:** does the chair size better than the formula? The shadow book
+  answers it (see [Who sizes](#who-sizes)); after enough closes, keep the better sizer
+  or tune `sizing.target_risk_pct`, the formula's knob.

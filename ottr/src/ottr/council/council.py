@@ -18,6 +18,10 @@ the scorecard grades each model's own call; round 2 is recorded apart, so the sc
 can tell whether it helps. The tally, the chair's support rule and the chair's reading
 use the final stances; an analyst that fails round 2 keeps its round-1 stances.
 
+Sizing (`model_sizing`): the chair either sizes each BUY itself (a weight, the % of equity
+the position should be, which the risk gate clamps to every cap) or gives only a
+conviction that code turns into a size. The record says which (`sizer`).
+
 If the chair fails (its CLI signed out, a timeout, JSON it can't repair) a fallback model
 chairs on the same prompt, so one provider being down doesn't cost the meeting; the record
 says who chaired and why.
@@ -38,8 +42,8 @@ from collections import Counter
 from typing import Any, Callable, Dict, List, Optional, Sequence, Set
 
 from ottr.council.models import ModelAdapter, ModelError, ask_json
-from ottr.council.schemas import (ANALYST_SHAPE, CHAIR_SHAPE, DEBATE_SHAPE, analyst_validator,
-                                  chair_validator, debate_validator)
+from ottr.council.schemas import (ANALYST_SHAPE, CHAIR_SHAPE, CHAIR_SHAPE_SIZED, DEBATE_SHAPE,
+                                  analyst_validator, chair_validator, debate_validator)
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +70,9 @@ LENSES = {
 }
 
 
-def analyst_prompt(context: str, lens: str, universe: List[str]) -> str:
+def analyst_prompt(context: str, lens: str, universe: List[str], model_sizing: bool = False) -> str:
+    sizes = ("The chair sizes positions, weighing your conviction" if model_sizing else
+             "Position sizes are set by the desk's risk model from your conviction")
     return (
         "You are one analyst on a US-markets paper-trading desk (ETFs across stocks, bonds, "
         "commodities and real estate, plus a few single stocks). Other analysts work "
@@ -74,9 +80,8 @@ def analyst_prompt(context: str, lens: str, universe: List[str]) -> str:
         f"Give exactly one stance for each asset: {', '.join(universe)}. HOLD is a valid "
         "answer; do not force trades. The desk is long-only with no leverage: SELL means "
         "reduce or exit a position it HOLDS; for an asset you would merely avoid, say HOLD. "
-        "Idle cash is swept into the T-bill ETF by code, so cash is never idle. Position "
-        "sizes are set by the desk's risk model from your conviction, so state conviction "
-        "honestly (0.3 weak, 0.6 solid, 0.9 rare and strong). The desk holds for days to "
+        f"Idle cash is swept into the T-bill ETF by code, so cash is never idle. {sizes}, so "
+        "state conviction honestly (0.3 weak, 0.6 solid, 0.9 rare and strong). The desk holds for days to "
         "weeks: judge the trend and the risk, not the next hour.\n\n"
         f"=== CONTEXT ===\n{context}\n=== END CONTEXT ===\n\n"
         f"Reply with ONLY a JSON object of this shape (no prose, no code fences):\n{ANALYST_SHAPE}"
@@ -116,9 +121,10 @@ def debate_prompt(context: str, lens: str, me: str, contested_assets: List[str],
 def chair_prompt(context: str, reports: Dict[str, Dict[str, Any]], tally: Dict[str, Any],
                  universe: List[str], max_trades: int,
                  round2: Optional[Dict[str, Dict[str, Dict[str, Any]]]] = None,
-                 contested_assets: Sequence[str] = ()) -> str:
+                 contested_assets: Sequence[str] = (), model_sizing: bool = False) -> str:
     """`reports` are the anonymized round-1 reports; `round2` is label -> asset -> the
-    analyst's round-2 answer (an analyst missing from it didn't answer round 2)."""
+    analyst's round-2 answer (an analyst missing from it didn't answer round 2).
+    `model_sizing`: the chair sizes each BUY (weight_pct) instead of code."""
     round2 = round2 or {}
     lines = []
     for label, rep in reports.items():
@@ -144,14 +150,28 @@ def chair_prompt(context: str, reports: Dict[str, Dict[str, Any]], tally: Dict[s
         "Rules enforced by code (violations are dropped): at most "
         f"{max_trades} trades, one per asset; BUY only an asset at least one analyst's final stance "
         "rates BUY and the CONTEXT doesn't mark as blocked (earnings, a corporate action, being "
-        "sold off); SELL only an asset in HOLDINGS. Do NOT give dollar amounts: BUY takes a "
-        "conviction (the risk model sizes it and only tops up to its target), SELL takes "
-        "fraction_of_position (1.0 = exit).\n\n"
+        "sold off); SELL only an asset in HOLDINGS. " + (_SIZE_IT if model_sizing else _SIZED_BY_CODE) +
+        "SELL takes fraction_of_position (1.0 = exit).\n\n"
         f"=== CONTEXT ===\n{context}\n=== END CONTEXT ===\n\n"
         "=== ANALYST REPORTS ===\n" + "\n".join(lines) + "\n=== END REPORTS ===\n\n"
         f"=== TALLY (computed by code) ===\n{format_tally(tally)}\n=== END TALLY ===\n\n"
-        f"Reply with ONLY a JSON object of this shape (no prose, no code fences):\n{CHAIR_SHAPE}"
+        "Reply with ONLY a JSON object of this shape (no prose, no code fences):\n"
+        + (CHAIR_SHAPE_SIZED if model_sizing else CHAIR_SHAPE)
     )
+
+
+_SIZED_BY_CODE = ("Do NOT give dollar amounts: BUY takes a conviction (the risk model sizes it and only "
+                  "tops up to its target), ")
+# Facts the chair needs to size, and nothing that points at a size: under model sizing the
+# formula's targets stay out of the CONTEXT, so the comparison with the code-sized shadow
+# book measures the chair's judgment, not how closely it copied the formula.
+_SIZE_IT = ("You size the BUYs. Do NOT give dollar amounts or share counts: BUY takes a conviction "
+            "and weight_pct, the % of equity the WHOLE position should be after the BUY (the desk "
+            "tops up to it; a position already at or above it is left alone, and to cut one you "
+            "SELL). Weigh each asset's volatility, regime and correlation and the book as a whole, "
+            "and say why this size in the reasoning. Code clamps weight_pct to the caps PER "
+            "POSITION and to gross exposure, the stock sleeve and the cash on hand, and holds an "
+            "asset with unknown volatility small. ")
 
 
 def contested(reports: Dict[str, Dict[str, Any]], universe: List[str]) -> List[str]:
@@ -229,18 +249,23 @@ def enforce_rules(decision: Dict[str, Any], reports: Dict[str, Dict[str, Any]],
 class Council:
     def __init__(self, analysts: Dict[str, ModelAdapter], chair: ModelAdapter, universe: List[str],
                  min_analysts: int = 2, max_trades: int = 3, timeout: float = 300.0,
-                 fallback: Optional[ModelAdapter] = None, debate: bool = False) -> None:
+                 fallback: Optional[ModelAdapter] = None, debate: bool = False,
+                 model_sizing: bool = False) -> None:
         """`debate`: hold round 2 on the assets the analysts split on (the engine sets it
-        from `council.debate`; off by default so a scripted test model answers once)."""
+        from `council.debate`; off by default so a scripted test model answers once).
+        `model_sizing`: the chair sizes its BUYs (`sizing.sizer = "model"`; off by default
+        for the same reason)."""
         self.analysts, self.chair, self.fallback = analysts, chair, fallback
         self.universe, self.min_analysts = list(universe), min_analysts
         self.max_trades, self.timeout, self.debate = max_trades, timeout, debate
+        self.model_sizing = model_sizing
 
     async def _analyst(self, name: str, adapter: ModelAdapter, context: str, observe: Optional[Observer],
                        universe: List[str]):
         t0 = time.time()
         try:
-            rep = await ask_json(adapter, analyst_prompt(context, LENSES.get(name, ""), universe),
+            rep = await ask_json(adapter, analyst_prompt(context, LENSES.get(name, ""), universe,
+                                                         self.model_sizing),
                                  analyst_validator(universe), timeout=self.timeout)
         except ModelError as e:
             logger.warning("analyst %s dropped: %s", name, e)
@@ -300,7 +325,7 @@ class Council:
             "errors": {n: e for n, _, e, _, _ in results if e},
             "latency": {n: round(dt, 1) for n, _, _, dt, _ in results},
             "tally": None, "labels": {}, "debate": None, "decision": None, "trades": [], "dropped": [],
-            "status": "ok",
+            "status": "ok", "sizer": "model" if self.model_sizing else "code",
         }
         if len(reports) < self.min_analysts:
             rec["status"] = f"abstain: {len(reports)} analyst(s) responded, need {self.min_analysts}"
@@ -318,8 +343,9 @@ class Council:
         rec.update(tally=tally, labels=labels, chair={"name": self.chair.name})
         _emit(observe, "chair_started", reports=len(reports))
         round2 = {labels[n]: a for n, a in (rec["debate"] or {}).get("answers", {}).items()}
-        prompt = chair_prompt(context, anon, tally, universe, self.max_trades, round2, split)
-        validate = chair_validator(universe, self.max_trades)
+        prompt = chair_prompt(context, anon, tally, universe, self.max_trades, round2, split,
+                              self.model_sizing)
+        validate = chair_validator(universe, self.max_trades, sized=self.model_sizing)
         t0 = time.time()
         try:
             decision = await ask_json(self.chair, prompt, validate, timeout=self.timeout)

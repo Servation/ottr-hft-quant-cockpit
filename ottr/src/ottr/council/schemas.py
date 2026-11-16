@@ -2,9 +2,11 @@
 Council wire schemas + validators (plain Python, no dependency).
 
 What it does: defines and checks the JSON that analysts return (round 1, and round 2 on
-the assets they split on) and the chair returns. Why: model output is untrusted input. Every field is type/range-checked (NaN and
-infinity rejected), and the chair's shape has no dollar field at all, so sizing can
-only ever come from code.
+the assets they split on) and the chair returns. Why: model output is untrusted input.
+Every field is type/range-checked (NaN and infinity rejected), and the chair's shape has
+no dollar or share field at all. Under model sizing a chair BUY also carries
+`weight_pct`, the % of equity the position should be, which the risk gate clamps to every
+cap; otherwise code sizes it from conviction.
 """
 
 from __future__ import annotations
@@ -85,7 +87,21 @@ def debate_validator(contested: List[str]):
     return validate
 
 
-def chair_validator(universe: List[str], max_trades: int):
+def _pct(v: Any, where: str) -> float:
+    """A percentage in (0, 100]."""
+    if isinstance(v, bool):
+        raise SchemaError(f"{where}: must be a number")
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        raise SchemaError(f"{where}: must be a number")
+    if not math.isfinite(f) or not 0.0 < f <= 100.0:
+        raise SchemaError(f"{where}: {v!r} outside (0, 100]")
+    return f
+
+
+def chair_validator(universe: List[str], max_trades: int, sized: bool = False):
+    """`sized`: the chair sizes its BUYs (model sizing), so each needs a weight_pct."""
     allowed = set(universe)
 
     def validate(obj: Any) -> Dict[str, Any]:
@@ -101,7 +117,8 @@ def chair_validator(universe: List[str], max_trades: int):
             if not isinstance(t, dict):
                 raise SchemaError(f"trades[{i}] must be an object")
             if "usd_amount" in t or "quantity" in t:
-                raise SchemaError(f"trades[{i}]: do not size trades; code sizes them")
+                raise SchemaError(f"trades[{i}]: no dollar amounts or share counts"
+                                  + ("; size a BUY with weight_pct" if sized else "; code sizes trades"))
             action = str(t.get("action", "")).upper().strip()
             a = str(t.get("asset", "")).upper().strip()
             if action not in ("BUY", "SELL"):
@@ -117,6 +134,8 @@ def chair_validator(universe: List[str], max_trades: int):
                 row["conviction"] = _num01(t.get("conviction"), f"trades[{i}].conviction")
                 if row["conviction"] == 0:
                     raise SchemaError(f"trades[{i}]: BUY conviction must be > 0")
+                if sized:
+                    row["weight_pct"] = _pct(t.get("weight_pct"), f"trades[{i}].weight_pct")
             else:
                 frac = _num01(t.get("fraction_of_position"), f"trades[{i}].fraction_of_position")
                 if frac == 0:
@@ -152,6 +171,16 @@ CHAIR_SHAPE = """{
   "dissent_notes": "who disagreed with the decision and their strongest point",
   "trades": [
     {"action": "BUY", "asset": "IEF", "conviction": 0.0-1.0, "reasoning": "one sentence"},
+    {"action": "SELL", "asset": "GLD", "fraction_of_position": 0.0-1.0, "reasoning": "one sentence"}
+  ]
+}"""
+
+CHAIR_SHAPE_SIZED = """{
+  "summary": "2-4 sentences: what the council concluded and why",
+  "dissent_notes": "who disagreed with the decision and their strongest point",
+  "trades": [
+    {"action": "BUY", "asset": "IEF", "conviction": 0.0-1.0, "weight_pct": 0-100,
+     "reasoning": "one sentence, including why this size"},
     {"action": "SELL", "asset": "GLD", "fraction_of_position": 0.0-1.0, "reasoning": "one sentence"}
   ]
 }"""

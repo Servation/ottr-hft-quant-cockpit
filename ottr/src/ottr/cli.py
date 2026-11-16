@@ -42,6 +42,7 @@ from ottr import health
 from ottr.clock import SYSTEM, Clock
 from ottr.council import scorecard
 from ottr.engine.engine import Engine
+from ottr.engine import shadow as shadowbook
 from ottr.engine.killswitch import KillSwitch
 from ottr.events.refresh import Sources
 from ottr.ledger import corporate
@@ -259,6 +260,9 @@ async def cmd_status(cfg, args) -> int:
             later = "n/a until the first close"
             print(f"last equity point {_et(eq[0])}: ${eq[1]:,.2f}  vs SPY hold {_usd(eq[2], later)}  "
                   f"vs 60/40 {_usd(eq[3], later)}")
+        sizing = shadowbook.status_line(shadowbook.compare_files(store, cfg.universe.cash_symbol))
+        if sizing:
+            print(sizing)
         for t in report.tasks:
             age = f"{health.fmt_age(report.ts - t.last_ts):>6} ago" if t.last_ts else "   never"
             state = "BAD" if not t.healthy else "ok" if t.last_ts else "wait"  # wait: still in its grace period
@@ -341,8 +345,11 @@ async def cmd_meeting(cfg, args) -> int:
                 return 2
             if not market.calendar.state_at(time.time()).is_open:
                 print("(the market is closed: any trade the council decides is deferred, then expires)")
-            rec = await engine.meeting(execute=True)
-            await engine.executor.drain()
+            try:
+                rec = await engine.meeting(execute=True)
+                await engine.drain()
+            finally:
+                engine.close()
         _print_meeting(rec, store)
         if not args.execute:
             print(f"\n(propose-only: verdicts are dry-run; scratch copy at {store.path})")
@@ -385,21 +392,33 @@ def _print_meeting(rec, store: Store) -> None:
         print("  no trades")
 
 
+async def _resume(cfg, store: Store, label: str) -> None:
+    marks, why = await _marks(cfg, store)
+    v = Ledger(store).value(marks)
+    st = RiskState.from_dict(store.get_state("risk"))
+    st.halted, st.halted_since = False, None
+    if v:
+        st.peak_equity = v.equity
+    store.set_state("risk", st.to_dict())
+    store.audit("risk_resume", why="operator", new_peak=st.peak_equity)
+    if v:
+        print(f"{label}halt cleared; peak re-baselined to ${st.peak_equity:,.2f}")
+    else:
+        print(f"{label}halt cleared; peak unchanged (no price for the book: {why})")
+
+
 async def cmd_resume(cfg, args) -> int:
     store = _writer(cfg)
     try:
-        marks, why = await _marks(cfg, store)
-        v = Ledger(store).value(marks)
-        st = RiskState.from_dict(store.get_state("risk"))
-        st.halted, st.halted_since = False, None
-        if v:
-            st.peak_equity = v.equity
-        store.set_state("risk", st.to_dict())
-        store.audit("risk_resume", why="operator", new_peak=st.peak_equity)
-        if v:
-            print(f"halt cleared; peak re-baselined to ${st.peak_equity:,.2f}")
-        else:
-            print(f"halt cleared; peak unchanged (no price for the book: {why})")
+        await _resume(cfg, store, "")
+        # The owner's resume applies to the shadow book too: it takes the same human actions.
+        path = shadowbook.path_for(store)
+        if path.exists():
+            shadow = Store(path, writer=True)
+            try:
+                await _resume(cfg, shadow, "shadow book: ")
+            finally:
+                shadow.close()
         return 0
     finally:
         store.close()
@@ -639,7 +658,13 @@ async def cmd_scorecard(cfg, args) -> int:
         return 3
     try:
         sc = scorecard.scorecard(store)
-        print(json.dumps(sc, indent=2) if args.json else scorecard.report(sc))
+        sizing = shadowbook.compare_files(store, cfg.universe.cash_symbol)
+        if args.json:
+            print(json.dumps(dict(sc, sizing=sizing), indent=2))
+        else:
+            print(scorecard.report(sc))
+            if cfg.sizing.sizer == "model" or sizing is not None:
+                print("\n" + "\n".join(shadowbook.report(sizing)))
         return 0
     finally:
         store.close()

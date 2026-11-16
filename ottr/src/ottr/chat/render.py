@@ -212,7 +212,9 @@ def positions(d: dict, now: float) -> str:
 
 def _trade(t: dict) -> str:
     if t.get("action") == "BUY":
-        return f"BUY {t.get('asset')} (conviction {float(t.get('conviction') or 0):.2f})"
+        # weight_pct: the chair sized it (model sizing), to that % of equity.
+        size = f"to {float(t['weight_pct']):.1f}% of equity, " if t.get("weight_pct") else ""
+        return f"BUY {t.get('asset')} ({size}conviction {float(t.get('conviction') or 0):.2f})"
     return f"SELL {t.get('asset')} ({float(t.get('fraction_of_position') or 0) * 100:.0f}% of the position)"
 
 

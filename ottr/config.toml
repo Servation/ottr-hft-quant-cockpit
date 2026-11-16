@@ -45,7 +45,7 @@ VNQ = "real_estate_etf"
 [trading]
 dry_run = false            # true: record "would fill" verdicts, never fill
 min_trade_usd = 100.0
-max_trade_usd = 2500.0     # ceiling per BUY (code sizes BUYs, so this clamps); 0 = none
+max_trade_usd = 2500.0     # ceiling per BUY, whoever sized it; 0 = none
 max_gross_pct = 90.0       # invested (excluding the cash ETF) never above this % of equity
 cash_reserve_pct = 2.0     # never spend the last 2% of equity on a BUY
 max_trades_per_meeting = 3
@@ -54,6 +54,9 @@ slippage_pct = 0.0         # IEX spreads already sit at or outside the national 
 no_buy_last_min = 10       # no new BUYs in the session's last 10 minutes
 
 [sizing]
+sizer = "model"            # who sizes council BUYs: "model" (the chair picks each BUY's % of
+                           # equity, clamped by the caps; a code-sized shadow book runs beside
+                           # it for comparison) or "code" (the formula below, from conviction)
 target_risk_pct = 1.5      # risk budget per position: % of equity / annualized vol
 choppy_regime_factor = 0.25
 max_position_pct = 25.0

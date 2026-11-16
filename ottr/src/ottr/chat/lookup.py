@@ -189,6 +189,13 @@ LOOKUPS: Tuple[Lookup, ...] = (
         "changes. Call it for questions about the single stocks and why they were picked.",
         {}, lambda a, now: ("/screen", {})),
     Lookup(
+        "get_sizing",
+        "Under model sizing, the chair sizes the council's BUYs and a shadow book takes the same "
+        "decisions sized by the formula: both books' equity, return, drawdown, volatility and cash "
+        "since the shadow started, and how the chair's BUY sizes compared with the formula's. Call it "
+        "for questions about position sizes or whether the chair's sizing is helping.",
+        {}, lambda a, now: ("/sizing", {})),
+    Lookup(
         "get_universe",
         "Every member the desk trades: asset class, cap, whether it is buyable now and fractionable, "
         "plus the satellites. Call it for questions about what the desk may hold and its limits.",
