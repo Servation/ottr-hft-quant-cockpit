@@ -3,7 +3,10 @@ Intent and Verdict: the only way anything asks to trade, and the only answer it 
 
 An Intent says WHAT is wanted (asset, side, conviction or fraction) and WHY (origin,
 reason, ref). Only code-originated intents (the cash sweep) may carry a dollar size, and
-the gate enforces that, so no model output can size a trade.
+the gate enforces that, so no model output names a dollar amount. Under model sizing a
+council BUY also carries the chair's `weight`, the fraction of equity the position should
+be; the gate clamps it to every cap and limit, so a model can choose a size but never get
+past one.
 A Verdict is the gate's deterministic answer, including the exact fill quantity/price.
 """
 
@@ -37,6 +40,8 @@ class Intent:
     ref: str = ""               # meeting id / rule name
     created_ts: float = field(default_factory=time.time)
     usd: float = 0.0            # code-sized BUY amount (CODE_SIZED origins only)
+    weight: float = 0.0         # council BUY sized by the chair: target fraction of equity, (0, 1];
+                                # 0 = the formula sizes it from conviction
 
     @property
     def priority(self) -> int:
@@ -69,6 +74,9 @@ class Verdict:
     quote_source: str = ""
     notes: Tuple[str, ...] = ()
     funding_usd: float = 0.0          # "needs_cash": sell this much of the cash ETF first
+    sized_by: str = ""                # an approved council BUY: "model" (the chair's weight) or "code"
+    target_pct: float = 0.0           # ... the % of equity it was sized up to
+    code_target_pct: float = 0.0      # ... and the formula's target at the same conviction
 
     @classmethod
     def reject(cls, intent: Intent, reason: str, *notes: str) -> "Verdict":

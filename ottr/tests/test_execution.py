@@ -46,21 +46,24 @@ OPEN = et(2026, 10, 21, 11, 0)        # a Wednesday, mid-session, after CAT's 20
 class FakeUsMarket:
     def __init__(self, clock, prices=PRICES, spread_pct=0.02):
         self.calendar, self.clock = CAL, clock
-        self.prices, self.spread = dict(prices), spread_pct
+        self.px, self.spread = dict(prices), spread_pct
         self.problem, self.vol, self.regime = {}, {}, {}
 
     def _q(self, s):
-        p = self.prices[s]
+        p = self.px[s]
         h = p * self.spread / 200
         return Quote(s, p - h, p + h, p, self.clock.time(), "alpaca")
 
     async def quote(self, s):
         if s in self.problem:
             return None, self.problem[s]
-        return (self._q(s), "ok") if s in self.prices else (None, "no_snapshot")
+        return (self._q(s), "ok") if s in self.px else (None, "no_snapshot")
+
+    async def prices(self, symbols):
+        return {s: self._q(s) for s in symbols if s in self.px}
 
     async def marks(self):
-        return {s: self._q(s) for s in self.prices}
+        return {s: self._q(s) for s in self.px}
 
     async def vol_regime(self, s):
         return self.vol.get(s, 0.15), self.regime.get(s, "TRENDING")

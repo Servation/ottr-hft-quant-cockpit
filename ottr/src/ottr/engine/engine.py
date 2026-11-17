@@ -24,6 +24,14 @@ and branch on the session, because nights, weekends and holidays are normal stat
 - watchdog (60s): turns stale heartbeats, a blind risk monitor, stale events feeds and
   ledger problems into alarms (audit log and Discord); the optional API serves the book.
 
+Under model sizing (`sizing.sizer = "model"`) the chair sizes the council's BUYs, and the
+engine keeps a second, quiet paper book beside the live one: the shadow, which takes the
+same decisions sized by the formula (`engine/shadow.py`). Each of the tasks above that
+changes the live book (a council trade, corporate actions, fees, the sweep, retries, the
+risk monitor, an equity point) does the same to the shadow, at the same moment and with
+the same market data, so the two books can be compared. A shadow failure is logged and
+never fails a live task.
+
 Why one process: it is the only writer, so there is exactly one place where state changes.
 Why crash-only: if a core task ever exits, `run` returns 1 so the supervisor restarts a
 fresh process, instead of limping on with, say, no risk monitor.
@@ -32,10 +40,12 @@ fresh process, instead of limping on with, say, no risk monitor.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set, Union
 
@@ -54,6 +64,7 @@ from ottr.engine.jobs import close_of_day, sweep_intent
 from ottr.engine.killswitch import KillSwitch
 from ottr.engine import watcher
 from ottr.engine.progress import MeetingProgress
+from ottr.engine import shadow as shadowbook
 from ottr.events.refresh import Sources, refresh_due
 from ottr.events.view import FEED_CORPORATE, StoredEvents, macro_readings
 from ottr.ledger import corporate, tax
@@ -99,13 +110,23 @@ def _debate_summary(rec: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"assets": d.get("assets", []), "changes": d.get("changes", {}), "errors": d.get("errors", {})}
 
 
+@dataclass
+class Book:
+    """A paper book the engine keeps: the live one, or the shadow (`engine/shadow.py`)."""
+    name: str
+    store: Store
+    ledger: Ledger
+    desk: Desk
+    executor: Executor
+
+
 def build_council(cfg: Config) -> Council:
     c = cfg.council
     return Council(analysts={n: make_adapter(n, c) for n in c.analysts}, chair=make_adapter(c.chair, c),
                    universe=list(cfg.core), min_analysts=c.min_analysts,
                    max_trades=cfg.trading.max_trades_per_meeting, timeout=c.timeout_sec,
                    fallback=make_adapter(c.chair_fallback, c) if c.chair_fallback else None,
-                   debate=c.debate)
+                   debate=c.debate, model_sizing=cfg.sizing.sizer == "model")
 
 
 def members_from(cfg: Config, assets: Mapping[str, Asset],
@@ -152,6 +173,22 @@ class Engine:
                          self.members, self.events, clock)
         self.executor = Executor(cfg, store, self.ledger, self.desk, self.alerts, kill=self.kill)
         self.executor.on_outcome = self._order_outcome
+        self.live = Book("live", store, self.ledger, self.desk, self.executor)
+        # The code-sized shadow book, under model sizing once the chair has sized a BUY.
+        self.model_sizing = cfg.sizing.sizer == "model"
+        self.shadow: Optional[Book] = None
+        self._shadow_task: Optional[asyncio.Task] = None
+        self._running = False
+        # The market tracks the shadow's holdings too: it can hold what the live book doesn't.
+        tracked_extra = market.extra_symbols
+        market.extra_symbols = lambda: set(tracked_extra()) | (
+            set(self.shadow.ledger.positions()) if self.shadow is not None else set())
+        if self.model_sizing:
+            opened = shadowbook.open_existing(store)
+            if opened is not None:
+                self.shadow = self._shadow_book(opened)
+        else:
+            shadowbook.retire(store, "sizing.sizer is code; a shadow lives only while model sizing does")
         self.watchdog = health.Watchdog(cfg.engine.alarm_clear_sec)
         self.problems: Dict[str, health.Alarm] = {}  # engine-internal alarms (e.g. API bind)
         self.started: Optional[float] = None
@@ -166,6 +203,85 @@ class Engine:
         # Adjourned meetings whose trades the risk gate hasn't decided yet, by meeting id:
         # their live message keeps updating until every order has an outcome.
         self._awaiting_orders: Dict[str, MeetingProgress] = {}
+
+    # -- the shadow book ----------------------------------------------------------------------
+    def _shadow_book(self, store: Store) -> Book:
+        ledger = Ledger(store)
+        desk = Desk(self.cfg, store, ledger, self.market, SimBroker(self.cfg.fees, self.cfg.trading.slippage_pct),
+                    self.members, self.events, self.clock, market_store=self.store)
+        # No notifier and no outcome hook: the shadow never reaches Discord or a live message.
+        return Book("shadow", store, ledger, desk, Executor(self.cfg, store, ledger, desk, None, kill=self.kill))
+
+    def _ensure_shadow(self, now: float, equity: Optional[float]) -> Book:
+        """The shadow book, forked from the live one now if there is none yet."""
+        if self.shadow is None:
+            self.shadow = self._shadow_book(shadowbook.fork(self.store, now, equity))
+            logger.info("shadow book forked at %s: from now on the formula sizes the same decisions beside "
+                        "the chair", f"${equity:,.2f}" if equity is not None else "an unknown equity")
+            self.alerts.event("shadow_forked", {"equity": equity})
+            if self._running:
+                self._shadow_task = asyncio.create_task(self.shadow.executor.run(), name="shadow-executor")
+        return self.shadow
+
+    async def drain(self) -> None:
+        """Process every queued order, the shadow's too (CLI one-shots and tests)."""
+        await self.executor.drain()
+        if self.shadow is not None:
+            await self.shadow.executor.drain()
+
+    def close(self) -> None:
+        """Close the shadow's database (the live one belongs to whoever opened it)."""
+        if self.shadow is not None:
+            self.shadow.store.close()
+
+    async def _shadow_jobs(self, now: float) -> Optional[str]:
+        """The jobs tick's book work, for the shadow: corporate actions, fees, the sweep and
+        retries. A problem is logged and named, never raised (it's not the live book's)."""
+        b = self.shadow
+        if b is None:
+            return None
+        cal = self.market.calendar
+        try:
+            self._shadow_corporate_actions()
+            for day, amount in close_of_day(b.ledger, cal, now):
+                b.store.audit("fees_charged", day=str(day), amount=str(amount))
+            mt = cal.state_at(now)
+            if mt.is_open:
+                held = b.ledger.positions()
+                intent = sweep_intent(self.cfg, b.ledger, cal, await self.market.prices(held), now)
+                if intent is not None:
+                    await b.executor.submit(intent)
+                for intent in self._stranded(held, mt.session.day.isoformat(), now):
+                    await b.executor.submit(intent)
+                await self._retry_deferred(b)
+        except Exception as e:
+            logger.exception("shadow book: jobs failed")
+            return f"shadow book: {type(e).__name__}: {e}"
+        return None
+
+    def _stranded(self, held, day: str, now: float) -> List[Intent]:
+        """Shadow holdings the council can't sell: a member being sold off (or one already
+        gone) that the live book doesn't hold, so the council never sees it. The live book
+        sells such a holding off; the shadow does too, once a day until it's gone."""
+        live = self.ledger.positions()
+        out = []
+        for s in sorted(held):
+            m = self.members.get(s)
+            if s == self.cfg.universe.cash_symbol or s in live or (m is not None and m.buyable):
+                continue
+            out.append(Intent(origin="sunset", asset=s, side="SELL", fraction=1.0, idem_key=f"sunset:{s}:{day}",
+                              ref=day, created_ts=now,
+                              reason="no longer a member, and the live book doesn't hold it: sold off"))
+        return out
+
+    def _shadow_corporate_actions(self) -> None:
+        b = self.shadow
+        if b is None:
+            return
+        shadowbook.sync_actions(self.store, b.store)
+        res = corporate.apply_due(b.store, self.clock.time(), self._fractionable, self._close_before)
+        for symbol, note in res.notes:
+            logger.info("shadow book: %s: %s", symbol, note)
 
     # -- members -----------------------------------------------------------------------------
     def classes(self) -> Dict[str, str]:
@@ -368,19 +484,24 @@ class Engine:
             notes.append(f"{len(ca.notes)} corporate action update(s)")
         if ca.failed:
             notes.append(f"{len(ca.failed)} corporate action(s) not applied")
+        problem = await self._shadow_jobs(now)
+        if problem:
+            notes.append(problem)
         return "; ".join(notes) or "nothing due"
 
-    async def _retry_deferred(self) -> int:
-        """Resubmit orders deferred for a transient reason (a bad quote, the market closed).
-        The gate decides again from scratch: an expired council decision is rejected then."""
+    async def _retry_deferred(self, book: Optional[Book] = None) -> int:
+        """Resubmit a book's orders deferred for a transient reason (a bad quote, the market
+        closed). The gate decides again from scratch: an expired council decision is
+        rejected then."""
+        book = book or self.live
         wall = time.time()
-        rows = self.store.conn.execute(
+        rows = book.store.conn.execute(
             "SELECT intent, updated_ts FROM orders WHERE status='deferred' ORDER BY ts").fetchall()
         n = 0
         for raw, updated in rows:
             if wall - updated < DEFERRED_RETRY_SEC:
                 continue
-            await self.executor.submit(Intent.from_dict(json.loads(raw)))
+            await book.executor.submit(Intent.from_dict(json.loads(raw)))
             n += 1
         return n
 
@@ -395,16 +516,17 @@ class Engine:
             logger.info("risk monitor can see %s again", a)
         return cur
 
-    async def _ensure_stops(self) -> None:
+    async def _ensure_stops(self, book: Book) -> None:
         """Give every holding without a stop its entry stop (the BUY that opens a position
         sets it; holdings brought in at `ottr init` get theirs here, from today's vol)."""
-        for s, p in self.ledger.positions().items():
+        for s, p in book.ledger.positions().items():
             if s == self.cfg.universe.cash_symbol or p.stop_pct is not None:
                 continue
             vol, _ = await self.market.vol_regime(s)
             pct = monitor.entry_stop_pct(self.cfg.risk, vol)
-            if self.ledger.set_stop(s, pct):
-                logger.info("stop for %s set at %.1f%% under its high (vol %s)", s, pct * 100,
+            if book.ledger.set_stop(s, pct):
+                logger.info("%sstop for %s set at %.1f%% under its high (vol %s)",
+                            "shadow book: " if book is not self.live else "", s, pct * 100,
                             f"{vol:.0%}" if vol else "unknown")
 
     async def risk_tick(self) -> Union[monitor.MonitorResult, str]:
@@ -420,10 +542,8 @@ class Engine:
             # at the bid) at the first check after this.
             self.store.set_state("risk_blind", {})
             return f"the open: stops wait until {_et(start, '%H:%M')} ET"
-        await self._ensure_stops()
+        await self._ensure_stops(self.live)
         positions = self.ledger.positions()
-        behind = corporate.unapplied(self.store, mt.session.day)
-        current = {s: p for s, p in positions.items() if s not in behind}
         cash_symbol = self.cfg.universe.cash_symbol
         try:
             quotes = await self.market.live_quotes()
@@ -433,35 +553,54 @@ class Engine:
             # No quotes at all: every holding is unprotected, which the watchdog must see.
             self.store.set_state("risk_blind", self._blind_state(set(positions) - {cash_symbol}, now))
             raise
+        res = await self._protect(self.live, mt, now, quotes, trades, marks)
+        if self.shadow is not None:
+            try:  # the same check on the shadow's own holdings, with the same market data
+                await self._ensure_stops(self.shadow)
+                await self._protect(self.shadow, mt, now, quotes, trades,
+                                    await self.market.prices(self.shadow.ledger.positions()))
+            except Exception:
+                logger.exception("shadow book: risk check failed")
+        return res
+
+    async def _protect(self, book: Book, mt, now: float, quotes, trades, marks) -> monitor.MonitorResult:
+        """The protective monitor on one book. Only the live book's events reach Discord and
+        feed the watchdog's blind-monitor alarm."""
+        loud = book is self.live
+        positions = book.ledger.positions()
+        behind = corporate.unapplied(book.store, mt.session.day)
+        current = {s: p for s, p in positions.items() if s not in behind}
         # A holding whose corporate action isn't applied yet has shares or cash that aren't
         # current: no stop on it, and no trim or breaker decision on equity until it is.
-        valuation = self.ledger.value(marks) if len(current) == len(positions) else None
-        state = RiskState.from_dict(self.store.get_state("risk"))
-        points = self.store.conn.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
+        valuation = book.ledger.value(marks) if len(current) == len(positions) else None
+        state = RiskState.from_dict(book.store.get_state("risk"))
+        points = book.store.conn.execute("SELECT COUNT(*) FROM equity").fetchone()[0]
         prev_close = {}
         for s in current:
             done = [b for b in self.market.raw_bars(s, since=mt.session.day - timedelta(days=10))
                     if b.day < mt.session.day]
             if done:
-                changes = corporate.restatements(self.store, [s], done[-1].day).get(s, [])
+                changes = corporate.restatements(book.store, [s], done[-1].day).get(s, [])
                 prev_close[s] = corporate.restate(done[-1].close, changes)
-        exits = corporate.exits_due(self.store, self.market.calendar, mt.session.day, current)
+        exits = corporate.exits_due(book.store, self.market.calendar, mt.session.day, current)
         res = monitor.check(self.cfg, now, current, valuation, quotes, state, points, self.classes(), prev_close,
                             exits, trades)
-        blind = self._blind_state({d["asset"] for k, d in res.events if k == "risk_blind"}, now)
-        with self.store.tx():
+        blind = self._blind_state({d["asset"] for k, d in res.events if k == "risk_blind"}, now) if loud else None
+        with book.store.tx():
             for a, h in res.high_water.items():
-                self.ledger.set_high_water(a, h)
-            self.store.set_state("risk", res.state.to_dict())
-            self.store.set_state("risk_blind", blind)
+                book.ledger.set_high_water(a, h)
+            book.store.set_state("risk", res.state.to_dict())
+            if loud:
+                book.store.set_state("risk_blind", blind)
             for kind, data in res.events:
                 if kind != "risk_blind":
-                    self.store.audit(f"risk_{kind}", **data)
-        for kind, data in res.events:
-            if kind != "risk_blind":
-                self.alerts.event(f"risk_{kind}", data)
+                    book.store.audit(f"risk_{kind}", **data)
+        if loud:
+            for kind, data in res.events:
+                if kind != "risk_blind":
+                    self.alerts.event(f"risk_{kind}", data)
         for intent in res.intents:
-            await self.executor.submit(intent)
+            await book.executor.submit(intent)
         return res
 
     # -- equity ------------------------------------------------------------------------------
@@ -500,7 +639,35 @@ class Engine:
             logger.warning("after-tax equity unknown: %s", e)
             after_tax = None
         self.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail, after_tax)
-        return f"equity ${v.equity:,.2f}" + (f" (after tax, est. ${after_tax:,.2f})" if after_tax is not None else "")
+        out = f"equity ${v.equity:,.2f}" + (f" (after tax, est. ${after_tax:,.2f})" if after_tax is not None else "")
+        if self.shadow is not None:
+            out += await self._shadow_equity(now, bench)
+        return out
+
+    async def _shadow_equity(self, now: float, bench) -> str:
+        """The shadow's point at the same moment, priced by the same rules and with the same
+        benchmarks."""
+        b = self.shadow
+        try:
+            marks = await self.market.prices(b.ledger.positions())
+            behind = sorted(s for s in corporate.unapplied(b.store, trade_day(now)) if s in b.ledger.positions())
+            v = None if behind else b.ledger.value(marks)
+            if v is None:
+                logger.warning("shadow book: equity unknown (%s)", f"{', '.join(behind)} not applied" if behind
+                               else "a holding has no price")
+                return "; shadow equity unknown"
+            detail = {"weights": v.weights, "basis": {s: m.basis for s, m in marks.items()}}
+            if v.receivable:
+                detail["receivable"] = v.receivable
+            try:
+                after_tax = tax.after_tax_equity(self.cfg, b.store, marks, v.equity, trade_day(now))
+            except ValueError:
+                after_tax = None
+            b.store.add_equity(now, v.equity, v.cash, v.invested, bench["spy"], bench["60_40"], detail, after_tax)
+            return f"; formula-sized shadow ${v.equity:,.2f}"
+        except Exception as e:
+            logger.exception("shadow book: equity point failed")
+            return f"; shadow equity failed ({type(e).__name__})"
 
     # -- the watcher -------------------------------------------------------------------------
     def watch_state(self) -> watcher.WatchState:
@@ -712,9 +879,16 @@ class Engine:
             held.append(f"{s} {v.weights.get(s, 0) * 100:.1f}% of book ({cls}; avg cost ${float(p.avg_cost):,.2f}, "
                         f"now ${q.bid:,.2f} {q.basis}, {(q.bid / float(p.avg_cost) - 1) * 100:+.1f}%)")
         lines.append("  HOLDINGS: " + ("; ".join(held) or "none"))
-        lines.append("  Risk-model target weight at conviction 1.0 (BUYs only top up to this): " + ", ".join(
-            f"{s} {gate.target_weight(cfg, s, av.asset_class, av.vol, av.regime, 1.0) * 100:.1f}%"
-            for s, av in snap.assets.items() if av.asset_class and s != u.cash_symbol))
+        if self.model_sizing:
+            # The chair sizes: it gets the facts (vol and regime are in the packet, the caps
+            # below), never the formula's targets, which it would anchor on.
+            lines.append("  SIZING: the chair sets each BUY's weight_pct (the % of equity the whole position "
+                         "should be after the BUY; the desk only tops up to it). Code clamps it to the caps "
+                         "below, gross exposure, the stock sleeve and the cash on hand.")
+        else:
+            lines.append("  Risk-model target weight at conviction 1.0 (BUYs only top up to this): " + ", ".join(
+                f"{s} {gate.target_weight(cfg, s, av.asset_class, av.vol, av.regime, 1.0) * 100:.1f}%"
+                for s, av in snap.assets.items() if av.asset_class and s != u.cash_symbol))
         caps = ", ".join(f"{c} {p:.0f}%" for c, p in sorted(cfg.caps.by_class.items()))
         over = ", ".join(f"{s} {p:.0f}%" for s, p in sorted(cfg.caps.by_symbol.items()))
         # "Per position" is spelled out because the council read "bond_etf 25%" as a limit on
@@ -801,8 +975,10 @@ class Engine:
     def _order_outcome(self, intent: Intent, status: str, verdict: Verdict) -> None:
         """Executor hook: the risk gate's answer to a council trade goes into its live message."""
         prog = self._awaiting_orders.get(intent.ref) if intent.origin == "council" else None
+        sizing = ({"by": verdict.sized_by, "target_pct": verdict.target_pct,
+                   "formula_pct": verdict.code_target_pct} if verdict.sized_by else None)
         if prog is None or not prog.order(intent.asset, status, verdict.reason, verdict.notional,
-                                          verdict.price, verdict.notes):
+                                          verdict.price, verdict.notes, sizing):
             return
         if prog.final:
             del self._awaiting_orders[prog.id]
@@ -864,12 +1040,21 @@ class Engine:
             self._awaiting_orders[prog.id] = prog
         self._publish(prog)
         if execute:
-            for t in rec["trades"]:
-                await self.executor.submit(Intent(
-                    origin="council", asset=t["asset"], side=t["action"],
-                    conviction=t.get("conviction", 0.0), fraction=t.get("fraction_of_position", 0.0),
-                    reason=t["reasoning"], ref=rec["id"], idem_key=f"council:{rec['id']}:{t['asset']}",
-                    created_ts=snap.as_of))
+            intents = [Intent(
+                origin="council", asset=t["asset"], side=t["action"],
+                conviction=t.get("conviction", 0.0), fraction=t.get("fraction_of_position", 0.0),
+                weight=t.get("weight_pct", 0.0) / 100.0,
+                reason=t["reasoning"], ref=rec["id"], idem_key=f"council:{rec['id']}:{t['asset']}",
+                created_ts=snap.as_of) for t in rec["trades"]]
+            if self.model_sizing and any(i.weight for i in intents) and self.shadow is None:
+                # Before the first BUY the chair sizes, the books are the same: copy it now.
+                v = self.ledger.value({s: a.price for s, a in snap.assets.items() if a.price is not None})
+                self._ensure_shadow(snap.as_of, v.equity if v is not None else None)
+            for i in intents:
+                await self.executor.submit(i)
+            if self.shadow is not None:
+                for i in intents:  # the same decision, sized by the formula from the same conviction
+                    await self.shadow.executor.submit(dataclasses.replace(i, weight=0.0))
         self.alerts.event("meeting", {"id": rec["id"], "status": rec["status"],
                                       "summary": (rec["decision"] or {}).get("summary", ""),
                                       "trades": rec["trades"], "dropped": rec["dropped"],
@@ -1190,6 +1375,7 @@ class Engine:
         self.store.audit("engine_start", dry_run=self.kill.engaged, unclean_previous_exit=unclean,
                          previous_alarms=previous, pid=os.getpid())
         code, why = 0, ""
+        self._running = True
         try:
             async with self.alerts.running():
                 self.alerts.event("engine_start", {"dry_run": self.kill.engaged, "unclean_previous_exit": unclean,
@@ -1208,6 +1394,12 @@ class Engine:
                     self.apply_corporate_actions()
                 except Exception:
                     logger.exception("corporate actions at start-up; the jobs task keeps trying")
+                try:
+                    self._shadow_corporate_actions()
+                except Exception:
+                    logger.exception("shadow book: corporate actions at start-up")
+                if self.shadow is not None:
+                    self._shadow_task = asyncio.create_task(self.shadow.executor.run(), name="shadow-executor")
                 core = [
                     asyncio.create_task(self.executor.run(), name="executor"),
                     asyncio.create_task(self._every("market", e.market_interval_sec, self.market_tick), name="market"),
@@ -1237,6 +1429,12 @@ class Engine:
                         await asyncio.wait_for(self.executor.queue.join(), timeout=30)
                     except asyncio.TimeoutError:
                         logger.warning("executor queue did not drain in 30s")
+                if self._shadow_task is not None:
+                    try:
+                        await asyncio.wait_for(self.shadow.executor.queue.join(), timeout=30)
+                    except asyncio.TimeoutError:
+                        logger.warning("shadow book: executor queue did not drain in 30s")
+                    aux.append(self._shadow_task)
                 if self._review_task is not None:
                     aux.append(self._review_task)
                 for t in (*core, *aux, stopper):
@@ -1248,6 +1446,7 @@ class Engine:
                 self.store.audit("engine_stop", code=code, why=why)
                 self.alerts.event("engine_stop", {"code": code, "why": why})
         finally:
+            self._running = False
             restore_signals(undo)
         logger.info("engine stopped %s", "cleanly" if code == 0 else f"with exit code {code}")
         return code

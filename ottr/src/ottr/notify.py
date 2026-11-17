@@ -98,7 +98,9 @@ def _dur(sec: float) -> str:
 
 def _trade(t: dict) -> str:
     if t.get("action") == "BUY":
-        return f"BUY {t.get('asset')} (conviction {float(t.get('conviction') or 0):.2f})"
+        # weight_pct: the chair sized it (model sizing), to that % of equity.
+        size = f"to {float(t['weight_pct']):.1f}% of equity, " if t.get("weight_pct") else ""
+        return f"BUY {t.get('asset')} ({size}conviction {float(t.get('conviction') or 0):.2f})"
     return f"SELL {t.get('asset')} ({float(t.get('fraction_of_position') or 0) * 100:.0f}% of the position)"
 
 
@@ -162,10 +164,14 @@ def _live_outcome(o: Optional[dict], d: dict) -> str:
     st, why = o.get("status"), str(o.get("reason") or "").replace("_", " ")
     notes = "; ".join(o.get("notes") or [])
     detail = f"{why} ({clip(notes, 120)})" if notes else why
+    sz = o.get("sizing") or {}
+    # What the chair's size came to after the caps, beside what the formula would have bought.
+    sized = (f", {float(sz.get('target_pct') or 0):.1f}% of equity (the formula: "
+             f"{float(sz.get('formula_pct') or 0):.1f}%)" if sz.get("by") == "model" else "")
     if st == "filled":
-        return f"filled {_usd(o.get('notional') or 0)} @ {float(o.get('price') or 0):,.6g}"
+        return f"filled {_usd(o.get('notional') or 0)} @ {float(o.get('price') or 0):,.6g}{sized}"
     if st == "dry_run":
-        return f"dry run, would fill {_usd(o.get('notional') or 0)} @ {float(o.get('price') or 0):,.6g}"
+        return f"dry run, would fill {_usd(o.get('notional') or 0)} @ {float(o.get('price') or 0):,.6g}{sized}"
     if st == "duplicate":
         return f"already decided ({clip(notes or why, 120)})"
     if st == "error":
@@ -223,7 +229,8 @@ def format_event(kind: str, d: dict) -> str:
         return (f"**{d['side']} {d['asset']}** {_usd(d['notional'])} @ {float(d['price']):,.6g} "
                 f"[{d['origin']}]{pnl}\n> {d.get('reason', '')}")
     if kind == "meeting":
-        trades = ", ".join(f"{t['action']} {t['asset']}" for t in d["trades"]) or "no trades"
+        trades = ", ".join(f"{t['action']} {t['asset']}" + (f" to {float(t['weight_pct']):.1f}%" if t.get("weight_pct") else "")
+                           for t in d["trades"]) or "no trades"
         dropped = "".join(f"\n- dropped {x['trade']['action']} {x['trade']['asset']}: {x['why']}"
                           for x in d.get("dropped", []))
         called = (f"\n{_called_label(d.get('called_by'))}: {clip(no_em_dash(d['called']), 300)}"
@@ -313,6 +320,11 @@ def format_event(kind: str, d: dict) -> str:
             return f"**{label} failed to start** ({d['error']}); the supervisor retries in {d['delay']}."
         return (f"**{label} exited** with code {d['rc']} after {d['runtime']}; the supervisor "
                 f"restarts it in {d['delay']}.{tail}")
+    if kind == "shadow_forked":
+        eq = d.get("equity")
+        return ("**Model sizing starts**: the chair sizes the council's BUYs from now on. A shadow book "
+                f"copied from this one{f' at {_usd(eq)}' if eq is not None else ''} takes the same decisions "
+                "sized by the formula, so the two can be compared (`ottr scorecard`).")
     if kind == "kill_switch":
         why = f" ({d['reason']})" if d.get("reason") else ""
         if d["engaged"]:

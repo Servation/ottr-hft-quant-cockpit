@@ -58,7 +58,7 @@ async def test_every_lookup_is_one_keyless_get(engine_api, lookups):
     assert all("authorization" not in h for _, _, h, _ in engine_api.requests)
     assert {p for _, p, _, _ in engine_api.requests} == {
         "/api/meetings/m-1", "/api/meetings", "/api/fills", "/api/audit", "/api/equity", "/api/council",
-        "/api/screen", "/api/universe", "/api/health", "/api/meeting-call"}
+        "/api/screen", "/api/universe", "/api/health", "/api/meeting-call", "/api/sizing"}
 
 
 def test_the_tool_definitions():

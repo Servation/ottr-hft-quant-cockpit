@@ -27,6 +27,8 @@ def _trade(t: Dict[str, Any]) -> Dict[str, Any]:
     out = {"action": t.get("action"), "asset": t.get("asset"), "outcome": None}
     if t.get("action") == "BUY":
         out["conviction"] = t.get("conviction")
+        if t.get("weight_pct"):  # the chair sized it (model sizing)
+            out["weight_pct"] = t["weight_pct"]
     else:
         out["fraction_of_position"] = t.get("fraction_of_position")
     return out
@@ -136,8 +138,9 @@ class MeetingProgress:
                 who["status"] = "stopped"
 
     def order(self, asset: str, status: str, reason: str = "", notional: float = 0.0,
-              price: float = 0.0, notes: Iterable[str] = ()) -> bool:
-        """Record the executor's outcome for this meeting's trade on `asset`.
+              price: float = 0.0, notes: Iterable[str] = (), sizing: Optional[Dict[str, Any]] = None) -> bool:
+        """Record the executor's outcome for this meeting's trade on `asset`. `sizing`: for
+        an approved BUY, who sized it and to what ({by, target_pct, formula_pct}).
 
         Returns False when no trade of this meeting is waiting on that asset. Once every
         trade has an outcome the meeting is done.
@@ -145,7 +148,7 @@ class MeetingProgress:
         for t in self.trades:
             if t["asset"] == asset and t["outcome"] is None:
                 t["outcome"] = {"status": status, "reason": reason, "notional": notional,
-                                "price": price, "notes": list(notes)}
+                                "price": price, "notes": list(notes), "sizing": sizing}
                 if self.phase == "orders" and all(x["outcome"] is not None for x in self.trades):
                     self.phase = "done"
                 return True

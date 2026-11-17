@@ -127,6 +127,11 @@ def _book(ctx: DeskContext, now: float) -> List[str]:
     if bm.get("spy_hold") is not None or bm.get("sixty_forty") is not None:
         lines.append(f"BENCHMARKS (same starting equity, dividends reinvested): SPY buy-and-hold "
                      f"{usd(bm.get('spy_hold'))} | 60/40 SPY/IEF rebalanced monthly {usd(bm.get('sixty_forty'))}")
+    sz = b.get("sizing")
+    if sz:
+        lines.append(f"SIZING: the chair sizes the council's BUYs; a shadow book takes the same decisions sized by "
+                     f"the formula: chair {usd(sz.get('chair_equity'))} vs formula {usd(sz.get('formula_equity'))} "
+                     f"since {et(sz.get('since'))} ({sz.get('sessions')} closes)")
     m = b.get("market")
     if m:
         s = m.get("session") or {}

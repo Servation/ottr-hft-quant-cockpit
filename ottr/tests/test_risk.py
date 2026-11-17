@@ -155,6 +155,86 @@ def test_an_expired_decision_or_a_caller_sized_order_is_refused(cfg):
     assert gate.evaluate(sized, ctx(cfg)).reason == "sized_by_caller"
 
 
+# ---- model sizing: the chair's weight, inside the caps ----------------------------------------
+def weighed(weight, asset="TLT", conviction=0.5, origin="council", side="BUY"):
+    """A BUY the chair sized: the position should be `weight` of equity."""
+    return Intent(origin=origin, asset=asset, side=side, conviction=conviction if side == "BUY" else 0.0,
+                  fraction=1.0 if side == "SELL" else 0.0, weight=weight, idem_key="k", created_ts=OPEN)
+
+
+def test_the_chairs_weight_sizes_the_buy_not_the_formula(cfg):
+    v = gate.evaluate(weighed(0.20), ctx(cfg, vol=0.10, regime="CHOPPY"))
+    assert v.approved and v.notional == pytest.approx(2000.0, rel=0.01)
+    assert (v.sized_by, v.target_pct, v.code_target_pct) == ("model", 20.0, 1.875)  # 15% x 0.5 x 0.25
+    assert "the chair asked 20.00%, the formula 1.88%" in v.notes[0]
+    code = gate.evaluate(buy(conviction=0.5), ctx(cfg, vol=0.10, regime="CHOPPY"))  # the same call, unweighted
+    assert code.approved and code.notional == pytest.approx(187.5, rel=0.01)
+    assert (code.sized_by, code.target_pct, code.code_target_pct) == ("code", 1.875, 1.875)
+    assert "the chair asked" not in code.notes[0]
+
+
+@pytest.mark.parametrize("asset,weight,kw,cap", [
+    ("SLV", 0.30, {"price": 30.0, "vol": 0.20}, 10.0),                              # symbol cap
+    ("EEM", 0.50, {"price": 45.0, "vol": 0.15}, 15.0),                              # symbol cap
+    ("NVDA", 0.50, {"price": 180.0, "vol": 0.40, "earnings_sessions": 30}, 8.0),    # stock cap
+    ("SPY", 1.00, {"price": 600.0, "vol": 0.15}, 25.0),                             # max_position_pct
+])
+def test_the_caps_clamp_the_chairs_weight(cfg, asset, weight, kw, cap):
+    v = gate.evaluate(weighed(weight, asset), ctx(cfg, asset=asset, valuation=val(equity=10000.0), **kw))
+    assert v.target_pct == cap and v.sized_by == "model"
+    assert v.approved and v.notional <= cap * 100 + 0.01
+
+
+def test_with_no_vol_the_chair_gets_no_more_than_the_formula(cfg):
+    """The desk can't judge an unknown vol's risk: the formula counts it as high and sizes
+    small, and the chair's weight can't go past that."""
+    for missing in (None, 0.0):
+        v = gate.evaluate(weighed(0.20, conviction=1.0), ctx(cfg, vol=missing))
+        assert v.sized_by == "model" and v.target_pct == v.code_target_pct < 20.0
+    small = gate.evaluate(weighed(0.015, conviction=1.0), ctx(cfg, vol=None))      # under the formula: kept
+    assert small.approved and small.target_pct == 1.5 < small.code_target_pct
+
+
+def test_the_limits_past_the_target_still_bind_a_weighted_buy(cfg):
+    big = gate.evaluate(weighed(0.25), ctx(cfg, vol=0.10, valuation=val(equity=100000)))
+    assert big.approved and big.notional <= cfg.trading.max_trade_usd and "binding: max_trade_usd" in big.notes
+    some_room = val(values={"SPY": 8700.0})                            # $300 of room under the 90% limit
+    v = gate.evaluate(weighed(0.25), ctx(cfg, valuation=some_room))
+    assert v.approved and v.notional <= 300.0 and "binding: max_gross_pct" in v.notes
+    unsettled = val(cash=5000, values={"IEF": 5000.0})
+    assert gate.evaluate(weighed(0.25), ctx(cfg, valuation=unsettled, bp=150)).reason == "sized_below_min_by_buying_power"
+    assert gate.evaluate(weighed(0.25), ctx(cfg, halted=True)).reason == "halted"
+
+
+def test_a_weight_tops_a_position_up_but_never_sells_it_down(cfg):
+    held = val(values={"TLT": 1500.0})
+    assert gate.evaluate(weighed(0.10), ctx(cfg, valuation=held)).reason == "at_or_above_target"
+    v = gate.evaluate(weighed(0.20), ctx(cfg, valuation=held))
+    assert v.approved and v.notional == pytest.approx(500.0, rel=0.02)
+
+
+@pytest.mark.parametrize("intent", [
+    weighed(0.10, side="SELL"),                       # a council SELL
+    weighed(0.10, origin="stop", side="SELL"),        # a protective sale
+    weighed(0.10, origin="operator"),                 # anything but the council
+    weighed(1.5),                                     # more than the whole book
+    weighed(-0.1),
+    weighed(float("nan")),
+    weighed(float("inf")),
+])
+def test_only_a_council_buy_carries_a_weight_in_range(cfg, intent):
+    side = intent.side
+    v = gate.evaluate(intent, ctx(cfg, side=side, position=pos() if side == "SELL" else None))
+    assert not v.approved and v.reason == "bad_weight"
+
+
+def test_a_sweep_cannot_carry_a_weight(cfg):
+    sweep = Intent(origin="sweep", asset=cfg.universe.cash_symbol, side="BUY", usd=500.0, weight=0.5,
+                   idem_key="k", created_ts=OPEN)
+    v = gate.evaluate(sweep, ctx(cfg, asset=cfg.universe.cash_symbol, price=100.0, vol=0.005))
+    assert v.reason == "bad_weight"
+
+
 # ---- SELL ------------------------------------------------------------------------------------
 @pytest.mark.parametrize("kw", [{"halted": True}, {"cooldown_until": OPEN + 999}, {"risk_event_since_intent": True},
                                 {"member": None}, {"member": Member("TLT", "bond_etf", SUNSET)},

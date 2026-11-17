@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Mapping, Optional, Protocol, Tuple
+from typing import Iterable, Mapping, Optional, Protocol, Tuple
 
 from ottr.broker.account import buying_power
 from ottr.broker.base import Order
@@ -64,8 +64,8 @@ class Market(Protocol):
     async def quote(self, symbol: str) -> Tuple[Optional[Quote], str]:
         """A fresh quote that passed the sanity check, or (None, why not)."""
 
-    async def marks(self) -> Mapping[str, Quote]:
-        """A price for every held symbol, to value the book (None-safe: missing = unknown)."""
+    async def prices(self, symbols: Iterable[str]) -> Mapping[str, Quote]:
+        """A price for each symbol that has one, to value a book (missing = unknown)."""
 
     async def vol_regime(self, symbol: str) -> Tuple[Optional[float], str]:
         """Annualized vol (252 trading days) and TRENDING / CHOPPY / UNKNOWN."""
@@ -88,15 +88,21 @@ class Desk:
                  "limit_not_marketable", "needs_cash", "corporate_action_unapplied")
 
     def __init__(self, cfg, store: Store, ledger: Ledger, market: Market, broker: SimBroker,
-                 members: Mapping[str, Member], events: Events, clock: Clock = SYSTEM) -> None:
+                 members: Mapping[str, Member], events: Events, clock: Clock = SYSTEM,
+                 market_store: Optional[Store] = None) -> None:
+        """`store` holds the book (its fills, orders and risk state); `market_store` holds
+        what the engine learns about the market (how often a stock's quote was usable),
+        and is the same store except for the shadow book (`engine/shadow.py`)."""
         self.cfg, self.store, self.ledger, self.market = cfg, store, ledger, market
         self.broker, self.members, self.events, self.clock = broker, members, events, clock
+        self.market_store = market_store or store
 
     async def context(self, intent: Intent) -> gate.GateContext:
         now = self.clock.time()
         cal = self.market.calendar
         quote, problem = await self.market.quote(intent.asset)
-        marks = dict(await self.market.marks())
+        # This book's holdings: the shadow's can differ from the live book's.
+        marks = dict(await self.market.prices(self.ledger.positions()))
         if quote is not None:
             marks[intent.asset] = quote
         valuation = self.ledger.value(marks)
@@ -114,7 +120,7 @@ class Desk:
             unapplied = next((f"{s}: {why}" for s, why in sorted(behind.items()) if s in positions), None)
         poor = None
         if intent.side == "BUY" and member is not None and member.asset_class == gate.STOCK:
-            poor = quality.unreliable(self.store, cal, [intent.asset], now, self.cfg.screen).get(intent.asset)
+            poor = quality.unreliable(self.market_store, cal, [intent.asset], now, self.cfg.screen).get(intent.asset)
         return gate.GateContext(
             cfg=self.cfg, now=now, market=cal.state_at(now), member=member,
             quote=quote, quote_problem=problem,

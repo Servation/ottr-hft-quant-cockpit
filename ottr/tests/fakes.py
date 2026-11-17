@@ -189,24 +189,27 @@ def debate_reply(answers: Dict[str, Tuple[str, float]]) -> dict:
                        for a, (s, c) in answers.items()]}
 
 
-def council_for(cfg, analyst_replies, chair_reply, universe=None, round2=None):
+def council_for(cfg, analyst_replies, chair_reply, universe=None, round2=None, model_sizing=False):
     """Scripted analysts claude, gpt and gemini (in that order). With `round2` (one reply or
-    exception each, same order) the council holds round 2."""
+    exception each, same order) the council holds round 2. `model_sizing`: the chair sizes
+    its BUYs (its trades carry weight_pct)."""
     second = list(round2 or [])
     analysts = {n: ScriptedModel(n, [r, *second[i:i + 1]])
                 for i, (n, r) in enumerate(zip(("claude", "gpt", "gemini"), analyst_replies))}
     return Council(analysts, ScriptedModel("chair", [chair_reply]), list(universe or cfg.core),
-                   min_analysts=2, max_trades=3, debate=round2 is not None)
+                   min_analysts=2, max_trades=3, debate=round2 is not None, model_sizing=model_sizing)
 
 
-def buy_council(cfg, asset: str = "TLT", conviction: float = 0.7, round2=None):
+def buy_council(cfg, asset: str = "TLT", conviction: float = 0.7, round2=None, weight_pct: Optional[float] = None):
     """A council whose analysts back `asset` (claude and gpt BUY, gemini HOLD) and whose
-    chair buys it."""
+    chair buys it. With `weight_pct` the chair sizes the BUY (model sizing)."""
     u = list(cfg.core)
     reps = [analyst_reply(u, {asset: ("BUY", 0.8)}), analyst_reply(u, {asset: ("BUY", 0.6)}), analyst_reply(u)]
-    chair = {"summary": f"buy {asset.lower()}", "dissent_notes": "",
-             "trades": [{"action": "BUY", "asset": asset, "conviction": conviction, "reasoning": "trend"}]}
-    return council_for(cfg, reps, chair, round2=round2)
+    trade = {"action": "BUY", "asset": asset, "conviction": conviction, "reasoning": "trend"}
+    if weight_pct is not None:
+        trade["weight_pct"] = weight_pct
+    chair = {"summary": f"buy {asset.lower()}", "dissent_notes": "", "trades": [trade]}
+    return council_for(cfg, reps, chair, round2=round2, model_sizing=weight_pct is not None)
 
 
 class LiveRecorder:
@@ -337,6 +340,7 @@ class FakeEngineApi:
             "/api/universe": {"members": [{"asset": "TLT", "class": "bond_etf", "cap_pct": 25.0}],
                               "cash_symbol": "SGOV", "reference": ["SPY"], "satellites_max": 6,
                               "sleeve_pct": 30.0, "satellites": []},
+            "/api/sizing": {"sizer": "model", "comparison": None},
         }
         # One meeting in full, as GET /api/meetings/{id} returns it (the listing's view plus the packet).
         self.data["/api/meetings/m-1"] = {**self.data["/api/meetings"]["meetings"][0],

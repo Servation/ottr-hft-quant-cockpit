@@ -230,3 +230,52 @@ def test_round_two_must_answer_exactly_the_split_assets():
                      ({"assets": [{"asset": "SPY", "stance": "BUY", "conviction": 1.5, "reply": "x"}]}, "outside 0..1")):
         with pytest.raises(SchemaError, match=why):
             v(bad)
+
+
+# ---- model sizing: the chair gives each BUY a weight ----------------------------------------
+def test_a_sized_chair_must_weigh_each_buy_and_never_name_dollars():
+    sized, unsized = chair_validator(U, max_trades=2, sized=True), chair_validator(U, max_trades=2)
+    buy = {"action": "BUY", "asset": "TLT", "conviction": 0.6, "weight_pct": 12.5, "reasoning": "r"}
+    sell = {"action": "SELL", "asset": "SPY", "fraction_of_position": 0.5, "reasoning": "r"}
+    out = sized({"summary": "s", "trades": [buy, sell]})["trades"]
+    assert out[0]["weight_pct"] == 12.5 and "weight_pct" not in out[1]
+    assert "weight_pct" not in unsized({"summary": "s", "trades": [buy]})["trades"][0]   # code sizes: ignored
+    for bad in (None, 0, -5, 100.5, "lots", True, float("nan"), float("inf")):
+        t = dict(buy, weight_pct=bad) if bad is not None else {k: v for k, v in buy.items() if k != "weight_pct"}
+        with pytest.raises(SchemaError, match="weight_pct"):
+            sized({"summary": "s", "trades": [t]})
+    for money in ({"usd_amount": 500}, {"quantity": 3}):
+        with pytest.raises(SchemaError, match="no dollar amounts or share counts; size a BUY with weight_pct"):
+            sized({"summary": "s", "trades": [dict(buy, **money)]})
+
+
+def test_the_prompts_say_who_sizes():
+    from ottr.council.council import analyst_prompt, chair_prompt
+    tally = compute_tally({}, U)
+    sized = chair_prompt("ctx", {}, tally, U, 3, model_sizing=True)
+    assert "You size the BUYs" in sized and '"weight_pct": 0-100' in sized and "clamps weight_pct" in sized
+    code = chair_prompt("ctx", {}, tally, U, 3)
+    assert "the risk model sizes it" in code and "weight_pct" not in code
+    assert "The chair sizes positions" in analyst_prompt("ctx", "", U, model_sizing=True)
+    assert "set by the desk's risk model" in analyst_prompt("ctx", "", U)
+
+
+async def test_a_sized_chairs_weight_reaches_the_record():
+    chair = ScriptedModel("claude", [{"summary": "s", "trades": [
+        {"action": "BUY", "asset": "SPY", "conviction": 0.6, "weight_pct": 9, "reasoning": "r"}]}])
+    rec = await Council(_analysts(), chair, U, model_sizing=True).run("ctx", held=set())
+    assert rec["sizer"] == "model" and rec["trades"][0]["weight_pct"] == 9.0
+    assert "You size the BUYs" in chair.prompts[0]
+    plain = await Council(_analysts(), ScriptedModel("claude", [{"summary": "s", "trades": []}]), U).run(
+        "ctx", held=set())
+    assert plain["sizer"] == "code"
+
+
+async def test_a_sized_chair_that_forgets_the_weight_gets_one_repair():
+    """A BUY without weight_pct fails validation; the repair round asks again and a good
+    answer is kept (the same rule as any other schema error)."""
+    trade = {"action": "BUY", "asset": "SPY", "conviction": 0.6, "reasoning": "r"}   # the analysts back SPY
+    chair = ScriptedModel("claude", [{"summary": "s", "trades": [trade]},
+                                     {"summary": "s", "trades": [dict(trade, weight_pct=7)]}])
+    rec = await Council(_analysts(), chair, U, model_sizing=True).run("ctx", held=set())
+    assert rec["trades"][0]["weight_pct"] == 7.0 and len(chair.prompts) == 2
